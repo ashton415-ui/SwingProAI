@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-golf-green: #4ADE80;
+    --color-golf-dark: #0F110C;
+    --color-golf-surface: #1C1F18;
+    --color-golf-header: #161812;
+  }
+
+  body {
+    background-color: #0F110C;
+    color: #f3f4f6;
+    font-family: 'Space Grotesk', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+}
