@@ -1,45 +1,49 @@
 export type ViewAngle = "face_on" | "down_the_line";
-export type SwingStatus = "pending" | "processing" | "complete" | "failed";
+export type SwingVideoStatus = "pending" | "uploaded" | "processing" | "complete" | "failed";
 export type SubscriptionStatus = "active" | "trialing" | "past_due" | "canceled" | "none";
 export type SubscriptionTier = "par" | "birdie" | "eagle" | "none";
 
+// Matches actual public.users table
 export interface User {
   id: string;
-  email: string;
+  email: string | null;
   full_name: string | null;
-  avatar_url: string | null;
+  handicap_index: number | null;
   stripe_customer_id: string | null;
   subscription_status: SubscriptionStatus;
   subscription_tier: SubscriptionTier;
   created_at: string;
-  updated_at: string;
 }
 
+// Matches actual public.swing_videos table
 export interface SwingVideo {
   id: string;
   user_id: string;
-  storage_path: string;
-  duration_sec: number | null;
-  club_type: string | null;
-  status: SwingStatus;
+  title: string | null;
+  video_url: string;
+  storage_path: string | null;
+  club: string | null;
+  original_filename: string | null;
+  file_size: number | null;
+  mime_type: string | null;
+  status: SwingVideoStatus;
+  recorded_at: string | null;
   created_at: string;
 }
 
+// Matches actual public.swing_analysis table
 export interface SwingAnalysis {
   id: string;
   swing_video_id: string;
   user_id: string;
-  hip_rotation_deg: number | null;
-  shoulder_rotation_deg: number | null;
-  spine_angle_deg: number | null;
-  wrist_hinge_deg: number | null;
+  status: string;
   tempo_ratio: number | null;
-  swing_plane_deg: number | null;
-  summary: string | null;
-  suggestions: string[] | null;
-  raw_result: Record<string, unknown> | null;
+  swing_speed_mph: number | null;
+  score: number | null;
+  feedback: string | null;
+  metrics: Record<string, unknown> | null; // jsonb — biomechanics breakdown
   created_at: string;
-  // joined
+  // joined relation
   swing_video?: SwingVideo;
 }
 

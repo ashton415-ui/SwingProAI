@@ -11,7 +11,7 @@ export default async function DashboardPage() {
 
   const { data: swings } = await supabase
     .from("swing_analysis")
-    .select("*, swing_video:swing_videos(club_type, status, created_at)")
+    .select("*, swing_video:swing_videos(club, status, created_at)")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(10) as { data: SwingAnalysis[] | null };
@@ -20,8 +20,8 @@ export default async function DashboardPage() {
   const avgTempo = swings?.length
     ? (swings.reduce((s, a) => s + (a.tempo_ratio ?? 0), 0) / swings.length).toFixed(1)
     : null;
-  const avgSpine = swings?.length
-    ? (swings.reduce((s, a) => s + (a.spine_angle_deg ?? 0), 0) / swings.length).toFixed(1)
+  const avgScore = swings?.length
+    ? (swings.reduce((s, a) => s + (a.score ?? 0), 0) / swings.length).toFixed(0)
     : null;
 
   return (
@@ -72,16 +72,16 @@ export default async function DashboardPage() {
 
         <div className="bg-golf-surface p-6 rounded-4xl border border-white/5">
           <p className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-            <Activity size={10} /> Avg Spine Angle
+            <Activity size={10} /> Avg Swing Score
           </p>
           <h4 className="text-5xl font-mono font-black italic tracking-tighter text-white">
-            {avgSpine ? `${avgSpine}°` : "—"}
+            {avgScore ?? "—"}
           </h4>
           <div className="w-full bg-white/5 h-1 rounded-full mt-4 overflow-hidden">
-            {avgSpine && (
+            {avgScore && (
               <div
                 className="h-full bg-golf-green"
-                style={{ width: `${Math.min((parseFloat(avgSpine) / 45) * 100, 100)}%` }}
+                style={{ width: `${Math.min(parseInt(avgScore), 100)}%` }}
               />
             )}
           </div>
@@ -102,9 +102,15 @@ export default async function DashboardPage() {
         </div>
 
         {!swings || swings.length === 0 ? (
-          <div className="py-20 text-center text-gray-700 font-mono text-[10px] uppercase tracking-[0.3em] italic">
-            <Zap size={32} className="mx-auto mb-4 opacity-10" />
-            Telemetry Array Empty
+          <div className="py-20 text-center text-gray-700 font-mono text-[10px] uppercase tracking-[0.3em] italic flex flex-col items-center gap-4">
+            <Zap size={32} className="opacity-10" />
+            <p>Telemetry Array Empty</p>
+            <Link
+              href="/analyze"
+              className="px-5 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all"
+            >
+              Upload First Swing
+            </Link>
           </div>
         ) : (
           <table className="w-full text-left">
@@ -112,8 +118,8 @@ export default async function DashboardPage() {
               <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
                 <th className="px-8 py-4">Timestamp</th>
                 <th className="px-8 py-4">Club</th>
+                <th className="px-8 py-4">Score</th>
                 <th className="px-8 py-4">Tempo</th>
-                <th className="px-8 py-4">Spine Angle</th>
                 <th className="px-8 py-4">Status</th>
                 <th className="px-8 py-4"></th>
               </tr>
@@ -133,8 +139,19 @@ export default async function DashboardPage() {
                   </td>
                   <td className="px-8 py-5">
                     <span className="text-sm font-bold text-gray-200 capitalize">
-                      {swing.swing_video?.club_type ?? "Unknown"}
+                      {swing.swing_video?.club ?? "Unknown"}
                     </span>
+                  </td>
+                  <td className="px-8 py-5">
+                    <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${
+                      (swing.score ?? 0) >= 80
+                        ? "text-golf-green border-golf-green/20"
+                        : (swing.score ?? 0) >= 60
+                        ? "text-yellow-400 border-yellow-400/20"
+                        : "text-red-400 border-red-500/20"
+                    }`}>
+                      {swing.score != null ? `${swing.score} pts` : "—"}
+                    </div>
                   </td>
                   <td className="px-8 py-5">
                     <span className="text-xs font-mono font-black text-white">
@@ -142,13 +159,8 @@ export default async function DashboardPage() {
                     </span>
                   </td>
                   <td className="px-8 py-5">
-                    <span className="text-xs font-mono font-black text-white">
-                      {swing.spine_angle_deg ? `${swing.spine_angle_deg}°` : "—"}
-                    </span>
-                  </td>
-                  <td className="px-8 py-5">
                     <span className="px-3 py-1 bg-white/5 text-gray-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-white/5">
-                      {swing.swing_video?.status ?? "complete"}
+                      {swing.status ?? "pending"}
                     </span>
                   </td>
                   <td className="px-8 py-5 text-right">
