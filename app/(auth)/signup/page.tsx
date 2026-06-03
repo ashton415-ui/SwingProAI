@@ -39,8 +39,9 @@ export default function SignupPage() {
 
       <div className="relative w-full max-w-md">
         <div className="flex flex-col items-center mb-10">
-          <div className="w-20 h-20 bg-golf-green/10 border border-golf-green/20 rounded-3xl flex items-center justify-center mb-5">
-            <span className="text-golf-green text-3xl font-black italic">SP</span>
+          <div className="w-20 h-20 bg-golf-green/5 border border-golf-green/20 rounded-3xl overflow-hidden mb-5">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/swingproai_logo.png" alt="SwingProAI" className="w-full h-full object-contain p-1" />
           </div>
           <h1 className="text-3xl font-black italic tracking-tighter text-white uppercase">
             SWING<span className="text-golf-green">PRO</span>AI

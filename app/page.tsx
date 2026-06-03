@@ -11,8 +11,9 @@ export default function HomePage() {
       {/* Nav */}
       <nav className="relative z-10 flex items-center justify-between px-8 py-6 border-b border-white/5 bg-golf-header/80 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-golf-green/10 border border-golf-green/20 rounded-xl flex items-center justify-center">
-            <span className="text-golf-green text-sm font-black italic">SP</span>
+          <div className="w-9 h-9 rounded-xl overflow-hidden border border-golf-green/20">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/swingproai_logo.png" alt="SwingProAI" className="w-full h-full object-contain" />
           </div>
           <span className="text-white font-black italic tracking-tighter uppercase text-lg">
             Swing<span className="text-golf-green">Pro</span>AI
@@ -39,9 +40,14 @@ export default function HomePage() {
         <div className="max-w-4xl mx-auto">
           {/* Logo mark */}
           <div className="flex justify-center mb-10">
-            <div className="w-48 h-48 bg-golf-green/5 rounded-6xl border border-golf-green/20 flex items-center justify-center relative group">
+            <div className="w-52 h-52 bg-golf-green/5 rounded-6xl border border-golf-green/20 flex items-center justify-center relative group overflow-hidden shadow-[0_0_60px_rgba(74,222,128,0.1)]">
               <div className="absolute inset-0 bg-golf-green/10 blur-3xl rounded-full opacity-0 group-hover:opacity-40 transition-opacity" />
-              <span className="text-golf-green text-8xl font-black italic relative z-10">SP</span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/swingproai_logo.png"
+                alt="SwingProAI"
+                className="w-full h-full object-contain relative z-10 p-3"
+              />
             </div>
           </div>
 

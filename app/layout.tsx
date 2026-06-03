@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Space_Grotesk } from "next/font/google";
 import "./globals.css";
+import SplashScreen from "@/components/SplashScreen";
 
 const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
@@ -21,6 +22,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={spaceGrotesk.variable}>
       <body className="bg-golf-dark text-gray-100 font-display antialiased">
+        <SplashScreen />
         {children}
       </body>
     </html>

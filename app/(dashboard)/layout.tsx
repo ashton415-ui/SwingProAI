@@ -35,8 +35,9 @@ export default async function DashboardLayout({
         {/* Logo */}
         <div className="px-6 py-7 border-b border-white/5">
           <Link href="/" className="flex items-center gap-3">
-            <div className="w-9 h-9 bg-golf-green/10 border border-golf-green/20 rounded-xl flex items-center justify-center shrink-0">
-              <span className="text-golf-green text-sm font-black italic">SP</span>
+            <div className="w-9 h-9 bg-golf-green/5 border border-golf-green/20 rounded-xl overflow-hidden shrink-0">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/swingproai_logo.png" alt="SwingProAI" className="w-full h-full object-contain" />
             </div>
             <span className="text-white font-black italic tracking-tighter uppercase text-lg leading-none">
               Swing<span className="text-golf-green">Pro</span>AI
