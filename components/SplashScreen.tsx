@@ -1,18 +1,33 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function SplashScreen() {
   const [visible, setVisible] = useState(true);
   const [fading, setFading] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    // Start fade-out after video plays (3.5s) then unmount
-    const fadeTimer = setTimeout(() => setFading(true), 3500);
-    const hideTimer = setTimeout(() => setVisible(false), 4200);
+    const video = videoRef.current;
+    if (!video) return;
+
+    const onEnded = () => {
+      // Video finished — start fade then unmount
+      setFading(true);
+      setTimeout(() => setVisible(false), 800);
+    };
+
+    video.addEventListener("ended", onEnded);
+
+    // Safety fallback: if video fails to load or stalls, dismiss after 12s
+    const fallback = setTimeout(() => {
+      setFading(true);
+      setTimeout(() => setVisible(false), 800);
+    }, 12000);
+
     return () => {
-      clearTimeout(fadeTimer);
-      clearTimeout(hideTimer);
+      video.removeEventListener("ended", onEnded);
+      clearTimeout(fallback);
     };
   }, []);
 
@@ -21,16 +36,17 @@ export default function SplashScreen() {
   return (
     <div
       className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-golf-dark transition-opacity duration-700 ${
-        fading ? "opacity-0" : "opacity-100"
+        fading ? "opacity-0 pointer-events-none" : "opacity-100"
       }`}
     >
       {/* Subtle grid */}
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808008_1px,transparent_1px),linear-gradient(to_bottom,#80808008_1px,transparent_1px)] bg-[size:40px_40px]" />
 
       <div className="relative z-10 flex flex-col items-center gap-6">
-        {/* Animated logo video */}
-        <div className="w-56 h-56 rounded-[3rem] overflow-hidden border border-golf-green/20 shadow-[0_0_60px_rgba(74,222,128,0.15)]">
+        {/* Animated logo video — larger */}
+        <div className="w-72 h-72 rounded-[3rem] overflow-hidden border border-golf-green/20 shadow-[0_0_80px_rgba(74,222,128,0.2)]">
           <video
+            ref={videoRef}
             src="/logo-animation.mp4"
             autoPlay
             muted
@@ -48,24 +64,7 @@ export default function SplashScreen() {
             Golf Swing Analyzer
           </p>
         </div>
-
-        {/* Loading bar */}
-        <div className="w-40 h-0.5 bg-white/5 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-golf-green rounded-full"
-            style={{
-              animation: "loadbar 3.5s ease-out forwards",
-            }}
-          />
-        </div>
       </div>
-
-      <style jsx>{`
-        @keyframes loadbar {
-          from { width: 0% }
-          to { width: 100% }
-        }
-      `}</style>
     </div>
   );
 }
