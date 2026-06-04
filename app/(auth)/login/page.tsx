@@ -1,6 +1,5 @@
-import { loginAction } from "./actions";
 import Link from "next/link";
-import { LogIn, Zap } from "lucide-react";
+import { Zap } from "lucide-react";
 
 export default function LoginPage({
   searchParams,
@@ -26,7 +25,7 @@ export default function LoginPage({
         </div>
 
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-8">
-          <form action={loginAction} className="space-y-5">
+          <form method="POST" action="/api/auth/login" className="space-y-5">
             <div>
               <label className="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                 Email Address
@@ -35,7 +34,7 @@ export default function LoginPage({
                 type="email"
                 name="email"
                 required
-                className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 focus:ring-1 focus:ring-golf-green/20 transition-all text-sm"
+                className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 text-sm"
                 placeholder="you@example.com"
               />
             </div>
@@ -47,22 +46,21 @@ export default function LoginPage({
                 type="password"
                 name="password"
                 required
-                className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 focus:ring-1 focus:ring-golf-green/20 transition-all text-sm"
+                className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 text-sm"
                 placeholder="••••••••"
               />
             </div>
 
             {searchParams?.error && (
               <div className="text-red-400 text-xs font-bold bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">
-                {searchParams.error}
+                {decodeURIComponent(searchParams.error)}
               </div>
             )}
 
             <button
               type="submit"
-              className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] transition-all flex items-center justify-center gap-2 text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]"
+              className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] transition-all text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]"
             >
-              <LogIn size={16} />
               Start Session
             </button>
           </form>
