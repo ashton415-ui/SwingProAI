@@ -1,34 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { createClient } from "@/utils/supabase/client";
+import { signupAction } from "./actions";
 import Link from "next/link";
 import { UserPlus, Zap } from "lucide-react";
 
 export default function SignupPage() {
-  const supabase = createClient();
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  async function handleSignup(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSubmit(formData: FormData) {
     setLoading(true);
     setError(null);
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { full_name: fullName },
-      },
-    });
-    if (error) {
-      setError(error.message);
+    const result = await signupAction(formData);
+    if (result?.error) {
+      setError(result.error);
       setLoading(false);
-    } else {
-      window.location.replace("/dashboard");
     }
   }
 
@@ -51,16 +38,15 @@ export default function SignupPage() {
         </div>
 
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-8">
-          <form onSubmit={handleSignup} className="space-y-5">
+          <form action={handleSubmit} className="space-y-5">
             <div>
               <label className="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                 Full Name
               </label>
               <input
                 type="text"
+                name="fullName"
                 required
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
                 className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 focus:ring-1 focus:ring-golf-green/20 transition-all text-sm"
                 placeholder="John Smith"
               />
@@ -71,9 +57,8 @@ export default function SignupPage() {
               </label>
               <input
                 type="email"
+                name="email"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
                 className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 focus:ring-1 focus:ring-golf-green/20 transition-all text-sm"
                 placeholder="you@example.com"
               />
@@ -84,19 +69,18 @@ export default function SignupPage() {
               </label>
               <input
                 type="password"
+                name="password"
                 required
                 minLength={8}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-4 py-3.5 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-golf-green/50 focus:ring-1 focus:ring-golf-green/20 transition-all text-sm"
                 placeholder="Min. 8 characters"
               />
             </div>
 
             {error && (
-              <p className="text-red-400 text-xs font-bold bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">
+              <div className="text-red-400 text-xs font-bold bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">
                 {error}
-              </p>
+              </div>
             )}
 
             <button
