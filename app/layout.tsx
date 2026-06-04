@@ -10,6 +10,10 @@ const spaceGrotesk = Space_Grotesk({
 export const metadata: Metadata = {
   title: "SwingProAI — AI-Powered Golf Analysis",
   description: "Professional-grade golf analytics powered by AI. Fix your swing in real-time.",
+  icons: {
+    icon: "/swingproai_logo.png",
+    apple: "/swingproai_logo.png",
+  },
 };
 
 export default function RootLayout({
