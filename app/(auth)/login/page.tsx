@@ -2,12 +2,10 @@
 
 import { useState } from "react";
 import { createClient } from "@/utils/supabase/client";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { LogIn, Zap } from "lucide-react";
 
 export default function LoginPage() {
-  const router = useRouter();
   const supabase = createClient();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,8 +21,7 @@ export default function LoginPage() {
       setError(error.message);
       setLoading(false);
     } else {
-      router.refresh();
-      router.push("/dashboard");
+      window.location.replace("/dashboard");
     }
   }
 
