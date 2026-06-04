@@ -6,7 +6,8 @@ import { Target, TrendingUp, Trophy, Calendar, ChevronRight, Zap, Filter, Activi
 
 export default async function DashboardPage() {
   const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { session } } = await supabase.auth.getSession();
+  const user = session?.user ?? null;
   if (!user) redirect("/login");
 
   const { data: swings } = await supabase
