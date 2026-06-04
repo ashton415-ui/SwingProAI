@@ -289,7 +289,7 @@ export default function AnalyzePage() {
 
               {/* Biomechanics overlay */}
               {result && activeOverlay && (result.metrics as Record<string, OverlayMetric | number>)[activeOverlay] && (() => {
-                const m = (result.metrics as Record<string, OverlayMetric>)[activeOverlay];
+                const m = (result.metrics as unknown as Record<string, OverlayMetric>)[activeOverlay];
                 if (!m?.overlay) return null;
                 return (
                   <svg className="absolute inset-0 w-full h-full pointer-events-none z-10" viewBox="0 0 100 100" preserveAspectRatio="none">
