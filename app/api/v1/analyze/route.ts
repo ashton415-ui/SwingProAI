@@ -18,6 +18,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing videoData or mimeType" }, { status: 400 });
   }
 
+  // Gemini inline_data limit is ~20MB (base64 adds ~33% overhead)
+  const estimatedBytes = (videoData.length / 4) * 3;
+  const estimatedMB = estimatedBytes / (1024 * 1024);
+  console.log(`Video size estimate: ${estimatedMB.toFixed(1)} MB`);
+  if (estimatedMB > 18) {
+    return NextResponse.json(
+      { error: `Video too large for AI analysis (${estimatedMB.toFixed(1)} MB). Trim to a shorter segment (under 10 seconds).` },
+      { status: 413 }
+    );
+  }
+
   const prompt = isAdvanced
     ? `You are a professional golf coach performing a FORENSIC BIOMECHANICAL ANALYSIS.
 Analyze the kinetic chain, hip rotation, shoulder separation, wrist hinge, and head stability.
