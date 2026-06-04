@@ -19,7 +19,7 @@ export default function LoginPage() {
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
     const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
     if (error) {
       setError(error.message);
@@ -27,8 +27,11 @@ export default function LoginPage() {
       return;
     }
 
-    // Session cookies are now set by the browser client.
-    // Hard navigate so the server picks them up fresh.
+    // Explicitly set the session to ensure cookies are written before navigating
+    if (data.session) {
+      await supabase.auth.setSession(data.session);
+    }
+
     window.location.href = "/dashboard";
   }
 

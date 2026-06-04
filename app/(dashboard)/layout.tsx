@@ -1,6 +1,8 @@
 import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+
+export const dynamic = "force-dynamic";
 import { LogOut, LayoutDashboard, TrendingUp, CreditCard, Target, Zap } from "lucide-react";
 
 export default async function DashboardLayout({

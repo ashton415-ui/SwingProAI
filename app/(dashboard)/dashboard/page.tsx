@@ -1,4 +1,6 @@
 import { createClient } from "@/utils/supabase/server";
+
+export const dynamic = "force-dynamic";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import type { SwingAnalysis } from "@/types/database";
