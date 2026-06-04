@@ -6,8 +6,9 @@ export async function POST(req: NextRequest) {
   const email = formData.get("email") as string;
   const password = formData.get("password") as string;
 
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? req.nextUrl.origin;
-  const response = NextResponse.redirect(`${siteUrl}/dashboard`, { status: 303 });
+  // Always use the request's own origin so cookies/redirects match the domain
+  const dashboardUrl = new URL("/dashboard", req.url);
+  const response = NextResponse.redirect(dashboardUrl, { status: 303 });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -29,10 +30,9 @@ export async function POST(req: NextRequest) {
   const { error } = await supabase.auth.signInWithPassword({ email, password });
 
   if (error) {
-    return NextResponse.redirect(
-      `${siteUrl}/login?error=${encodeURIComponent(error.message)}`,
-      { status: 303 }
-    );
+    const loginUrl = new URL("/login", req.url);
+    loginUrl.searchParams.set("error", error.message);
+    return NextResponse.redirect(loginUrl, { status: 303 });
   }
 
   return response;
