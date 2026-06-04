@@ -1,4 +1,4 @@
-import { createClient } from "@/utils/supabase/server";
+import { createClient, getServerSession } from "@/utils/supabase/server";
 
 export const dynamic = "force-dynamic";
 import { redirect } from "next/navigation";
@@ -8,9 +8,9 @@ import { Target, TrendingUp, Trophy, Calendar, ChevronRight, Zap, Filter, Activi
 
 export default async function DashboardPage() {
   const supabase = await createClient();
-  const { data: { session } } = await supabase.auth.getSession();
-  const user = session?.user ?? null;
-  if (!user) redirect("/login");
+  const session = await getServerSession();
+  if (!session) redirect("/login");
+  const user = session.user;
 
   const { data: swings } = await supabase
     .from("swing_analysis")

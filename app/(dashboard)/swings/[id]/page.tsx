@@ -1,4 +1,4 @@
-import { createClient } from "@/utils/supabase/server";
+import { createClient, getServerSession } from "@/utils/supabase/server";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle, AlertTriangle, Zap, Clock } from "lucide-react";
@@ -9,9 +9,9 @@ export default async function SwingDetailPage({
   params: { id: string };
 }) {
   const supabase = await createClient();
-  const { data: { session } } = await supabase.auth.getSession();
-  const user = session?.user ?? null;
-  if (!user) redirect("/login");
+  const session = await getServerSession();
+  if (!session) redirect("/login");
+  const user = session.user;
 
   const { data: swing } = await supabase
     .from("swing_analysis")

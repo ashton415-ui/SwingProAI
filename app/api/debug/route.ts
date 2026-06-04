@@ -1,29 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/utils/supabase/server";
+import { NextResponse } from "next/server";
+import { getServerSession } from "@/utils/supabase/server";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(req: NextRequest) {
-  const allCookies = req.cookies.getAll();
-  const supabaseCookie = allCookies.find(c => c.name === "sb-atlmnqispyzhsahahpjy-auth-token");
-
-  const supabase = await createClient();
-
-  const sessionResult = await supabase.auth.getSession();
-  const userResult = await supabase.auth.getUser();
+export async function GET() {
+  const session = await getServerSession();
 
   return NextResponse.json({
-    cookieCount: allCookies.length,
-    supabaseCookieFound: !!supabaseCookie,
-    getSession: {
-      hasSession: !!sessionResult.data.session,
-      error: sessionResult.error?.message ?? null,
-      userId: sessionResult.data.session?.user?.id ?? null,
-    },
-    getUser: {
-      hasUser: !!userResult.data.user,
-      error: userResult.error?.message ?? null,
-      userId: userResult.data.user?.id ?? null,
-    },
+    hasSession: !!session,
+    userId: session?.user?.id ?? null,
+    email: session?.user?.email ?? null,
+    expiresAt: session?.expires_at ?? null,
   });
 }
