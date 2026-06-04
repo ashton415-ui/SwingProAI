@@ -36,7 +36,7 @@ export default function LoginPage() {
       data.session.refresh_token
     );
 
-    if (result?.error) {
+    if ("error" in result && result.error) {
       setError(result.error);
       setLoading(false);
       return;
