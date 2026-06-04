@@ -42,8 +42,10 @@ export default function LoginPage() {
       return;
     }
 
-    // Hard navigation so the browser sends the new session cookies
-    // in the full HTTP request to /dashboard
+    // Check what cookies the browser has after the server action
+    console.log("Cookies after server action:", document.cookie);
+    console.log("LocalStorage keys:", Object.keys(localStorage));
+
     window.location.href = "/dashboard";
   }
 
