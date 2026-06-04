@@ -13,7 +13,7 @@ export function createClient() {
             return { name: name.trim(), value: rest.join("=") };
           });
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: { name: string; value: string; options?: { maxAge?: number; expires?: Date | string; secure?: boolean; path?: string; sameSite?: string } }[]) {
           if (typeof document === "undefined") return;
           cookiesToSet.forEach(({ name, value, options }) => {
             let cookie = `${name}=${value}; Path=/; SameSite=Lax`;
