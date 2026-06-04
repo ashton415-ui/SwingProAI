@@ -311,56 +311,77 @@ export default function AnalyzePage() {
                 </span>
               </div>
 
-              {/* Scrub timeline */}
-              <div>
-                <label className="block text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">Scrub</label>
-                <input
-                  type="range" min={0} max={duration} step={0.033}
-                  value={currentTime}
-                  onChange={handleScrub}
-                  className="w-full h-1 appearance-none bg-white/10 rounded-full outline-none"
+              {/* Visual timeline bar */}
+              <div className="relative h-8 rounded-xl overflow-hidden bg-white/5 border border-white/10">
+                {/* Excluded region - left */}
+                <div className="absolute inset-y-0 left-0 bg-black/40"
+                  style={{ width: `${(trimStart / duration) * 100}%` }} />
+                {/* Selected region */}
+                <div className="absolute inset-y-0 bg-golf-green/20 border-x-2 border-golf-green"
                   style={{
-                    background: `linear-gradient(to right, #4ADE80 ${(currentTime / duration) * 100}%, rgba(255,255,255,0.1) ${(currentTime / duration) * 100}%)`
-                  }}
+                    left: `${(trimStart / duration) * 100}%`,
+                    width: `${((trimEnd - trimStart) / duration) * 100}%`,
+                  }} />
+                {/* Excluded region - right */}
+                <div className="absolute inset-y-0 right-0 bg-black/40"
+                  style={{ width: `${((duration - trimEnd) / duration) * 100}%` }} />
+                {/* Playhead */}
+                <div className="absolute inset-y-0 w-0.5 bg-white/70"
+                  style={{ left: `${(currentTime / duration) * 100}%` }} />
+              </div>
+
+              {/* Scrub */}
+              <div>
+                <div className="flex justify-between mb-1">
+                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">Scrub</label>
+                  <span className="text-[9px] font-mono text-gray-400">{formatTime(currentTime)}</span>
+                </div>
+                <input type="range" min={0} max={duration} step={0.033}
+                  value={currentTime} onChange={handleScrub}
+                  className="scrub-range"
+                  style={{ background: `linear-gradient(to right, #4ADE80 ${(currentTime/duration)*100}%, rgba(255,255,255,0.1) ${(currentTime/duration)*100}%)` }}
                 />
-                <div className="flex justify-between text-[9px] font-mono text-gray-600 mt-1">
-                  <span>{formatTime(0)}</span>
-                  <span>{formatTime(duration)}</span>
+                <div className="flex justify-between text-[9px] font-mono text-gray-700 mt-0.5">
+                  <span>0:00.0</span><span>{formatTime(duration)}</span>
                 </div>
               </div>
 
               {/* Trim start */}
               <div>
-                <div className="flex justify-between mb-2">
-                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">Trim Start</label>
+                <div className="flex justify-between mb-1">
+                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">
+                    ◀ Trim Start
+                  </label>
                   <span className="text-[9px] font-mono text-golf-green">{formatTime(trimStart)}</span>
                 </div>
-                <input
-                  type="range" min={0} max={duration} step={0.033}
-                  value={trimStart}
-                  onChange={handleTrimStart}
-                  className="w-full h-1 appearance-none rounded-full outline-none"
-                  style={{
-                    background: `linear-gradient(to right, rgba(255,255,255,0.1) ${(trimStart / duration) * 100}%, #4ADE80 ${(trimStart / duration) * 100}%, #4ADE80 ${(trimEnd / duration) * 100}%, rgba(255,255,255,0.1) ${(trimEnd / duration) * 100}%)`
-                  }}
-                />
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 right-0 flex items-center">
+                    <div className="w-full h-1.5 rounded-full"
+                      style={{ background: `linear-gradient(to right, rgba(255,255,255,0.05) ${(trimStart/duration)*100}%, #4ADE80 ${(trimStart/duration)*100}%, #4ADE80 ${(trimEnd/duration)*100}%, rgba(255,255,255,0.05) ${(trimEnd/duration)*100}%)` }} />
+                  </div>
+                  <input type="range" min={0} max={duration} step={0.033}
+                    value={trimStart} onChange={handleTrimStart}
+                    className="trim-range relative z-10" />
+                </div>
               </div>
 
               {/* Trim end */}
               <div>
-                <div className="flex justify-between mb-2">
-                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">Trim End</label>
+                <div className="flex justify-between mb-1">
+                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">
+                    Trim End ▶
+                  </label>
                   <span className="text-[9px] font-mono text-golf-green">{formatTime(trimEnd)}</span>
                 </div>
-                <input
-                  type="range" min={0} max={duration} step={0.033}
-                  value={trimEnd}
-                  onChange={handleTrimEnd}
-                  className="w-full h-1 appearance-none rounded-full outline-none"
-                  style={{
-                    background: `linear-gradient(to right, rgba(255,255,255,0.1) ${(trimStart / duration) * 100}%, #4ADE80 ${(trimStart / duration) * 100}%, #4ADE80 ${(trimEnd / duration) * 100}%, rgba(255,255,255,0.1) ${(trimEnd / duration) * 100}%)`
-                  }}
-                />
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 right-0 flex items-center">
+                    <div className="w-full h-1.5 rounded-full"
+                      style={{ background: `linear-gradient(to right, rgba(255,255,255,0.05) ${(trimStart/duration)*100}%, #4ADE80 ${(trimStart/duration)*100}%, #4ADE80 ${(trimEnd/duration)*100}%, rgba(255,255,255,0.05) ${(trimEnd/duration)*100}%)` }} />
+                  </div>
+                  <input type="range" min={0} max={duration} step={0.033}
+                    value={trimEnd} onChange={handleTrimEnd}
+                    className="trim-range relative z-10" />
+                </div>
               </div>
             </div>
           )}

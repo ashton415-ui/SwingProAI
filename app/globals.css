@@ -4,6 +4,65 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Scrub bar ── */
+.scrub-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: pointer;
+}
+.scrub-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #4ADE80;
+  border: 2px solid white;
+  box-shadow: 0 0 8px rgba(74,222,128,0.6);
+  cursor: pointer;
+}
+.scrub-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #4ADE80;
+  border: 2px solid white;
+  cursor: pointer;
+}
+
+/* ── Trim handles ── */
+.trim-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: ew-resize;
+  background: transparent;
+}
+.trim-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 32px;
+  border-radius: 4px;
+  background: #4ADE80;
+  border: 2px solid white;
+  box-shadow: 0 0 12px rgba(74,222,128,0.5);
+  cursor: ew-resize;
+}
+.trim-range::-moz-range-thumb {
+  width: 16px;
+  height: 32px;
+  border-radius: 4px;
+  background: #4ADE80;
+  border: 2px solid white;
+  cursor: ew-resize;
+}
+
 @layer base {
   :root {
     --color-golf-green: #4ADE80;
