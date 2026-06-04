@@ -30,7 +30,8 @@ export default function SignupPage() {
       setError(error.message);
       setLoading(false);
     } else {
-      window.location.href = "/dashboard";
+      router.refresh();
+      router.push("/dashboard");
     }
   }
 

@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { ArrowRight, Target, Trophy, Zap, Play } from "lucide-react";
+import SplashScreen from "@/components/SplashScreen";
 
 export default function HomePage() {
   return (
     <div className="relative bg-golf-dark text-white min-h-screen">
+      <SplashScreen />
       {/* Grid background */}
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808010_1px,transparent_1px),linear-gradient(to_bottom,#80808010_1px,transparent_1px)] bg-[size:40px_40px]" />
       <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-golf-dark" />
