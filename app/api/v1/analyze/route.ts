@@ -49,7 +49,7 @@ ${isAdvanced ? `- Also include in metrics: wristHinge, hipRotation, shoulderRota
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -72,8 +72,8 @@ ${isAdvanced ? `- Also include in metrics: wristHinge, hipRotation, shoulderRota
 
     if (!response.ok) {
       const err = await response.text();
-      console.error("Gemini API error:", err);
-      return NextResponse.json({ error: "AI analysis failed" }, { status: 502 });
+      console.error("Gemini API error:", response.status, err);
+      return NextResponse.json({ error: `AI analysis failed (${response.status})`, detail: err }, { status: 502 });
     }
 
     const data = await response.json();
