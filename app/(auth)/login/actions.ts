@@ -2,7 +2,6 @@
 
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
 
 export async function setSessionAction(access_token: string, refresh_token: string) {
   const cookieStore = await cookies();
@@ -30,5 +29,7 @@ export async function setSessionAction(access_token: string, refresh_token: stri
     return { error: error.message };
   }
 
-  redirect("/dashboard");
+  // Return success — let the client do a hard navigation so
+  // cookies are included in the next full HTTP request
+  return { success: true };
 }

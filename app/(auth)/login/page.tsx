@@ -39,8 +39,12 @@ export default function LoginPage() {
     if (result?.error) {
       setError(result.error);
       setLoading(false);
+      return;
     }
-    // If no error, the server action called redirect() which navigates the page
+
+    // Hard navigation so the browser sends the new session cookies
+    // in the full HTTP request to /dashboard
+    window.location.href = "/dashboard";
   }
 
   return (
