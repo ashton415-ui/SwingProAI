@@ -1,24 +1,12 @@
-"use client";
-
-import { useState } from "react";
 import { loginAction } from "./actions";
 import Link from "next/link";
 import { LogIn, Zap } from "lucide-react";
 
-export default function LoginPage() {
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  async function handleSubmit(formData: FormData) {
-    setLoading(true);
-    setError(null);
-    const result = await loginAction(formData);
-    if (result?.error) {
-      setError(result.error);
-      setLoading(false);
-    }
-  }
-
+export default function LoginPage({
+  searchParams,
+}: {
+  searchParams: { error?: string };
+}) {
   return (
     <div className="min-h-screen bg-golf-dark flex items-center justify-center px-4">
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808008_1px,transparent_1px),linear-gradient(to_bottom,#80808008_1px,transparent_1px)] bg-[size:40px_40px]" />
@@ -38,7 +26,7 @@ export default function LoginPage() {
         </div>
 
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-8">
-          <form action={handleSubmit} className="space-y-5">
+          <form action={loginAction} className="space-y-5">
             <div>
               <label className="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                 Email Address
@@ -64,19 +52,18 @@ export default function LoginPage() {
               />
             </div>
 
-            {error && (
+            {searchParams?.error && (
               <div className="text-red-400 text-xs font-bold bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">
-                {error}
+                {searchParams.error}
               </div>
             )}
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] disabled:opacity-50 transition-all flex items-center justify-center gap-2 text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]"
+              className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] transition-all flex items-center justify-center gap-2 text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]"
             >
               <LogIn size={16} />
-              {loading ? "Authenticating…" : "Start Session"}
+              Start Session
             </button>
           </form>
 

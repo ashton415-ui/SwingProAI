@@ -8,11 +8,10 @@ export async function loginAction(formData: FormData) {
   const password = formData.get("password") as string;
 
   const supabase = await createClient();
-
   const { error } = await supabase.auth.signInWithPassword({ email, password });
 
   if (error) {
-    return { error: error.message };
+    redirect(`/login?error=${encodeURIComponent(error.message)}`);
   }
 
   redirect("/dashboard");
