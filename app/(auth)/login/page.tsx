@@ -1,11 +1,37 @@
+"use client";
+
+import { useState } from "react";
+import { createClient } from "@/utils/supabase/client";
 import Link from "next/link";
 import { Zap } from "lucide-react";
 
-export default function LoginPage({
-  searchParams,
-}: {
-  searchParams: { error?: string };
-}) {
+export default function LoginPage() {
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    const form = e.currentTarget;
+    const email = (form.elements.namedItem("email") as HTMLInputElement).value;
+    const password = (form.elements.namedItem("password") as HTMLInputElement).value;
+
+    const supabase = createClient();
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      setError(error.message);
+      setLoading(false);
+      return;
+    }
+
+    // Session cookies are now set by the browser client.
+    // Hard navigate so the server picks them up fresh.
+    window.location.href = "/dashboard";
+  }
+
   return (
     <div className="min-h-screen bg-golf-dark flex items-center justify-center px-4">
       <div className="absolute inset-0 bg-[linear-gradient(to_right,#80808008_1px,transparent_1px),linear-gradient(to_bottom,#80808008_1px,transparent_1px)] bg-[size:40px_40px]" />
@@ -25,7 +51,7 @@ export default function LoginPage({
         </div>
 
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-8">
-          <form method="POST" action="/api/auth/login" className="space-y-5">
+          <form onSubmit={handleSubmit} className="space-y-5">
             <div>
               <label className="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                 Email Address
@@ -51,17 +77,18 @@ export default function LoginPage({
               />
             </div>
 
-            {searchParams?.error && (
+            {error && (
               <div className="text-red-400 text-xs font-bold bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3">
-                {decodeURIComponent(searchParams.error)}
+                {error}
               </div>
             )}
 
             <button
               type="submit"
-              className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] transition-all text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]"
+              disabled={loading}
+              className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] disabled:opacity-60 transition-all text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]"
             >
-              Start Session
+              {loading ? "Authenticating…" : "Start Session"}
             </button>
           </form>
 

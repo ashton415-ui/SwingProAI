@@ -2,6 +2,8 @@ import { type CookieOptions, createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function middleware(request: NextRequest) {
+  // Refresh session cookies so they don't expire — no auth redirects here.
+  // Page-level server components handle auth checks and redirects.
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
@@ -25,37 +27,14 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  // Use getSession() — reads local cookie without a network call
-  const { data: { session } } = await supabase.auth.getSession();
-  const user = session?.user ?? null;
-
-  const isProtected =
-    request.nextUrl.pathname.startsWith("/dashboard") ||
-    request.nextUrl.pathname === "/analyze" ||
-    request.nextUrl.pathname === "/upgrade";
-
-  if (isProtected && !user) {
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-
-  const isAuthPage =
-    request.nextUrl.pathname === "/login" ||
-    request.nextUrl.pathname === "/signup";
-
-  if (isAuthPage && user) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
-  }
+  // Refresh the session if expired
+  await supabase.auth.getSession();
 
   return supabaseResponse;
 }
 
 export const config = {
   matcher: [
-    "/dashboard",
-    "/dashboard/:path*",
-    "/analyze",
-    "/upgrade",
-    "/login",
-    "/signup",
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
