@@ -1,460 +1,579 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  Upload, Target, CheckCircle2, AlertCircle, Loader2,
+  Play, Info, Maximize2, X, Activity, Zap, Trophy,
+} from "lucide-react";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { Upload, Video, X, CheckCircle, AlertCircle, Zap, Scissors, Play, Pause } from "lucide-react";
 
-const ALLOWED_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
-const MAX_SIZE_MB = 500;
-const BUCKET = "swing-videos";
-
-const CLUBS = [
-  "Driver", "3-Wood", "5-Wood", "2-Iron", "3-Iron", "4-Iron",
-  "5-Iron", "6-Iron", "7-Iron", "8-Iron", "9-Iron",
-  "Pitching Wedge", "Gap Wedge", "Sand Wedge", "Lob Wedge", "Putter",
-];
-
-type UploadState = "idle" | "preview" | "uploading" | "success" | "error";
-
-function getAccessTokenFromCookie(): string | null {
+// ─── Auth helper (reads session cookie set by our login flow) ──────────────────
+function getSessionFromCookie(): { access_token: string; user_id: string } | null {
   if (typeof document === "undefined") return null;
   try {
-    const cookieName = "sb-atlmnqispyzhsahahpjy-auth-token";
-    const match = document.cookie.split("; ").find((c) => c.startsWith(`${cookieName}=`));
+    const name = "sb-atlmnqispyzhsahahpjy-auth-token";
+    const match = document.cookie.split("; ").find((c) => c.startsWith(`${name}=`));
     if (!match) return null;
-    const raw = match.split("=").slice(1).join("=");
-    const session = JSON.parse(decodeURIComponent(raw));
-    return session?.access_token ?? null;
+    const parsed = JSON.parse(decodeURIComponent(match.split("=").slice(1).join("=")));
+    return { access_token: parsed.access_token, user_id: parsed.user?.id };
   } catch { return null; }
 }
 
-function getAuthenticatedClient(accessToken: string) {
+function getAuthClient() {
+  const s = getSessionFromCookie();
   return createSupabaseClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
-      global: { headers: { Authorization: `Bearer ${accessToken}` } },
+      global: { headers: s ? { Authorization: `Bearer ${s.access_token}` } : {} },
       auth: { persistSession: false, autoRefreshToken: false },
     }
   );
 }
 
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = (seconds % 60).toFixed(1).padStart(4, "0");
-  return `${m}:${s}`;
+// ─── Types ─────────────────────────────────────────────────────────────────────
+interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
+interface OverlayMetric { feedback: string; overlay: { x1: number; y1: number; x2: number; y2: number }; }
+interface AnalysisResult {
+  feedback: string; score: number; weakSpots: string[];
+  drills: SwingDrill[];
+  metrics: {
+    swingSpeed: number; ballSpeed: number; launchAngle: number; smashFactor: number;
+    wristHinge?: OverlayMetric; hipRotation?: OverlayMetric;
+    shoulderRotation?: OverlayMetric; headStability?: OverlayMetric;
+  };
 }
 
-export default function AnalyzePage() {
-  const router = useRouter();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+const BUCKET = "swing-videos";
+const MAX_FILE_MB = 250;
+const MAX_SEGMENT_SECONDS = 15;
 
+function formatYt(url: string) {
+  if (!url) return "";
+  if (url.includes("watch?v=")) return url.replace("watch?v=", "embed/");
+  if (url.includes("youtu.be/")) return `https://www.youtube.com/embed/${url.split("youtu.be/")[1]}`;
+  return url;
+}
+
+// ─── Component ─────────────────────────────────────────────────────────────────
+export default function AnalyzePage() {
   const [file, setFile] = useState<File | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [videoAspect, setVideoAspect] = useState<number | null>(null);
 
-  const [club, setClub] = useState("");
-  const [title, setTitle] = useState("");
-  const [dragOver, setDragOver] = useState(false);
-  const [uploadState, setUploadState] = useState<UploadState>("idle");
-  const [progress, setProgress] = useState(0);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isTrimming, setIsTrimming] = useState(false);
+  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isAdvanced, setIsAdvanced] = useState(false);
+  const [showProUpgrade, setShowProUpgrade] = useState(false);
+  const [activeDrillVideo, setActiveDrillVideo] = useState<string | null>(null);
+  const [activeOverlay, setActiveOverlay] = useState<string | null>(null);
 
-  // Create object URL for preview
-  useEffect(() => {
-    if (!file) { setVideoUrl(null); return; }
-    const url = URL.createObjectURL(file);
-    setVideoUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [file]);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Sync video playhead with trim range
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onTime = () => {
-      setCurrentTime(video.currentTime);
-      if (video.currentTime >= trimEnd && trimEnd > 0) {
-        video.pause();
-        video.currentTime = trimStart;
-        setIsPlaying(false);
-      }
-    };
-    const onLoaded = () => {
+    const onMeta = () => {
       setDuration(video.duration);
-      setTrimStart(0);
       setTrimEnd(video.duration);
+      setVideoAspect(video.videoWidth / video.videoHeight);
     };
+    const onTime = () => setCurrentTime(video.currentTime);
+    video.addEventListener("loadedmetadata", onMeta);
     video.addEventListener("timeupdate", onTime);
-    video.addEventListener("loadedmetadata", onLoaded);
-    video.addEventListener("pause", () => setIsPlaying(false));
-    video.addEventListener("play", () => setIsPlaying(true));
-    return () => {
-      video.removeEventListener("timeupdate", onTime);
-      video.removeEventListener("loadedmetadata", onLoaded);
-    };
-  }, [trimEnd, trimStart]);
-
-  const togglePlay = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (isPlaying) {
-      video.pause();
-    } else {
-      if (video.currentTime >= trimEnd || video.currentTime < trimStart) {
-        video.currentTime = trimStart;
-      }
-      video.play();
-    }
-  };
-
-  const handleScrub = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const t = parseFloat(e.target.value);
-    setCurrentTime(t);
-    if (videoRef.current) videoRef.current.currentTime = t;
-  };
-
-  const handleTrimStart = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = Math.min(parseFloat(e.target.value), trimEnd - 0.5);
-    setTrimStart(val);
-    if (videoRef.current) videoRef.current.currentTime = val;
-  };
-
-  const handleTrimEnd = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = Math.max(parseFloat(e.target.value), trimStart + 0.5);
-    setTrimEnd(val);
-  };
-
-  const validateFile = (f: File): string | null => {
-    if (!ALLOWED_TYPES.includes(f.type)) return "Invalid file type. Use .mp4, .mov, or .webm.";
-    if (f.size > MAX_SIZE_MB * 1024 * 1024) return `File too large. Max ${MAX_SIZE_MB}MB.`;
-    return null;
-  };
+    return () => { video.removeEventListener("loadedmetadata", onMeta); video.removeEventListener("timeupdate", onTime); };
+  }, [previewUrl]);
 
   const handleFile = useCallback((f: File) => {
-    const err = validateFile(f);
-    if (err) { setErrorMsg(err); setFile(null); return; }
-    setErrorMsg(null);
-    setFile(f);
-    setUploadState("preview");
-  }, []);
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    const f = e.dataTransfer.files[0];
-    if (f) handleFile(f);
-  }, [handleFile]);
-
-  const handleUpload = async () => {
-    if (!file) return;
-    setUploadState("uploading");
-    setProgress(0);
-    setErrorMsg(null);
-
-    const accessToken = getAccessTokenFromCookie();
-    if (!accessToken) {
-      setErrorMsg("Session expired. Please log in again.");
-      setUploadState("error");
+    if (f.size > MAX_FILE_MB * 1024 * 1024) {
+      setError(`Video too large (max ${MAX_FILE_MB}MB).`);
       return;
     }
+    setFile(f); setPreviewUrl(URL.createObjectURL(f));
+    setResult(null); setError(null); setVideoAspect(null);
+    setTrimStart(0); setTrimEnd(0); setDuration(0);
+  }, []);
 
-    const supabase = getAuthenticatedClient(accessToken);
-    const videoId = crypto.randomUUID();
-    const userId = (() => {
-      try { return JSON.parse(atob(accessToken.split(".")[1])).sub; }
-      catch { return "unknown"; }
-    })();
-    const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const storagePath = `${userId}/${videoId}/${safeFilename}`;
+  // ── Browser-side trim + compress (Canvas + MediaRecorder) ──────────────────
+  const getTrimmedBlob = async (): Promise<Blob> => {
+    const video = videoRef.current;
+    if (!video || !file) throw new Error("No video loaded");
 
-    const progressInterval = setInterval(() => {
-      setProgress((p) => Math.min(p + 3, 85));
-    }, 500);
+    // Skip transcode if already small and no trim needed
+    if (trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size < 18 * 1024 * 1024) {
+      return file;
+    }
+
+    setIsTrimming(true);
+
+    return new Promise((resolve) => {
+      try {
+        const aspect = video.videoWidth / video.videoHeight;
+        let w = aspect < 1 ? Math.round(848 * aspect) : 848;
+        let h = aspect < 1 ? 848 : Math.round(848 / aspect);
+        if (w % 2 !== 0) w--;
+        if (h % 2 !== 0) h--;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d", { alpha: false });
+        if (!ctx) { setIsTrimming(false); resolve(file); return; }
+
+        const stream = (canvas as any).captureStream?.(30);
+        if (!stream) { setIsTrimming(false); resolve(file); return; }
+
+        const recorder = new MediaRecorder(stream, {
+          mimeType: "video/webm",
+          videoBitsPerSecond: 800_000,
+        });
+        const chunks: BlobPart[] = [];
+        recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunks.push(e.data); };
+
+        let timeout: ReturnType<typeof setTimeout>;
+        let raf: number;
+
+        recorder.onstop = () => {
+          clearTimeout(timeout);
+          cancelAnimationFrame(raf);
+          setIsTrimming(false);
+          if (videoRef.current) { videoRef.current.playbackRate = 1; videoRef.current.currentTime = trimStart; }
+          resolve(new Blob(chunks, { type: "video/webm" }));
+        };
+
+        const drawFrame = () => {
+          if (video.paused || video.ended || video.currentTime > trimEnd) return;
+          ctx.drawImage(video, 0, 0, w, h);
+          raf = requestAnimationFrame(drawFrame);
+        };
+
+        video.currentTime = trimStart;
+        video.playbackRate = 2.0;
+        video.muted = true;
+
+        const onSeeked = () => {
+          video.removeEventListener("seeked", onSeeked);
+          video.play().then(() => {
+            recorder.start(100);
+            drawFrame();
+            const check = setInterval(() => {
+              if (video.currentTime >= trimEnd || video.ended) {
+                clearInterval(check); video.pause();
+                if (recorder.state !== "inactive") recorder.stop();
+              }
+            }, 50);
+            timeout = setTimeout(() => {
+              clearInterval(check);
+              if (recorder.state !== "inactive") recorder.stop();
+            }, ((trimEnd - trimStart) / 2.0) * 3000 + 4000);
+          }).catch(() => { setIsTrimming(false); resolve(file); });
+        };
+        video.addEventListener("seeked", onSeeked);
+      } catch { setIsTrimming(false); resolve(file); }
+    });
+  };
+
+  // ── Analysis flow ──────────────────────────────────────────────────────────
+  const startAnalysis = async () => {
+    if (!file) return;
+    if (trimEnd - trimStart > MAX_SEGMENT_SECONDS) {
+      setError(`Trim your segment to under ${MAX_SEGMENT_SECONDS}s for best results.`);
+      return;
+    }
+    setIsAnalyzing(true); setError(null);
 
     try {
-      const { error: uploadError } = await supabase.storage
-        .from(BUCKET)
-        .upload(storagePath, file, { contentType: file.type, upsert: false });
+      const blob = await getTrimmedBlob();
 
-      clearInterval(progressInterval);
-      if (uploadError) throw new Error(uploadError.message);
-
-      setProgress(95);
-
-      const res = await fetch("/api/v1/upload/complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          storagePath,
-          originalFilename: safeFilename,
-          fileSize: file.size,
-          mimeType: file.type,
-          club: club.toLowerCase().replace(/\s+/g, "-") || null,
-          title: title || null,
-          trimStart: Math.round(trimStart * 1000) / 1000,
-          trimEnd: Math.round(trimEnd * 1000) / 1000,
-        }),
+      // Convert to base64
+      const base64Data: string = await new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res((reader.result as string).split(",")[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(blob);
       });
 
-      if (!res.ok) throw new Error((await res.json()).error ?? "Failed to save");
-      setProgress(100);
-      setUploadState("success");
-    } catch (err) {
-      clearInterval(progressInterval);
-      setUploadState("error");
-      setErrorMsg(err instanceof Error ? err.message : "Upload failed.");
+      // Call our secure Gemini proxy
+      const analysisRes = await fetch("/api/v1/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoData: base64Data, mimeType: blob.type || "video/webm", isAdvanced }),
+      });
+
+      if (!analysisRes.ok) {
+        const err = await analysisRes.json();
+        throw new Error(err.error ?? "Analysis failed");
+      }
+
+      const analysis: AnalysisResult = await analysisRes.json();
+
+      // Save to Supabase (non-blocking — don't fail the UI if DB write fails)
+      try {
+        const session = getSessionFromCookie();
+        if (session) {
+          const supabase = getAuthClient();
+
+          // Upload video to Storage
+          const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+          const storagePath = `${session.user_id}/${crypto.randomUUID()}/${safeFilename}`;
+          const { error: uploadErr } = await supabase.storage
+            .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
+
+          if (!uploadErr) {
+            // Create swing_videos record
+            const { data: videoRow } = await supabase.from("swing_videos").insert({
+              user_id: session.user_id,
+              storage_path: storagePath, video_url: storagePath,
+              original_filename: safeFilename, file_size: blob.size,
+              mime_type: blob.type, trim_start: trimStart, trim_end: trimEnd, status: "uploaded",
+            }).select().single();
+
+            // Create swing_analysis record
+            if (videoRow) {
+              await supabase.from("swing_analysis").insert({
+                swing_video_id: videoRow.id, user_id: session.user_id,
+                score: analysis.score, feedback: analysis.feedback,
+                tempo_ratio: analysis.metrics.swingSpeed ? analysis.metrics.swingSpeed / 100 : null,
+                swing_speed_mph: analysis.metrics.swingSpeed,
+                status: "complete",
+                metrics: analysis.metrics,
+              });
+            }
+          }
+        }
+      } catch (dbErr) {
+        console.warn("DB save failed (non-fatal):", dbErr);
+      }
+
+      setResult(analysis);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Analysis failed.");
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
-  const reset = () => {
-    setFile(null); setVideoUrl(null); setClub(""); setTitle("");
-    setUploadState("idle"); setProgress(0); setErrorMsg(null);
-    setTrimStart(0); setTrimEnd(0); setDuration(0); setCurrentTime(0);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
+  const setTime = (t: number) => { if (videoRef.current) videoRef.current.currentTime = t; };
 
-  const trimDuration = trimEnd - trimStart;
-
+  // ─── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="max-w-3xl mx-auto px-6 py-10">
-      <div className="mb-10">
-        <h1 className="text-4xl font-black italic tracking-tighter text-white uppercase">Analyze Swing</h1>
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 mt-1">
-          Upload · Trim · Submit for AI Analysis
-        </p>
+    <div className="h-[calc(100vh-0px)] flex flex-col md:flex-row overflow-hidden">
+
+      {/* ── LEFT: Video workspace ── */}
+      <div className="w-full md:w-[600px] flex flex-col border-r border-white/10 bg-black flex-shrink-0 relative">
+
+        {!previewUrl ? (
+          <label className="flex-1 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors group p-8 text-center">
+            <input type="file" accept="video/*" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+            <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-golf-green/10 transition-colors">
+              <Upload className="w-10 h-10 text-gray-500 group-hover:text-golf-green transition-colors" />
+            </div>
+            <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">Import Swing Video</h3>
+            <p className="text-gray-500 text-sm max-w-xs mb-4">Up to {MAX_FILE_MB}MB — MP4, MOV, or WEBM</p>
+            <div className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-left max-w-xs">
+              <p className="text-[9px] text-golf-green font-black uppercase tracking-widest mb-1">Pro Tip</p>
+              <p className="text-[10px] text-gray-500">Use the trim handles in the timeline to isolate just the swing segment before analyzing.</p>
+            </div>
+          </label>
+        ) : (
+          <div className="flex-1 relative bg-[#050505] flex flex-col items-center justify-center overflow-hidden">
+            <div className="relative max-h-[75%] max-w-full flex items-center justify-center"
+              style={{ aspectRatio: videoAspect ?? "auto" }}>
+              <video ref={videoRef} src={previewUrl} className="max-h-full max-w-full object-contain" playsInline />
+
+              {/* Biomechanics overlay */}
+              {result && activeOverlay && (result.metrics as Record<string, OverlayMetric | number>)[activeOverlay] && (() => {
+                const m = (result.metrics as Record<string, OverlayMetric>)[activeOverlay];
+                if (!m?.overlay) return null;
+                return (
+                  <svg className="absolute inset-0 w-full h-full pointer-events-none z-10" viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <line x1={m.overlay.x1} y1={m.overlay.y1} x2={m.overlay.x2} y2={m.overlay.y2}
+                      stroke="#fbbf24" strokeWidth="0.8" strokeDasharray="2,1" opacity="0.9" />
+                  </svg>
+                );
+              })()}
+            </div>
+
+            {/* HUD telemetry overlay */}
+            {result && (
+              <div className="absolute top-4 left-4 z-30">
+                <div className="bg-black/70 backdrop-blur-md border border-white/10 px-5 py-3 rounded-2xl flex items-center gap-5 shadow-2xl">
+                  {[
+                    { label: "Swing Speed", value: `${result.metrics.swingSpeed}`, unit: "MPH", color: "text-white" },
+                    { label: "Ball Speed", value: `${result.metrics.ballSpeed}`, unit: "MPH", color: "text-golf-green" },
+                    { label: "Smash", value: result.metrics.smashFactor.toFixed(2), unit: "", color: "text-amber-400" },
+                  ].map((m, i) => (
+                    <div key={i} className="text-center">
+                      <p className="text-[8px] text-gray-500 font-black uppercase tracking-widest mb-0.5">{m.label}</p>
+                      <p className={`text-lg font-black italic ${m.color}`}>{m.value}<span className="text-[9px] text-gray-600 ml-0.5">{m.unit}</span></p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pro toggle */}
+            <div className="absolute top-4 right-4 z-40">
+              <button onClick={() => isAdvanced ? setIsAdvanced(false) : setShowProUpgrade(true)}
+                className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${
+                  isAdvanced ? "bg-amber-400 text-black" : "bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10"
+                }`}>
+                <Zap size={12} />
+                {isAdvanced ? "PRO ACTIVE" : "GET PRO"}
+              </button>
+            </div>
+
+            {/* Error banner */}
+            {error && (
+              <div className="absolute top-16 left-4 right-4 z-50">
+                <div className="bg-red-500/10 border border-red-500/40 backdrop-blur-xl p-4 rounded-xl flex items-start gap-3">
+                  <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+                  <p className="text-sm text-white">{error}</p>
+                  <button onClick={() => setError(null)} className="ml-auto text-gray-500 hover:text-white">
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Loading overlay */}
+            {(isAnalyzing || isTrimming) && (
+              <div className="absolute inset-0 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center text-white z-50">
+                <Loader2 className="w-14 h-14 animate-spin text-golf-green mb-6" />
+                <h3 className="text-2xl font-black italic tracking-tighter uppercase mb-2">
+                  {isTrimming ? "COMPRESSING CLIP" : "ANALYZING SWING"}
+                </h3>
+                <p className="text-gray-500 text-sm max-w-xs text-center">
+                  {isTrimming ? "Trimming and compressing video in-browser..." : "Gemini AI computing launch telemetry and biomechanics..."}
+                </p>
+              </div>
+            )}
+
+            {/* Action bar */}
+            {!isAnalyzing && !isTrimming && (
+              <div className="absolute bottom-4 left-4 right-4 z-40">
+                {!result ? (
+                  <button onClick={startAnalysis}
+                    className="w-full py-4 bg-golf-green text-golf-dark rounded-2xl font-black uppercase tracking-widest hover:bg-[#22C55E] transition-all flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(74,222,128,0.3)]">
+                    <Target size={18} />RUN ANALYZER
+                  </button>
+                ) : (
+                  <div className="bg-black/80 backdrop-blur-md border border-white/10 p-4 rounded-2xl flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <CheckCircle2 size={20} className="text-golf-green" />
+                      <div>
+                        <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest">Status</p>
+                        <p className="text-sm text-white font-bold">Analysis Complete</p>
+                      </div>
+                    </div>
+                    <button onClick={() => { setFile(null); setPreviewUrl(null); setResult(null); }}
+                      className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-bold text-white">
+                      NEW VIDEO
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Timeline Scrubber ── */}
+        <div className="h-28 bg-golf-header border-t border-white/10 px-6 flex flex-col justify-center">
+          {previewUrl && duration > 0 ? (
+            <>
+              <div className="flex justify-between text-[10px] font-mono font-black text-gray-500 mb-2">
+                <span>{trimStart.toFixed(2)}s</span>
+                <span className="text-golf-green">{(trimEnd - trimStart).toFixed(2)}s Selected</span>
+                <span>{trimEnd.toFixed(2)}s</span>
+              </div>
+              <div className="relative h-10 bg-gray-900 rounded-lg border border-white/5 flex items-center">
+                {/* Selected region */}
+                <div className="absolute h-full bg-golf-green/10 border-x-2 border-golf-green rounded-sm"
+                  style={{ left: `${(trimStart / duration) * 100}%`, width: `${((trimEnd - trimStart) / duration) * 100}%` }} />
+                {/* Playhead */}
+                <div className="absolute top-0 bottom-0 w-0.5 bg-white shadow-[0_0_8px_rgba(255,255,255,0.8)] z-20 pointer-events-none"
+                  style={{ left: `${(currentTime / duration) * 100}%` }} />
+                {/* Trim start slider */}
+                <input type="range" min={0} max={duration} step={0.01}
+                  value={trimStart} disabled={isAnalyzing || isTrimming}
+                  onChange={(e) => { const v = parseFloat(e.target.value); if (v < trimEnd - 0.2) { setTrimStart(v); setTime(v); } }}
+                  className="trim-slider absolute inset-0 w-full z-10" />
+                {/* Trim end slider */}
+                <input type="range" min={0} max={duration} step={0.01}
+                  value={trimEnd} disabled={isAnalyzing || isTrimming}
+                  onChange={(e) => { const v = parseFloat(e.target.value); if (v > trimStart + 0.2) { setTrimEnd(v); setTime(v); } }}
+                  className="trim-slider absolute inset-0 w-full z-10" />
+              </div>
+            </>
+          ) : (
+            <p className="text-center text-[10px] text-gray-700 font-black uppercase tracking-widest">Timeline Scrubber Idle</p>
+          )}
+        </div>
       </div>
 
-      {/* Success */}
-      {uploadState === "success" && (
-        <div className="bg-golf-green/10 border border-golf-green/30 rounded-5xl p-8 text-center">
-          <CheckCircle size={40} className="text-golf-green mx-auto mb-4" />
-          <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">Upload Complete</h3>
-          <p className="text-sm text-gray-400 mb-6">Your swing video is queued for AI analysis.</p>
-          <div className="flex flex-col sm:flex-row gap-3 justify-center">
-            <button onClick={() => router.push("/dashboard")}
-              className="px-6 py-3 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] transition-all text-[10px]">
-              View Dashboard
-            </button>
-            <button onClick={reset}
-              className="px-6 py-3 bg-white/5 border border-white/10 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-white/10 transition-all text-[10px]">
-              Upload Another
-            </button>
+      {/* ── RIGHT: Results deck ── */}
+      <div className="flex-1 bg-[#12140F] overflow-y-auto">
+        {!result ? (
+          <div className="h-full flex flex-col items-center justify-center text-center p-12">
+            <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mb-6">
+              <Activity size={28} className="text-gray-600" />
+            </div>
+            <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">Awaiting Session</h3>
+            <p className="text-gray-600 text-sm max-w-xs">Upload your swing video, trim to the impact zone, then hit Run Analyzer.</p>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="p-6 space-y-6 pb-16">
+            <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Live Mechanics Report</p>
 
-      {/* Drop zone (idle) */}
-      {uploadState === "idle" && (
-        <div
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`border-2 border-dashed rounded-5xl p-12 text-center cursor-pointer transition-all ${
-            dragOver ? "border-golf-green bg-golf-green/10" : "border-white/10 bg-golf-surface hover:border-golf-green/30"
-          }`}
-        >
-          <input ref={fileInputRef} type="file" accept=".mp4,.mov,.webm"
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} className="hidden" />
-          <div className="w-14 h-14 bg-white/5 border border-white/10 rounded-3xl flex items-center justify-center mx-auto mb-4">
-            <Upload size={22} className="text-gray-500" />
-          </div>
-          <p className="text-sm font-bold text-white mb-1">Drop your swing video here</p>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-600">
-            MP4 · MOV · WEBM · Max {MAX_SIZE_MB}MB
-          </p>
-        </div>
-      )}
-
-      {/* Video preview + trim (preview state) */}
-      {uploadState === "preview" && videoUrl && (
-        <div className="space-y-6">
-          {/* Video player */}
-          <div className="bg-black rounded-4xl overflow-hidden border border-white/10 relative">
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              className="w-full max-h-64 object-contain bg-black"
-              preload="metadata"
-            />
-
-            {/* Play/pause overlay */}
-            <button
-              onClick={togglePlay}
-              className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-colors"
-            >
-              <div className="w-12 h-12 bg-black/60 border border-white/20 rounded-full flex items-center justify-center">
-                {isPlaying
-                  ? <Pause size={20} className="text-white" />
-                  : <Play size={20} className="text-white ml-1" />
-                }
+            {/* Score + status */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-golf-surface p-6 rounded-2xl border border-golf-green/20">
+                <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Swing Score</p>
+                <p className={`text-5xl font-black italic ${result.score >= 80 ? "text-golf-green" : result.score >= 60 ? "text-amber-400" : "text-red-400"}`}>
+                  {result.score}
+                </p>
               </div>
-            </button>
-          </div>
-
-          {/* Trim controls */}
-          {duration > 0 && (
-            <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 space-y-5">
-              <div className="flex items-center gap-2 mb-2">
-                <Scissors size={14} className="text-golf-green" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-golf-green">Trim Swing Segment</p>
-                <span className="ml-auto text-[10px] font-mono text-gray-400">
-                  {formatTime(trimStart)} → {formatTime(trimEnd)}
-                  <span className="text-golf-green ml-2">({formatTime(trimDuration)})</span>
-                </span>
-              </div>
-
-              {/* Visual timeline bar */}
-              <div className="relative h-8 rounded-xl overflow-hidden bg-white/5 border border-white/10">
-                {/* Excluded region - left */}
-                <div className="absolute inset-y-0 left-0 bg-black/40"
-                  style={{ width: `${(trimStart / duration) * 100}%` }} />
-                {/* Selected region */}
-                <div className="absolute inset-y-0 bg-golf-green/20 border-x-2 border-golf-green"
-                  style={{
-                    left: `${(trimStart / duration) * 100}%`,
-                    width: `${((trimEnd - trimStart) / duration) * 100}%`,
-                  }} />
-                {/* Excluded region - right */}
-                <div className="absolute inset-y-0 right-0 bg-black/40"
-                  style={{ width: `${((duration - trimEnd) / duration) * 100}%` }} />
-                {/* Playhead */}
-                <div className="absolute inset-y-0 w-0.5 bg-white/70"
-                  style={{ left: `${(currentTime / duration) * 100}%` }} />
-              </div>
-
-              {/* Scrub */}
-              <div>
-                <div className="flex justify-between mb-1">
-                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">Scrub</label>
-                  <span className="text-[9px] font-mono text-gray-400">{formatTime(currentTime)}</span>
-                </div>
-                <input type="range" min={0} max={duration} step={0.033}
-                  value={currentTime} onChange={handleScrub}
-                  className="scrub-range"
-                  style={{ background: `linear-gradient(to right, #4ADE80 ${(currentTime/duration)*100}%, rgba(255,255,255,0.1) ${(currentTime/duration)*100}%)` }}
-                />
-                <div className="flex justify-between text-[9px] font-mono text-gray-700 mt-0.5">
-                  <span>0:00.0</span><span>{formatTime(duration)}</span>
-                </div>
-              </div>
-
-              {/* Trim start */}
-              <div>
-                <div className="flex justify-between mb-1">
-                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">
-                    ◀ Trim Start
-                  </label>
-                  <span className="text-[9px] font-mono text-golf-green">{formatTime(trimStart)}</span>
-                </div>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 right-0 flex items-center">
-                    <div className="w-full h-1.5 rounded-full"
-                      style={{ background: `linear-gradient(to right, rgba(255,255,255,0.05) ${(trimStart/duration)*100}%, #4ADE80 ${(trimStart/duration)*100}%, #4ADE80 ${(trimEnd/duration)*100}%, rgba(255,255,255,0.05) ${(trimEnd/duration)*100}%)` }} />
-                  </div>
-                  <input type="range" min={0} max={duration} step={0.033}
-                    value={trimStart} onChange={handleTrimStart}
-                    className="trim-range relative z-10" />
-                </div>
-              </div>
-
-              {/* Trim end */}
-              <div>
-                <div className="flex justify-between mb-1">
-                  <label className="text-[9px] font-black uppercase tracking-widest text-gray-600">
-                    Trim End ▶
-                  </label>
-                  <span className="text-[9px] font-mono text-golf-green">{formatTime(trimEnd)}</span>
-                </div>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 right-0 flex items-center">
-                    <div className="w-full h-1.5 rounded-full"
-                      style={{ background: `linear-gradient(to right, rgba(255,255,255,0.05) ${(trimStart/duration)*100}%, #4ADE80 ${(trimStart/duration)*100}%, #4ADE80 ${(trimEnd/duration)*100}%, rgba(255,255,255,0.05) ${(trimEnd/duration)*100}%)` }} />
-                  </div>
-                  <input type="range" min={0} max={duration} step={0.033}
-                    value={trimEnd} onChange={handleTrimEnd}
-                    className="trim-range relative z-10" />
+              <div className="bg-golf-surface p-6 rounded-2xl border border-white/5">
+                <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Fault Tags</p>
+                <div className="space-y-1">
+                  {result.weakSpots.slice(0, 3).map((w, i) => (
+                    <p key={i} className="text-[10px] text-gray-400 font-bold">· {w}</p>
+                  ))}
                 </div>
               </div>
             </div>
-          )}
 
-          {/* Metadata */}
-          <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 space-y-5">
+            {/* AI feedback */}
+            <div className="p-5 bg-golf-green/5 border border-golf-green/20 rounded-2xl">
+              <div className="flex items-center gap-2 mb-3">
+                <Info size={14} className="text-golf-green" />
+                <span className="text-[9px] font-black text-golf-green uppercase tracking-widest">AI Biomechanical Evaluation</span>
+              </div>
+              <p className="text-sm text-gray-300 leading-relaxed">{result.feedback}</p>
+            </div>
+
+            {/* Launch telemetry */}
             <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Club Used (optional)</label>
-              <select value={club} onChange={(e) => setClub(e.target.value)}
-                className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-2xl text-white focus:outline-none text-sm appearance-none">
-                <option value="">Select club...</option>
-                {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+              <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] mb-3">Launch Telemetry</p>
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { label: "Swing Velocity", value: result.metrics.swingSpeed, unit: "MPH", color: "text-white" },
+                  { label: "Ball Velocity", value: result.metrics.ballSpeed, unit: "MPH", color: "text-golf-green" },
+                  { label: "Launch Angle", value: `${result.metrics.launchAngle}°`, unit: "", color: "text-blue-400" },
+                  { label: "Smash Factor", value: result.metrics.smashFactor.toFixed(2), unit: "", color: "text-amber-400" },
+                ].map((m, i) => (
+                  <div key={i} className="bg-golf-surface p-4 rounded-xl border border-white/5">
+                    <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-1">{m.label}</p>
+                    <p className={`text-2xl font-black italic ${m.color}`}>{m.value}<span className="text-[10px] text-gray-600 ml-1">{m.unit}</span></p>
+                  </div>
+                ))}
+              </div>
             </div>
+
+            {/* Pro advanced metrics */}
+            {isAdvanced && (
+              <div>
+                <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] mb-3">Pro Biomechanics</p>
+                <div className="space-y-2">
+                  {(["wristHinge", "hipRotation", "shoulderRotation", "headStability"] as const).map((key) => {
+                    const m = result.metrics[key];
+                    if (!m) return null;
+                    return (
+                      <button key={key} onClick={() => setActiveOverlay(activeOverlay === key ? null : key)}
+                        className={`w-full p-4 rounded-xl border flex items-center justify-between text-left transition-all ${
+                          activeOverlay === key ? "border-amber-400/50 bg-amber-400/5" : "border-white/5 bg-golf-surface hover:border-white/10"
+                        }`}>
+                        <div>
+                          <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-1 group-hover:text-amber-400">
+                            {key.replace(/([A-Z])/g, " $1")}
+                          </p>
+                          <p className="text-xs text-gray-300 line-clamp-1">{m.feedback}</p>
+                        </div>
+                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center ml-3 shrink-0 ${
+                          activeOverlay === key ? "bg-amber-400 text-black" : "bg-white/5 text-gray-500"
+                        }`}>
+                          <Zap size={12} />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Drills */}
             <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Session Title (optional)</label>
-              <input type="text" value={title} onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Range session — working on tempo"
-                className="w-full px-4 py-3 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none text-sm" />
+              <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] mb-3">Prescribed Corrective Drills</p>
+              <div className="space-y-4">
+                {result.drills.map((drill, i) => (
+                  <div key={i} className="p-5 bg-golf-surface rounded-2xl border border-white/5 hover:border-golf-green/30 transition-all">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 bg-golf-green/10 rounded-xl flex items-center justify-center text-golf-green">
+                          <Play size={16} />
+                        </div>
+                        <h4 className="font-black text-white">{drill.name}</h4>
+                      </div>
+                      <button onClick={() => setActiveDrillVideo(drill.videoUrl)}
+                        className="p-1.5 hover:bg-white/5 rounded-lg text-gray-500 hover:text-white">
+                        <Maximize2 size={14} />
+                      </button>
+                    </div>
+                    {drill.videoUrl && (
+                      <div className="aspect-video rounded-xl overflow-hidden bg-black/40 mb-4 border border-white/5">
+                        <iframe src={`${formatYt(drill.videoUrl)}?rel=0`} className="w-full h-full" allowFullScreen />
+                      </div>
+                    )}
+                    <div className="space-y-3">
+                      <div><p className="text-[9px] font-black text-golf-green uppercase tracking-widest mb-0.5">The Why</p><p className="text-xs text-gray-400">{drill.why}</p></div>
+                      <div><p className="text-[9px] font-black text-blue-400 uppercase tracking-widest mb-0.5">The How</p><p className="text-xs text-gray-300">{drill.how}</p></div>
+                      <div><p className="text-[9px] font-black text-amber-400 uppercase tracking-widest mb-0.5">The Feel</p><p className="text-xs text-gray-300 italic">"{drill.feel}"</p></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
+        )}
+      </div>
 
-          {/* File info + change */}
-          <div className="flex items-center gap-3 px-4 py-3 bg-golf-surface border border-white/5 rounded-2xl">
-            <Video size={14} className="text-golf-green shrink-0" />
-            <p className="text-sm font-bold text-gray-300 truncate flex-1">{file?.name}</p>
-            <button onClick={reset} className="text-gray-600 hover:text-white text-[10px] font-black uppercase tracking-widest shrink-0">
-              Change
+      {/* Drill video modal */}
+      {activeDrillVideo && (
+        <div className="fixed inset-0 z-[100] bg-black/95 flex items-center justify-center p-4">
+          <button onClick={() => setActiveDrillVideo(null)}
+            className="absolute top-6 right-6 w-10 h-10 bg-white/10 rounded-full flex items-center justify-center text-white hover:bg-white/20">
+            <X size={20} />
+          </button>
+          <div className="w-full max-w-4xl aspect-video bg-black rounded-3xl overflow-hidden border border-white/10">
+            <iframe src={`${formatYt(activeDrillVideo)}?autoplay=1`} className="w-full h-full" allowFullScreen />
+          </div>
+        </div>
+      )}
+
+      {/* Pro upgrade modal */}
+      {showProUpgrade && (
+        <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-golf-surface border border-amber-400/30 rounded-[2.5rem] p-10 text-center">
+            <div className="w-16 h-16 bg-amber-400/10 rounded-3xl flex items-center justify-center mx-auto mb-6">
+              <Trophy size={32} className="text-amber-400" />
+            </div>
+            <h3 className="text-3xl font-black italic tracking-tighter text-white uppercase mb-3">Unlock Pro Metrics</h3>
+            <p className="text-gray-400 text-sm mb-8">Forensic posture vectors, hinge separation, and hip rotation overlays.</p>
+            <button onClick={() => { setIsAdvanced(true); setShowProUpgrade(false); }}
+              className="w-full py-4 bg-amber-400 text-black rounded-2xl font-black uppercase tracking-widest mb-3 hover:bg-amber-300 transition-colors">
+              Activate Pro Mode
+            </button>
+            <button onClick={() => setShowProUpgrade(false)}
+              className="w-full py-3 text-[10px] text-gray-500 font-black uppercase tracking-widest">
+              Continue with Basic
             </button>
           </div>
-
-          {errorMsg && (
-            <div className="flex items-start gap-3 bg-red-500/10 border border-red-500/20 rounded-2xl px-5 py-4">
-              <AlertCircle size={16} className="text-red-400 shrink-0 mt-0.5" />
-              <p className="text-xs font-bold text-red-400">{errorMsg}</p>
-            </div>
-          )}
-
-          <button onClick={handleUpload}
-            className="w-full py-4 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl hover:bg-[#22C55E] transition-all flex items-center justify-center gap-2 text-sm shadow-[0_0_20px_rgba(74,222,128,0.15)]">
-            <Zap size={16} />
-            Submit {duration > 0 ? `${formatTime(trimDuration)} Segment` : "for AI Analysis"}
-          </button>
-        </div>
-      )}
-
-      {/* Uploading */}
-      {uploadState === "uploading" && (
-        <div className="space-y-6">
-          <div className="bg-golf-surface border border-white/5 rounded-4xl p-8 text-center">
-            <div className="w-16 h-16 bg-golf-green/10 border border-golf-green/20 rounded-3xl flex items-center justify-center mx-auto mb-6">
-              <Zap size={24} className="text-golf-green" />
-            </div>
-            <p className="text-[10px] font-black uppercase tracking-widest text-white mb-6">Uploading Telemetry</p>
-            <div className="w-full bg-white/5 h-2 rounded-full overflow-hidden mb-2">
-              <div className="h-full bg-golf-green rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
-            </div>
-            <p className="text-[10px] font-mono text-golf-green">{Math.round(progress)}%</p>
-          </div>
-        </div>
-      )}
-
-      {/* Error */}
-      {uploadState === "error" && errorMsg && (
-        <div className="space-y-4">
-          <div className="flex items-start gap-3 bg-red-500/10 border border-red-500/20 rounded-4xl px-6 py-5">
-            <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
-            <p className="text-sm font-bold text-red-400">{errorMsg}</p>
-          </div>
-          <button onClick={reset}
-            className="w-full py-3 bg-white/5 border border-white/10 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-white/10 transition-all text-[10px]">
-            Try Again
-          </button>
         </div>
       )}
     </div>

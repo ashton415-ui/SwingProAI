@@ -33,7 +33,36 @@
   cursor: pointer;
 }
 
-/* ── Trim handles ── */
+/* ── Gemini-style overlapping dual trim sliders ── */
+.trim-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+  height: 100%;
+}
+.trim-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 40px;
+  border-radius: 4px;
+  background: #4ADE80;
+  border: 2px solid white;
+  box-shadow: 0 0 10px rgba(74,222,128,0.5);
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+.trim-slider::-moz-range-thumb {
+  width: 14px;
+  height: 40px;
+  border-radius: 4px;
+  background: #4ADE80;
+  border: 2px solid white;
+  cursor: ew-resize;
+  pointer-events: auto;
+}
+
+/* ── Named trim-range (alternate style) ── */
 .trim-range {
   -webkit-appearance: none;
   appearance: none;
