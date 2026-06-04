@@ -1,17 +1,33 @@
 "use server";
 
-import { createClient } from "@/utils/supabase/server";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-export async function loginAction(formData: FormData) {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
+export async function setSessionAction(access_token: string, refresh_token: string) {
+  const cookieStore = await cookies();
 
-  const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+          cookiesToSet.forEach(({ name, value, options }) =>
+            cookieStore.set(name, value, options)
+          );
+        },
+      },
+    }
+  );
+
+  const { error } = await supabase.auth.setSession({ access_token, refresh_token });
 
   if (error) {
-    redirect(`/login?error=${encodeURIComponent(error.message)}`);
+    return { error: error.message };
   }
 
   redirect("/dashboard");

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { createClient } from "@/utils/supabase/client";
+import { setSessionAction } from "./actions";
 import Link from "next/link";
 import { Zap } from "lucide-react";
 
@@ -18,6 +19,7 @@ export default function LoginPage() {
     const email = (form.elements.namedItem("email") as HTMLInputElement).value;
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
+    // Step 1: sign in client-side to get tokens
     const supabase = createClient();
     const { data, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
 
@@ -27,23 +29,18 @@ export default function LoginPage() {
       return;
     }
 
-    // Hand the tokens to the server so it sets proper HTTP cookies
-    const res = await fetch("/api/auth/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        access_token: data.session.access_token,
-        refresh_token: data.session.refresh_token,
-      }),
-      redirect: "follow",
-    });
+    // Step 2: hand tokens to a server action that sets cookies via next/headers
+    // and then redirects to /dashboard
+    const result = await setSessionAction(
+      data.session.access_token,
+      data.session.refresh_token
+    );
 
-    if (res.ok || res.redirected) {
-      window.location.href = "/dashboard";
-    } else {
-      setError("Session setup failed. Please try again.");
+    if (result?.error) {
+      setError(result.error);
       setLoading(false);
     }
+    // If no error, the server action called redirect() which navigates the page
   }
 
   return (
