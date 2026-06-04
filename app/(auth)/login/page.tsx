@@ -19,20 +19,31 @@ export default function LoginPage() {
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
 
     const supabase = createClient();
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
 
-    if (error) {
-      setError(error.message);
+    if (signInError || !data.session) {
+      setError(signInError?.message ?? "Login failed");
       setLoading(false);
       return;
     }
 
-    // Explicitly set the session to ensure cookies are written before navigating
-    if (data.session) {
-      await supabase.auth.setSession(data.session);
-    }
+    // Hand the tokens to the server so it sets proper HTTP cookies
+    const res = await fetch("/api/auth/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      }),
+      redirect: "follow",
+    });
 
-    window.location.href = "/dashboard";
+    if (res.ok || res.redirected) {
+      window.location.href = "/dashboard";
+    } else {
+      setError("Session setup failed. Please try again.");
+      setLoading(false);
+    }
   }
 
   return (
