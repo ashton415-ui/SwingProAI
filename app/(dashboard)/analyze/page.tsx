@@ -79,15 +79,29 @@ export default function AnalyzePage() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onMeta = () => {
-      setDuration(video.duration);
-      setTrimEnd(video.duration);
-      setVideoAspect(video.videoWidth / video.videoHeight);
+
+    const applyMeta = () => {
+      if (video.duration && isFinite(video.duration)) {
+        setDuration(video.duration);
+        setTrimEnd(video.duration);
+        setVideoAspect(video.videoWidth / video.videoHeight);
+      }
     };
+
     const onTime = () => setCurrentTime(video.currentTime);
-    video.addEventListener("loadedmetadata", onMeta);
+
+    video.addEventListener("loadedmetadata", applyMeta);
+    video.addEventListener("durationchange", applyMeta);
     video.addEventListener("timeupdate", onTime);
-    return () => { video.removeEventListener("loadedmetadata", onMeta); video.removeEventListener("timeupdate", onTime); };
+
+    // Blob URLs load instantly — metadata may already be available
+    if (video.readyState >= 1) applyMeta();
+
+    return () => {
+      video.removeEventListener("loadedmetadata", applyMeta);
+      video.removeEventListener("durationchange", applyMeta);
+      video.removeEventListener("timeupdate", onTime);
+    };
   }, [previewUrl]);
 
   const handleFile = useCallback((f: File) => {
