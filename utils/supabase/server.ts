@@ -10,7 +10,12 @@ export async function createClient() {
     {
       cookies: {
         getAll() {
-          return cookieStore.getAll();
+          return cookieStore.getAll().map((c) => ({
+            name: c.name,
+            value: (() => {
+              try { return decodeURIComponent(c.value); } catch { return c.value; }
+            })(),
+          }));
         },
         setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
           try {
