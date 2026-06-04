@@ -25,9 +25,15 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  // Use getSession() — reads local cookie without a network call
+  const { data: { session } } = await supabase.auth.getSession();
+  const user = session?.user ?? null;
 
-  const isProtected = request.nextUrl.pathname.startsWith("/dashboard");
+  const isProtected =
+    request.nextUrl.pathname.startsWith("/dashboard") ||
+    request.nextUrl.pathname === "/analyze" ||
+    request.nextUrl.pathname === "/upgrade";
+
   if (isProtected && !user) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
@@ -35,6 +41,7 @@ export async function middleware(request: NextRequest) {
   const isAuthPage =
     request.nextUrl.pathname === "/login" ||
     request.nextUrl.pathname === "/signup";
+
   if (isAuthPage && user) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
@@ -43,5 +50,12 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard", "/dashboard/:path*", "/login", "/signup", "/analyze", "/upgrade"],
+  matcher: [
+    "/dashboard",
+    "/dashboard/:path*",
+    "/analyze",
+    "/upgrade",
+    "/login",
+    "/signup",
+  ],
 };
