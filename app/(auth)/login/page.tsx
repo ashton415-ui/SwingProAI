@@ -16,12 +16,16 @@ export default function LoginPage() {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    console.log("Login result:", { data, error });
     if (error) {
-      setError(error.message);
+      setError(error.message || error.code || JSON.stringify(error));
       setLoading(false);
-    } else {
+    } else if (data?.session) {
       window.location.replace("/dashboard");
+    } else {
+      setError("Login succeeded but no session was returned. Please try again.");
+      setLoading(false);
     }
   }
 
