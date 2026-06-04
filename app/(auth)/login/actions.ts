@@ -1,35 +1,20 @@
 "use server";
 
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
 export async function setSessionAction(access_token: string, refresh_token: string) {
   const cookieStore = await cookies();
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return cookieStore.getAll();
-        },
-        setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            cookieStore.set(name, value, options)
-          );
-        },
-      },
-    }
-  );
+  // Minimal test: set a plain cookie with no Supabase involved
+  cookieStore.set("test-auth", "works", {
+    path: "/",
+    maxAge: 60 * 60,
+    sameSite: "lax",
+    secure: true,
+    httpOnly: false,
+  });
 
-  const { error } = await supabase.auth.setSession({ access_token, refresh_token });
+  console.log("Cookie set attempt. access_token length:", access_token.length);
 
-  if (error) {
-    return { error: error.message };
-  }
-
-  // Return success — let the client do a hard navigation so
-  // cookies are included in the next full HTTP request
   return { success: true };
 }
