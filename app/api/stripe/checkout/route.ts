@@ -5,16 +5,20 @@ import Stripe from "stripe";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://swing-pro-ai.vercel.app";
 
-export async function POST(req: NextRequest) {
-  // Use our cookie-based session (not supabase.auth.getUser which fails)
+/**
+ * GET /api/stripe/checkout?priceId=price_xxx&tier=birdie
+ * Uses GET so CloudFront/CDN layers don't block it.
+ * Redirects the browser directly to Stripe Checkout.
+ */
+export async function GET(req: NextRequest) {
   const session = await getServerSession();
   if (!session) {
     return NextResponse.redirect(new URL("/login", req.url));
   }
 
-  const body = await req.json();
-  const priceId = body.priceId as string;
-  const tier = body.tier as string;
+  const { searchParams } = new URL(req.url);
+  const priceId = searchParams.get("priceId");
+  const tier = searchParams.get("tier");
 
   if (!priceId || !tier) {
     return NextResponse.redirect(new URL("/upgrade?error=missing-plan", req.url));
@@ -23,11 +27,10 @@ export async function POST(req: NextRequest) {
   const supabase = await createClient();
   const { data: profile } = await supabase
     .from("users")
-    .select("stripe_customer_id, email, full_name")
+    .select("stripe_customer_id, full_name")
     .eq("id", session.user.id)
     .single();
 
-  // Reuse or create Stripe customer
   let customerId = profile?.stripe_customer_id;
   if (!customerId) {
     const customer = await stripe.customers.create({
@@ -55,6 +58,5 @@ export async function POST(req: NextRequest) {
     cancel_url: `${SITE_URL}/upgrade`,
   });
 
-  // Return JSON — client JS navigates to Stripe (avoids CloudFront POST blocking)
-  return NextResponse.json({ url: checkoutSession.url });
+  return NextResponse.redirect(checkoutSession.url!);
 }
