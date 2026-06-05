@@ -1,11 +1,27 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import Link from "next/link";
 import {
   Upload, Target, CheckCircle2, AlertCircle, Loader2,
   Play, Info, Maximize2, X, Activity, Zap, Trophy,
+  Lock, BarChart2, FileUp,
 } from "lucide-react";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import {
+  canUseLaunchMonitor,
+  getAnalysisModeForTier,
+  getTierDisplayName,
+  getUpsellTier,
+  type SubscriptionTier,
+} from "@/lib/entitlements";
+
+/** Read the tier injected by the server layout */
+function getUserTier(): SubscriptionTier {
+  if (typeof document === "undefined") return "par";
+  const el = document.getElementById("__swingpro_tier");
+  return (el?.dataset?.tier as SubscriptionTier) ?? "par";
+}
 
 // ─── Auth helper (reads session cookie set by our login flow) ──────────────────
 function getSessionFromCookie(): { access_token: string; user_id: string } | null {
@@ -73,6 +89,12 @@ export default function AnalyzePage() {
   const [showProUpgrade, setShowProUpgrade] = useState(false);
   const [activeDrillVideo, setActiveDrillVideo] = useState<string | null>(null);
   const [activeOverlay, setActiveOverlay] = useState<string | null>(null);
+  const [lmFile, setLmFile] = useState<File | null>(null);
+  const [userTier, setUserTier] = useState<SubscriptionTier>("par");
+
+  useEffect(() => {
+    setUserTier(getUserTier());
+  }, []);
 
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -433,6 +455,80 @@ export default function AnalyzePage() {
 
       {/* ── RIGHT: Results deck ── */}
       <div className="flex-1 bg-[#12140F] overflow-y-auto">
+
+        {/* ── Launch Monitor Panel ── */}
+        <div className="border-b border-white/5 p-4">
+          {canUseLaunchMonitor(userTier) ? (
+            <div className="bg-golf-surface border border-white/5 rounded-3xl p-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-8 h-8 bg-blue-500/10 rounded-xl flex items-center justify-center shrink-0">
+                  <BarChart2 size={16} className="text-blue-400" />
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-blue-400">Launch Monitor Data</p>
+                  <p className="text-[10px] text-gray-600">CSV or JSON — TrackMan, Garmin, FlightScope, Rapsodo</p>
+                </div>
+                {lmFile && (
+                  <button onClick={() => setLmFile(null)} className="ml-auto text-gray-600 hover:text-white">
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              {lmFile ? (
+                <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/20 rounded-xl px-3 py-2">
+                  <FileUp size={14} className="text-blue-400 shrink-0" />
+                  <p className="text-xs text-blue-300 truncate">{lmFile.name}</p>
+                  <span className="text-[9px] font-mono text-blue-500 ml-auto">
+                    {(lmFile.size / 1024).toFixed(0)} KB
+                  </span>
+                </div>
+              ) : (
+                <label className="flex items-center gap-2 border border-dashed border-white/10 rounded-xl px-4 py-3 cursor-pointer hover:border-blue-500/30 transition-colors">
+                  <Upload size={14} className="text-gray-600" />
+                  <span className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">
+                    Attach launch data (optional)
+                  </span>
+                  <input type="file" accept=".csv,.json" className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) setLmFile(f); }} />
+                </label>
+              )}
+            </div>
+          ) : (
+            /* Par locked preview */
+            <div className="bg-black/40 border border-white/5 rounded-3xl p-5 relative overflow-hidden">
+              <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-transparent" />
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-3">
+                  <Lock size={14} className="text-gray-500" />
+                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-500">
+                    Launch Monitor Upload — Locked
+                  </p>
+                  <span className="ml-auto text-[9px] font-black uppercase tracking-widest text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-full">
+                    Birdie+
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 mb-4 leading-relaxed">
+                  Connect TrackMan, Garmin, FlightScope, or Rapsodo data.
+                  AI fuses your launch metrics with video biomechanics for precision coaching.
+                </p>
+                <div className="grid grid-cols-2 gap-1.5 mb-4">
+                  {["Club Speed","Ball Speed","Launch Angle","Spin Rate","Club Path","Face Angle","Attack Angle","Carry Yards"].map((m) => (
+                    <div key={m} className="flex items-center gap-1.5 opacity-40">
+                      <div className="w-1 h-1 rounded-full bg-blue-400" />
+                      <span className="text-[9px] text-gray-500 font-bold">{m}</span>
+                    </div>
+                  ))}
+                </div>
+                <Link href="/upgrade"
+                  className="flex items-center justify-center gap-2 w-full py-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest text-blue-400 hover:bg-blue-500/20 transition-colors">
+                  <Zap size={12} />
+                  Upgrade to Birdie to Unlock
+                </Link>
+              </div>
+            </div>
+          )}
+        </div>
+
         {!result ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-12">
             <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mb-6">
@@ -443,7 +539,34 @@ export default function AnalyzePage() {
           </div>
         ) : (
           <div className="p-6 space-y-6 pb-16">
-            <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Live Mechanics Report</p>
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Live Mechanics Report</p>
+              <div className="flex items-center gap-2">
+                {result._mode && (
+                  <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${
+                    result._mode === "ultra" ? "text-amber-400 bg-amber-400/10 border-amber-400/20" :
+                    result._mode === "advanced" ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
+                    "text-gray-500 bg-white/5 border-white/10"
+                  }`}>
+                    {result._mode === "ultra" ? "Eagle Deep" : result._mode === "advanced" ? "Birdie AI" : "Par Basic"}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* Par upsell banner */}
+            {result._mode === "basic" && (
+              <div className="bg-gradient-to-r from-golf-green/5 to-blue-500/5 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-golf-green mb-1">Unlock Full AI Analysis</p>
+                  <p className="text-xs text-gray-500">Get advanced biomechanics, launch monitor fusion, and unlimited swings with Birdie.</p>
+                </div>
+                <Link href="/upgrade"
+                  className="shrink-0 px-4 py-2 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all whitespace-nowrap">
+                  Upgrade
+                </Link>
+              </div>
+            )}
 
             {/* Score + status */}
             <div className="grid grid-cols-2 gap-4">

@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, getServerSession } from "@/utils/supabase/server";
+import {
+  getAnalysisModeForTier,
+  getPriorityForTier,
+  type SubscriptionTier,
+} from "@/lib/entitlements";
 
 /**
  * POST /api/v1/upload/complete
@@ -21,6 +26,13 @@ export async function POST(req: NextRequest) {
 
   const supabase = await createClient();
 
+  // Determine tier-based routing fields
+  const { data: profile } = await supabase
+    .from("users").select("subscription_tier").eq("id", session.user.id).single();
+  const tier = (profile?.subscription_tier ?? "par") as SubscriptionTier;
+  const analysisMode = getAnalysisModeForTier(tier);
+  const priority = getPriorityForTier(tier);
+
   const { data: video, error } = await supabase
     .from("swing_videos")
     .insert({
@@ -35,6 +47,8 @@ export async function POST(req: NextRequest) {
       trim_start: trimStart ?? 0,
       trim_end: trimEnd ?? null,
       status: "uploaded",
+      analysis_mode: analysisMode,
+      priority,
     })
     .select()
     .single();
