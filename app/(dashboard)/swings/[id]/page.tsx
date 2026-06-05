@@ -2,6 +2,8 @@ import { createClient, getServerSession } from "@/utils/supabase/server";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle, AlertTriangle, Zap, Clock } from "lucide-react";
+import { PuttingAnalysisPanel } from "@/components/putting/PuttingAnalysisPanel";
+import type { SubscriptionTier } from "@/lib/entitlements";
 
 export default async function SwingDetailPage({
   params,
@@ -10,6 +12,8 @@ export default async function SwingDetailPage({
 }) {
   const supabase = await createClient();
   const session = await getServerSession();
+  const { data: profile } = await supabase.from("users").select("subscription_tier").eq("id", session?.user?.id ?? "").single();
+  const tier = (profile?.subscription_tier ?? "par") as SubscriptionTier;
   if (!session) redirect("/login");
   const user = session.user;
 
@@ -144,6 +148,16 @@ export default async function SwingDetailPage({
           </p>
         </div>
       )}
+
+      {/* Putting Analysis Panel */}
+      <PuttingAnalysisPanel
+        tier={tier}
+        metrics={{
+          puttTempoRatio: swing.putt_tempo_ratio ?? null,
+          faceAngleAtImpactDeg: swing.face_angle_at_impact_deg ?? null,
+          pathDeviationMm: swing.path_deviation_mm ?? null,
+        }}
+      />
 
       {swing.status === "pending" && (
         <div className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-4xl p-6">
