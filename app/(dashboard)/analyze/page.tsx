@@ -58,6 +58,11 @@ interface AnalysisResult {
     wristHinge?: OverlayMetric; hipRotation?: OverlayMetric;
     shoulderRotation?: OverlayMetric; headStability?: OverlayMetric;
   };
+  // Server-injected routing fields
+  _tier?: string;
+  _mode?: "basic" | "advanced" | "ultra";
+  _model?: string;
+  _upgradeMessage?: string;
 }
 
 const BUCKET = "swing-videos";
