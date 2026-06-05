@@ -100,7 +100,7 @@ export default async function SwingsPage() {
                   </td>
                   <td className="px-8 py-5 text-right">
                     <Link
-                      href={`/dashboard/swings/${swing.id}`}
+                      href={`/swings/${swing.id}`}
                       className="p-1 text-gray-700 group-hover:text-golf-green transition-all inline-block"
                     >
                       <ChevronRight size={16} />
