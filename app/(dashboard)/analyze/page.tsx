@@ -220,8 +220,8 @@ export default function AnalyzePage() {
       });
 
       if (!analysisRes.ok) {
-        const err = await analysisRes.json();
-        throw new Error(err.error ?? "Analysis failed");
+        const err = await analysisRes.json().catch(() => ({}));
+        throw new Error(err.error ?? `Analysis failed (${analysisRes.status})`);
       }
 
       const analysis: AnalysisResult = await analysisRes.json();
