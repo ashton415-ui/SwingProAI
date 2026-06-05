@@ -1,6 +1,7 @@
 import { createClient, getServerSession } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import { CheckCircle, Zap } from "lucide-react";
+import { CheckoutButton } from "@/components/CheckoutButton";
 
 const PLANS = [
   {
@@ -137,20 +138,16 @@ export default async function UpgradePage() {
                     Current Plan
                   </div>
                 ) : (
-                  <form action="/api/stripe/checkout" method="POST">
-                    <input type="hidden" name="priceId" value={priceId ?? ""} />
-                    <input type="hidden" name="tier" value={plan.id} />
-                    <button
-                      type="submit"
-                      className={`w-full py-3.5 font-black uppercase tracking-widest rounded-2xl transition-all text-[10px] ${
-                        plan.popular
-                          ? "bg-golf-green text-golf-dark hover:bg-[#22C55E] shadow-[0_0_20px_rgba(74,222,128,0.2)]"
-                          : "bg-white/5 border border-white/10 text-white hover:bg-white/10"
-                      }`}
-                    >
-                      Get {plan.name}
-                    </button>
-                  </form>
+                  <CheckoutButton
+                    priceId={priceId ?? ""}
+                    tier={plan.id}
+                    label={`Get ${plan.name}`}
+                    className={`w-full py-3.5 font-black uppercase tracking-widest rounded-2xl transition-all text-[10px] disabled:opacity-60 ${
+                      plan.popular
+                        ? "bg-golf-green text-golf-dark hover:bg-[#22C55E] shadow-[0_0_20px_rgba(74,222,128,0.2)]"
+                        : "bg-white/5 border border-white/10 text-white hover:bg-white/10"
+                    }`}
+                  />
                 )}
               </div>
             );
