@@ -1,4 +1,4 @@
-import { createClient } from "@/utils/supabase/server";
+import { createClient, getServerSession } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import { CheckCircle, Zap } from "lucide-react";
 
@@ -52,17 +52,18 @@ const PLANS = [
 ];
 
 export default async function UpgradePage() {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  const session = await getServerSession();
+  if (!session) redirect("/login");
 
+  const supabase = await createClient();
   const { data: profile } = await supabase
     .from("users")
-    .select("subscription_status, subscription_tier")
-    .eq("id", user.id)
+    .select("subscription_status, subscription_tier, role")
+    .eq("id", session.user.id)
     .single();
 
   const currentTier = profile?.subscription_tier ?? "none";
+  const isAdmin = profile?.role === "admin";
 
   return (
     <div className="px-6 py-10">
@@ -79,6 +80,11 @@ export default async function UpgradePage() {
           <p className="text-gray-500 mt-3 text-sm font-medium max-w-xl mx-auto">
             All plans include a 7-day free trial. Cancel anytime.
           </p>
+          {isAdmin && (
+            <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-full text-red-400 text-[9px] font-black uppercase tracking-widest">
+              Admin View — Checkout links are live Stripe sessions
+            </div>
+          )}
         </div>
 
         {/* Pricing Cards */}

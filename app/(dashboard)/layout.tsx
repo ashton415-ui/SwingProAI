@@ -93,6 +93,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
             <NavLink href="/admin/users" icon={<Users size={16} />} label="All Users" />
             <NavLink href="/admin/coaches" icon={<UserCheck size={16} />} label="Coaches" />
             <NavLink href="/admin/swings" icon={<Video size={16} />} label="All Swings" />
+            <NavLink href="/upgrade" icon={<CreditCard size={16} />} label="View Plans" />
           </nav>
         )}
 
