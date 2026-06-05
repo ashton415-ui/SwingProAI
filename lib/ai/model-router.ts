@@ -45,17 +45,18 @@ headStability:{feedback,overlay:{x1,y1,x2,y2}}}`;
   }
 
   if (mode === "advanced") {
-    return `You are a professional golf coach and ball flight analyst.
-Analyze this swing video for key mechanics, launch physics, and corrective drills.
-Focus on swing speed, ball speed, launch angle, smash factor, and the top 3 mechanical issues.
-Return JSON: feedback, score (0-100), weakSpots, drills (3, each with name/why/how/feel/videoUrl),
-metrics: {swingSpeed (mph), ballSpeed (mph), launchAngle (degrees), smashFactor (ratio)}`;
+    return `You are a professional golf coach. Analyze this golf swing video.
+Be concise. Keep all text fields under 80 words each.
+Return JSON with these exact fields:
+- feedback: string (2-3 sentences max)
+- score: number 0-100
+- weakSpots: string[] (3 items, each under 6 words)
+- drills: array of 3 objects, each: {name:string, why:string(1 sentence), how:string(1-2 sentences), feel:string(1 sentence), videoUrl:string(YouTube embed URL)}
+- metrics: {swingSpeed:number(mph), ballSpeed:number(mph), launchAngle:number(degrees), smashFactor:number}`;
   }
 
-  // basic — minimal prompt to save cost
-  return `You are a golf coach giving quick feedback on a swing video.
-Identify the 2-3 most important mechanical issues and give a score.
-Return JSON: feedback (2-3 sentences), score (0-100), weakSpots (2-3 items),
-drills (2, each with name/why/how/feel/videoUrl),
-metrics: {swingSpeed (estimated mph), ballSpeed (estimated mph), launchAngle (degrees), smashFactor (ratio)}`;
+  // basic — minimal prompt
+  return `You are a golf coach. Review this swing video briefly.
+Keep all text under 50 words each.
+Return JSON: feedback(string), score(0-100), weakSpots(string[] 2 items), drills(array 2 objects each with name/why/how/feel/videoUrl), metrics({swingSpeed,ballSpeed,launchAngle,smashFactor})`;
 }

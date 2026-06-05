@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
           generationConfig: {
             response_mime_type: "application/json",
             temperature: 0.4,
-            maxOutputTokens: analysisMode === "ultra" ? 4096 : 2048,
+            maxOutputTokens: analysisMode === "ultra" ? 8192 : 4096,
           },
         }),
       }
