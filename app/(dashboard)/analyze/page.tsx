@@ -15,6 +15,7 @@ import {
   getUpsellTier,
   type SubscriptionTier,
 } from "@/lib/entitlements";
+import type { DeficiencyItem, HighlightItem } from "@/types/database";
 
 /** Read the tier injected by the server layout */
 function getUserTier(): SubscriptionTier {
@@ -57,7 +58,14 @@ interface AnalysisResult {
     swingSpeed: number; ballSpeed: number; launchAngle: number; smashFactor: number;
     wristHinge?: OverlayMetric; hipRotation?: OverlayMetric;
     shoulderRotation?: OverlayMetric; headStability?: OverlayMetric;
+    [key: string]: unknown;
   };
+  // v4 granular telemetry (persisted into swing_analysis)
+  swing_highlights?: HighlightItem[];
+  mechanical_deficiencies?: DeficiencyItem[];
+  detailed_summary_html?: string | null;
+  tempo_ratio?: number | null;
+  swing_speed_mph?: number | null;
   // Server-injected routing fields
   _tier?: string;
   _mode?: "basic" | "advanced" | "ultra";
@@ -279,10 +287,16 @@ export default function AnalyzePage() {
               await supabase.from("swing_analysis").insert({
                 swing_video_id: videoRow.id, user_id: session.user_id,
                 score: analysis.score, feedback: analysis.feedback,
-                tempo_ratio: analysis.metrics.swingSpeed ? analysis.metrics.swingSpeed / 100 : null,
-                swing_speed_mph: analysis.metrics.swingSpeed,
+                tempo_ratio:
+                  analysis.tempo_ratio ??
+                  (analysis.metrics.swingSpeed ? analysis.metrics.swingSpeed / 100 : null),
+                swing_speed_mph: analysis.swing_speed_mph ?? analysis.metrics.swingSpeed,
                 status: "complete",
                 metrics: analysis.metrics,
+                // v4 granular telemetry (defaults to [] / null via migration)
+                swing_highlights: analysis.swing_highlights ?? [],
+                mechanical_deficiencies: analysis.mechanical_deficiencies ?? [],
+                detailed_summary_html: analysis.detailed_summary_html ?? null,
               });
             }
           }

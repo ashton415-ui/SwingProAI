@@ -80,6 +80,44 @@ export interface SwingVideo {
 
 // ─── Swing Analysis ───────────────────────────────────────────────────────────
 
+/** Swing checkpoint, kinematic order. Mirrors the FastAPI `Checkpoint` literal. */
+export type SwingCheckpoint =
+  | "address"
+  | "takeaway"
+  | "backswing"
+  | "top"
+  | "transition"
+  | "downswing"
+  | "impact"
+  | "follow_through";
+
+export type DeficiencySeverity = "minor" | "major";
+
+/** Normalized (0..1) frame-space location of a joint, for overlay markers. */
+export interface JointCoordinate {
+  joint: string;
+  x: number;
+  y: number;
+  frame_label?: string | null;
+}
+
+/** What the golfer is doing wrong — joint-specific, with severity + a fix. */
+export interface DeficiencyItem {
+  checkpoint: SwingCheckpoint;
+  joint_coordinate: JointCoordinate;
+  fault_description: string;
+  severity: DeficiencySeverity;
+  corrective_drill_title: string;
+  corrective_drill_detail?: string | null;
+}
+
+/** What the golfer is doing right — reinforce good habits. */
+export interface HighlightItem {
+  checkpoint: SwingCheckpoint;
+  positive_movement: string;
+  mechanical_benefit: string;
+}
+
 export interface SwingAnalysis {
   id: string;
   swing_video_id: string;
@@ -90,6 +128,10 @@ export interface SwingAnalysis {
   score: number | null;
   feedback: string | null;
   metrics: Record<string, unknown> | null;
+  // v4 granular telemetry (see supabase-schema-v4.sql)
+  mechanical_deficiencies: DeficiencyItem[] | null;
+  swing_highlights: HighlightItem[] | null;
+  detailed_summary_html: string | null;
   created_at: string;
   // joined
   swing_video?: SwingVideo;

@@ -3,7 +3,10 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle, AlertTriangle, Zap, Clock } from "lucide-react";
 import { PuttingAnalysisPanel } from "@/components/putting/PuttingAnalysisPanel";
+import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
+import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
 import type { SubscriptionTier } from "@/lib/entitlements";
+import type { DeficiencyItem, HighlightItem } from "@/types/database";
 
 export default async function SwingDetailPage({
   params,
@@ -42,6 +45,11 @@ export default async function SwingDetailPage({
   const suggestions = metrics?.suggestions
     ? (metrics.suggestions as unknown as string[])
     : null;
+
+  // v4 granular telemetry arrays (default to [] via the migration)
+  const highlights = (swing.swing_highlights ?? []) as HighlightItem[];
+  const deficiencies = (swing.mechanical_deficiencies ?? []) as DeficiencyItem[];
+  const detailedHtml = (swing.detailed_summary_html ?? null) as string | null;
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
@@ -109,6 +117,30 @@ export default async function SwingDetailPage({
           <p className="text-gray-300 leading-relaxed text-sm">{swing.feedback}</p>
         </div>
       )}
+
+      {/* Deep prose summary (un-truncated, sanitized HTML from the AI backend) */}
+      {detailedHtml && (
+        <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
+          <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-5 flex items-center gap-2">
+            <Zap size={12} className="text-golf-green" />
+            Deep Biomechanical Audit
+          </h3>
+          <div
+            className="prose-swing text-sm text-gray-300 leading-relaxed space-y-3 [&_h4]:text-white [&_h4]:font-black [&_h4]:uppercase [&_h4]:tracking-widest [&_h4]:text-[11px] [&_h4]:mt-4 [&_strong]:text-white [&_ul]:list-disc [&_ul]:pl-5 [&_li]:mt-1"
+            dangerouslySetInnerHTML={{ __html: detailedHtml }}
+          />
+        </div>
+      )}
+
+      {/* v4: Swing Highlights — what the golfer nailed (green success rings) */}
+      <div className="mb-6">
+        <SwingHighlightsPanel tier={tier} highlights={highlights} />
+      </div>
+
+      {/* v4: Mechanical Deficiencies — severity badges + fix-drill callouts */}
+      <div className="mb-6">
+        <MechanicalDeficienciesPanel tier={tier} deficiencies={deficiencies} />
+      </div>
 
       {/* Suggestions from metrics jsonb */}
       {suggestions && suggestions.length > 0 && (
