@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "@/utils/supabase/server";
 import { createClient } from "@/utils/supabase/server";
+
+// Allow up to 120s — video analysis with Gemini takes 20-60s
+export const maxDuration = 120;
 import {
   getAnalysisModeForTier,
   type SubscriptionTier,
@@ -144,7 +147,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(result);
   } catch (error) {
-    console.error("Analysis error:", error);
-    return NextResponse.json({ error: "Analysis processing failed" }, { status: 500 });
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("Analysis error:", msg);
+    return NextResponse.json({ error: `Analysis failed: ${msg}` }, { status: 500 });
   }
 }
