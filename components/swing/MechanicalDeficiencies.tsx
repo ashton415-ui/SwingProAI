@@ -95,7 +95,7 @@ export function MechanicalDeficiencies({ deficiencies }: Props) {
                     {item.checkpoint}
                   </p>
                   <p className="mt-0.5 text-sm font-medium text-slate-200">
-                    {item.joint_coordinate}
+                    {typeof item.joint_coordinate === "string" ? item.joint_coordinate : item.joint_coordinate?.joint ?? ""}
                   </p>
                 </div>
 
