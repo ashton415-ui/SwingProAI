@@ -44,6 +44,7 @@ export default function MobileNav() {
   const moreIsActive = MORE_ITEMS.some(({ href }) => isActive(href));
 
   function closeSheet() {
+    navigator.vibrate?.(10);
     setMoreOpen(false);
     setDragY(0);
   }
