@@ -43,8 +43,11 @@ export default function MobileNav() {
 
   const moreIsActive = MORE_ITEMS.some(({ href }) => isActive(href));
 
-  function closeSheet() {
+  function haptic() {
     navigator.vibrate?.(10);
+  }
+
+  function closeSheet() {
     setMoreOpen(false);
     setDragY(0);
   }
@@ -63,6 +66,7 @@ export default function MobileNav() {
   function onTouchEnd() {
     dragging.current = false;
     if (dragY >= SWIPE_CLOSE_THRESHOLD) {
+      haptic();
       closeSheet();
     } else {
       setDragY(0); // spring back
@@ -75,7 +79,7 @@ export default function MobileNav() {
       {moreOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/60 md:hidden"
-          onClick={closeSheet}
+          onClick={() => { haptic(); closeSheet(); }}
         />
       )}
 
@@ -100,7 +104,7 @@ export default function MobileNav() {
               More
             </span>
             <button
-              onClick={closeSheet}
+              onClick={() => { haptic(); closeSheet(); }}
               className="p-1 text-slate-400 hover:text-white transition-colors"
             >
               <X className="w-4 h-4" />
@@ -111,7 +115,7 @@ export default function MobileNav() {
               <li key={href}>
                 <Link
                   href={href}
-                  onClick={closeSheet}
+                  onClick={() => { haptic(); closeSheet(); }}
                   className={`flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-medium transition-colors ${
                     isActive(href)
                       ? 'bg-indigo-600 text-white'
@@ -150,6 +154,7 @@ export default function MobileNav() {
         <button
           onClick={() => {
             if (moreOpen) {
+              haptic();
               closeSheet();
             } else {
               navigator.vibrate?.(10);
