@@ -95,7 +95,7 @@ export default function MobileNav() {
           onTouchEnd={onTouchEnd}
         >
           {/* Drag handle */}
-          <div className="flex justify-center mb-3">
+          <div className="flex justify-center mb-3" onTouchStart={haptic}>
             <div className="w-10 h-1 rounded-full bg-white/20" />
           </div>
 
