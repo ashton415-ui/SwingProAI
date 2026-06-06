@@ -135,6 +135,7 @@ export default function MobileNav() {
             <Link
               key={href}
               href={href}
+              onClick={() => !active && navigator.vibrate?.(10)}
               className={`flex-1 flex flex-col items-center gap-1 py-3 text-[10px] font-medium transition-colors ${
                 active ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
               }`}
