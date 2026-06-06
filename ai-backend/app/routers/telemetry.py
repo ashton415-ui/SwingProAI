@@ -11,9 +11,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from ..models.equipment import (
+    BagClubInput,
+    BagSessionInput,
+    BagSessionResponse,
+    ClubSessionSummary,
     LaunchMonitorInput,
-    VideoTelemetryInput,
     TelemetryResponse,
+    VideoTelemetryInput,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,4 +150,118 @@ async def submit_video_analysis(
         carry=payload.carry_yards,
         source="video_ai",
         club_id=payload.club_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/telemetry/batch
+# ---------------------------------------------------------------------------
+
+@router.post("/batch", response_model=list[TelemetryResponse])
+async def submit_batch(
+    payload: list[LaunchMonitorInput],
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> list[TelemetryResponse]:
+    """
+    Process multiple launch monitor readings in a single request.
+    Each item is validated and enriched identically to /launch-monitor.
+    Returns one TelemetryResponse per input, preserving order.
+    Intended for bulk imports (TrackMan CSV uploads, Arcados syncs, etc.).
+    """
+    _auth(x_internal_secret)
+
+    if not payload:
+        raise HTTPException(status_code=400, detail="batch payload must not be empty")
+    if len(payload) > 100:
+        raise HTTPException(status_code=400, detail="batch limit is 100 readings per request")
+
+    from uuid import uuid4
+    results: list[TelemetryResponse] = []
+    for item in payload:
+        results.append(
+            _build_response(
+                row_id=uuid4(),
+                swing_speed=item.swing_speed_mph,
+                ball_speed=item.ball_speed_mph,
+                launch_angle=item.launch_angle_deg,
+                spin_rate=item.spin_rate_rpm,
+                carry=item.carry_yards,
+                source="launch_monitor",
+                club_id=item.club_id,
+            )
+        )
+
+    logger.info("Batch telemetry: processed %d readings", len(results))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# POST /api/telemetry/bag-session
+# ---------------------------------------------------------------------------
+
+def _safe_avg(values: list[float]) -> float | None:
+    filtered = [v for v in values if v is not None]
+    return round(sum(filtered) / len(filtered), 3) if filtered else None
+
+
+@router.post("/bag-session", response_model=BagSessionResponse)
+async def submit_bag_session(
+    payload: BagSessionInput,
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> BagSessionResponse:
+    """
+    Process a full virtual bag session — one or more readings per club.
+    Aggregates per-club averages, computes smash factor and speed categories,
+    and identifies the best-smash and longest-carry clubs in the session.
+
+    The Next.js gateway persists individual readings to Supabase separately;
+    this endpoint handles the aggregation and labelling only.
+    """
+    _auth(x_internal_secret)
+
+    summaries: list[ClubSessionSummary] = []
+    for club in payload.clubs:
+        smash = _compute_smash_factor(club.ball_speed_mph, club.swing_speed_mph)
+        summary = ClubSessionSummary(
+            club_id=club.club_id,
+            club_type=club.club_type,
+            reading_count=1,
+            avg_swing_speed_mph=club.swing_speed_mph,
+            avg_ball_speed_mph=club.ball_speed_mph,
+            avg_smash_factor=smash,
+            avg_carry_yards=float(club.carry_yards) if club.carry_yards is not None else None,
+        )
+        summaries.append(summary)
+
+    # Identify stand-out clubs
+    best_smash_club: UUID | None = None
+    best_smash_val = -1.0
+    longest_carry_club: UUID | None = None
+    longest_carry_val = -1
+
+    for s in summaries:
+        if s.avg_smash_factor is not None and s.avg_smash_factor > best_smash_val:
+            best_smash_val = s.avg_smash_factor
+            best_smash_club = s.club_id
+        if s.avg_carry_yards is not None and s.avg_carry_yards > longest_carry_val:
+            longest_carry_val = int(s.avg_carry_yards)
+            longest_carry_club = s.club_id
+
+    all_speeds = [s.avg_swing_speed_mph for s in summaries if s.avg_swing_speed_mph is not None]
+    bag_avg_speed = _safe_avg(all_speeds)  # type: ignore[arg-type]
+
+    logger.info(
+        "Bag session '%s': %d clubs, bag avg swing speed=%.1f mph",
+        payload.session_label or "unnamed",
+        len(summaries),
+        bag_avg_speed or 0,
+    )
+
+    return BagSessionResponse(
+        session_label=payload.session_label,
+        total_clubs=len(summaries),
+        club_summaries=summaries,
+        best_smash_club_id=best_smash_club,
+        longest_carry_club_id=longest_carry_club,
+        bag_avg_swing_speed_mph=bag_avg_speed,
     )

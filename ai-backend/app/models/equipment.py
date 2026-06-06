@@ -142,6 +142,71 @@ class TelemetryResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Batch / virtual-bag session models
+# ---------------------------------------------------------------------------
+
+class BagClubInput(BaseModel):
+    """A single club reading within a virtual bag session."""
+    club_id: UUID
+    club_type: Optional[str] = None
+    swing_speed_mph: Optional[float] = Field(default=None, ge=20, le=200)
+    ball_speed_mph: Optional[float] = Field(default=None, ge=20, le=250)
+    launch_angle_deg: Optional[float] = Field(default=None, ge=-10, le=60)
+    spin_rate_rpm: Optional[int] = Field(default=None, ge=0, le=15000)
+    carry_yards: Optional[int] = Field(default=None, ge=0, le=400)
+
+
+class BagSessionInput(BaseModel):
+    """Multiple club readings submitted as one virtual bag session."""
+    session_label: Optional[str] = Field(default=None, max_length=120)
+    clubs: list[BagClubInput] = Field(..., min_length=1, max_length=14)
+
+
+class ClubSessionSummary(BaseModel):
+    """Per-club aggregated stats from a bag session."""
+    club_id: UUID
+    club_type: Optional[str]
+    reading_count: int
+    avg_swing_speed_mph: Optional[float]
+    avg_ball_speed_mph: Optional[float]
+    avg_smash_factor: Optional[float]
+    avg_carry_yards: Optional[float]
+    smash_factor_rating: str = ""
+    swing_speed_category: str = ""
+
+    def model_post_init(self, __context) -> None:
+        if self.avg_smash_factor is not None:
+            if self.avg_smash_factor >= 1.48:
+                self.smash_factor_rating = "excellent"
+            elif self.avg_smash_factor >= 1.44:
+                self.smash_factor_rating = "good"
+            elif self.avg_smash_factor >= 1.38:
+                self.smash_factor_rating = "average"
+            else:
+                self.smash_factor_rating = "poor"
+
+        if self.avg_swing_speed_mph is not None:
+            if self.avg_swing_speed_mph >= 110:
+                self.swing_speed_category = "tour"
+            elif self.avg_swing_speed_mph >= 95:
+                self.swing_speed_category = "advanced"
+            elif self.avg_swing_speed_mph >= 80:
+                self.swing_speed_category = "average"
+            else:
+                self.swing_speed_category = "beginner"
+
+
+class BagSessionResponse(BaseModel):
+    """Aggregated response for a virtual bag session."""
+    session_label: Optional[str]
+    total_clubs: int
+    club_summaries: list[ClubSessionSummary]
+    best_smash_club_id: Optional[UUID]
+    longest_carry_club_id: Optional[UUID]
+    bag_avg_swing_speed_mph: Optional[float]
+
+
+# ---------------------------------------------------------------------------
 # Fitting models
 # ---------------------------------------------------------------------------
 
