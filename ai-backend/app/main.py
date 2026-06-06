@@ -15,9 +15,12 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from .schemas import SwingAnalysisResponse
 from .gemini_client import analyze_swing
+from .routers import telemetry, fitting
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = FastAPI(title="SwingProAI AI Biomechanics", version="1.0.0")
+app.include_router(telemetry.router)
+app.include_router(fitting.router)
 AnalysisMode = Literal["basic", "advanced", "ultra"]
 _INTERNAL_SECRET = os.environ.get("AI_BACKEND_SECRET", "")
 class AnalyzeRequest(BaseModel):
