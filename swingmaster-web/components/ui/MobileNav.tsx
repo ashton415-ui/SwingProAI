@@ -69,6 +69,7 @@ export default function MobileNav() {
       haptic();
       closeSheet();
     } else {
+      haptic();
       setDragY(0); // spring back
     }
   }
