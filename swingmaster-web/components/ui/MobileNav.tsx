@@ -57,6 +57,7 @@ export default function MobileNav() {
     touchStartY.current = e.touches[0].clientY;
     dragging.current = true;
     thresholdCrossed.current = false;
+    haptic();
   }
 
   function onTouchMove(e: React.TouchEvent) {
@@ -110,7 +111,7 @@ export default function MobileNav() {
           onTouchCancel={onTouchCancel}
         >
           {/* Drag handle */}
-          <div className="flex justify-center mb-3" onTouchStart={haptic}>
+          <div className="flex justify-center mb-3">
             <div className="w-10 h-1 rounded-full bg-white/20" />
           </div>
 
