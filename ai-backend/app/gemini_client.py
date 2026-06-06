@@ -1,9 +1,9 @@
-"""
-SwingProAI — Gemini structured-analysis client (new google-genai SDK).
+﻿"""
+SwingProAI â€” Gemini structured-analysis client (new google-genai SDK).
 
 Uses `google.genai` (the unified SDK) with native Pydantic structured output:
 the model is handed `SwingAnalysisResponse` as `response_schema` and returns a
-parsed instance — no brittle JSON-string post-processing.
+parsed instance â€” no brittle JSON-string post-processing.
 
 Env:
   GEMINI_API_KEY        required
@@ -86,7 +86,7 @@ def analyze_swing(
             response_mime_type="application/json",
             response_schema=SwingAnalysisResponse,
             temperature=0.3,
-            max_output_tokens=8192 if analysis_mode == "ultra" else 4096,
+            max_output_tokens=65535,
         ),
     )
 
@@ -103,3 +103,4 @@ def analyze_swing(
     result.model_used = model
     result.analysis_mode = analysis_mode
     return result
+
