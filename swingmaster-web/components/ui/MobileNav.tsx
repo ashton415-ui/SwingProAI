@@ -147,7 +147,14 @@ export default function MobileNav() {
 
         {/* More button */}
         <button
-          onClick={() => setMoreOpen((o) => !o)}
+          onClick={() => {
+            if (moreOpen) {
+              closeSheet();
+            } else {
+              navigator.vibrate?.(10);
+              setMoreOpen(true);
+            }
+          }}
           className={`flex-1 flex flex-col items-center gap-1 py-3 text-[10px] font-medium transition-colors ${
             moreIsActive || moreOpen ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
           }`}
