@@ -135,6 +135,19 @@ class EquipmentFitting(BaseModel):
     )
 
 
+
+class MetricSummary(BaseModel):
+    swing_speed_mph: Optional[float] = Field(default=None)
+    ball_speed_mph: Optional[float] = Field(default=None)
+    smash_factor: Optional[float] = Field(default=None)
+    launch_angle_deg: Optional[float] = Field(default=None)
+    tempo_ratio: Optional[float] = Field(default=None)
+    spine_angle_deg: Optional[float] = Field(default=None)
+    hip_rotation_deg: Optional[float] = Field(default=None)
+    shoulder_rotation_deg: Optional[float] = Field(default=None)
+    x_factor_deg: Optional[float] = Field(default=None)
+    wrist_hinge_deg: Optional[float] = Field(default=None)
+
 # ---------------------------------------------------------------------------
 # Root response schema
 # ---------------------------------------------------------------------------
@@ -204,6 +217,8 @@ class SwingAnalysisResponse(BaseModel):
             "One concise sentence referencing the highest-severity deficiency."
         ),
     )
+    metric_summary: Optional[MetricSummary] = Field(default=None)
+
     # --- Runtime metadata (set by gemini_client, not by the model) ---
     model_used: Optional[str] = Field(default=None)
     analysis_mode: Optional[str] = Field(default=None)
