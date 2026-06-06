@@ -80,6 +80,13 @@ export default function MobileNav() {
     }
   }
 
+  function onTouchCancel() {
+    dragging.current = false;
+    thresholdCrossed.current = false;
+    haptic();
+    setDragY(0);
+  }
+
   return (
     <>
       {/* Backdrop */}
@@ -100,6 +107,7 @@ export default function MobileNav() {
           onTouchStart={onTouchStart}
           onTouchMove={onTouchMove}
           onTouchEnd={onTouchEnd}
+          onTouchCancel={onTouchCancel}
         >
           {/* Drag handle */}
           <div className="flex justify-center mb-3" onTouchStart={haptic}>
