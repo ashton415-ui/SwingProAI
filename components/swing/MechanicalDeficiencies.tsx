@@ -6,7 +6,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { DeficiencyItem } from '@/lib/types/swing';
+import type { DeficiencyItem } from '@/types/database';
 
 interface Props {
   deficiencies: DeficiencyItem[];

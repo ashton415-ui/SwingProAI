@@ -5,7 +5,7 @@
 
 'use client';
 
-import type { HighlightItem } from '@/lib/types/swing';
+import type { HighlightItem } from '@/types/database';
 
 interface Props {
   highlights: HighlightItem[];
