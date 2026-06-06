@@ -1,5 +1,5 @@
-import DashboardNav from '@/components/ui/DashboardNav';
-import MobileNav from '@/components/ui/MobileNav';
+import DashboardNav from '../../components/ui/DashboardNav';
+import MobileNav from '../../components/ui/MobileNav';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
