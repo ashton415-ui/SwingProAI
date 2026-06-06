@@ -1,4 +1,4 @@
-"""
+﻿"""
 ai-backend/schemas.py
 Pydantic v2 schemas for the SwingProAI Gemini biomechanical analysis pipeline.
 All fields use detailed string types to prevent Gemini response truncation.
@@ -10,14 +10,14 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
-# Sub-schemas — Arrays returned inside the main analysis
+# Sub-schemas â€” Arrays returned inside the main analysis
 # ---------------------------------------------------------------------------
 
 class HighlightItem(BaseModel):
     """Positive mechanical movement the golfer executed correctly."""
     checkpoint: str = Field(
         ...,
-        description="Named swing position (e.g. 'P1 – Address', 'P4 – Top of Backswing')",
+        description="Named swing position (e.g. 'P1 â€“ Address', 'P4 â€“ Top of Backswing')",
     )
     positive_movement: str = Field(
         ...,
@@ -45,7 +45,7 @@ class DeficiencyItem(BaseModel):
     joint_coordinate: str = Field(
         ...,
         description=(
-            "Specific anatomical reference — e.g. 'left hip internal rotation', "
+            "Specific anatomical reference â€” e.g. 'left hip internal rotation', "
             "'trail elbow plane', 'thoracic spine extension angle'."
         ),
     )
@@ -96,7 +96,7 @@ class PuttAnalytics(BaseModel):
         ...,
         description=(
             "Estimated dynamic loft at impact. Positive loft launches ball into skid; "
-            "negative loft drives ball into green. Ideal range is 1–4 degrees positive."
+            "negative loft drives ball into green. Ideal range is 1â€“4 degrees positive."
         ),
     )
 
@@ -129,7 +129,7 @@ class EquipmentFitting(BaseModel):
         ...,
         description=(
             "Ball compression recommendation matched to swing speed. "
-            "Reference specific compression range (e.g. 90–100 compression) and "
+            "Reference specific compression range (e.g. 90â€“100 compression) and "
             "explain the energy transfer benefit for this player's speed profile."
         ),
     )
@@ -163,8 +163,8 @@ class SwingAnalysisResponse(BaseModel):
     kinematic_sequence_notes: str = Field(
         ...,
         description=(
-            "Description of the kinematic sequence — the order in which body segments "
-            "generate and transfer speed: pelvis → thorax → lead arm → club. "
+            "Description of the kinematic sequence â€” the order in which body segments "
+            "generate and transfer speed: pelvis â†’ thorax â†’ lead arm â†’ club. "
             "Note any sequence breakdowns."
         ),
     )
@@ -204,6 +204,9 @@ class SwingAnalysisResponse(BaseModel):
             "One concise sentence referencing the highest-severity deficiency."
         ),
     )
+    # --- Runtime metadata (set by gemini_client, not by the model) ---
+    model_used: Optional[str] = Field(default=None)
+    analysis_mode: Optional[str] = Field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +219,11 @@ class AnalyzeSwingRequest(BaseModel):
     swing_category: Literal["full_swing", "putt", "chip", "pitch", "bunker"] = Field(
         default="full_swing",
     )
-    # Optional launch monitor context — if present, triggers equipment fitting
+    # Optional launch monitor context â€” if present, triggers equipment fitting
     swing_speed_mph: Optional[float] = None
     ball_speed_mph: Optional[float] = None
     smash_factor: Optional[float] = None
     spin_rate_rpm: Optional[int] = None
     launch_angle_deg: Optional[float] = None
     carry_yards: Optional[int] = None
+
