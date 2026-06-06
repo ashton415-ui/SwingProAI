@@ -40,7 +40,7 @@ function computeRatings(row: Record<string, unknown>): TelemetryStat {
 export const metadata = { title: 'My Bag — SwingProAI' };
 
 export default async function BagPage() {
-  const supabase = createClient();
+  const supabase = await createClient();
 
   const {
     data: { user },
