@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import {
   LogOut, LayoutDashboard, TrendingUp, CreditCard, Target, Zap,
-  Users, BookOpen, Video, Shield, UserCheck,
+  Users, BookOpen, Video, Shield, UserCheck, Briefcase,
 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -70,6 +70,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
             <NavLink href="/dashboard" icon={<LayoutDashboard size={16} />} label="Progress Hub" />
             <NavLink href="/swings" icon={<TrendingUp size={16} />} label="Telemetry Logs" />
             <NavLink href="/analyze" icon={<Target size={16} />} label="Analyze Swing" />
+            <NavLink href="/bag" icon={<Briefcase size={16} />} label="My Bag" />
             <NavLink href="/lessons" icon={<BookOpen size={16} />} label="My Lessons" />
           </nav>
         )}
