@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
@@ -28,9 +28,14 @@ const MORE_ITEMS = [
   { label: 'Upgrade', href: '/upgrade', icon: Zap },
 ] as const;
 
+const SWIPE_CLOSE_THRESHOLD = 80; // px
+
 export default function MobileNav() {
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
+  const [dragY, setDragY] = useState(0);
+  const touchStartY = useRef(0);
+  const dragging = useRef(false);
 
   function isActive(href: string) {
     return pathname === href || pathname.startsWith(href + '/');
@@ -38,25 +43,63 @@ export default function MobileNav() {
 
   const moreIsActive = MORE_ITEMS.some(({ href }) => isActive(href));
 
+  function closeSheet() {
+    setMoreOpen(false);
+    setDragY(0);
+  }
+
+  function onTouchStart(e: React.TouchEvent) {
+    touchStartY.current = e.touches[0].clientY;
+    dragging.current = true;
+  }
+
+  function onTouchMove(e: React.TouchEvent) {
+    if (!dragging.current) return;
+    const delta = e.touches[0].clientY - touchStartY.current;
+    setDragY(Math.max(0, delta));
+  }
+
+  function onTouchEnd() {
+    dragging.current = false;
+    if (dragY >= SWIPE_CLOSE_THRESHOLD) {
+      closeSheet();
+    } else {
+      setDragY(0); // spring back
+    }
+  }
+
   return (
     <>
       {/* Backdrop */}
       {moreOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/60 md:hidden"
-          onClick={() => setMoreOpen(false)}
+          onClick={closeSheet}
         />
       )}
 
       {/* More sheet */}
       {moreOpen && (
-        <div className="fixed bottom-16 inset-x-0 z-50 bg-slate-900 border-t border-white/10 rounded-t-2xl px-4 pt-4 pb-6 md:hidden">
+        <div
+          className={`fixed bottom-16 inset-x-0 z-50 bg-slate-900 border-t border-white/10 rounded-t-2xl px-4 pt-3 pb-6 md:hidden ${
+            dragY === 0 ? 'transition-transform duration-200' : ''
+          }`}
+          style={{ transform: `translateY(${dragY}px)` }}
+          onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
+          onTouchEnd={onTouchEnd}
+        >
+          {/* Drag handle */}
+          <div className="flex justify-center mb-3">
+            <div className="w-10 h-1 rounded-full bg-white/20" />
+          </div>
+
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">
               More
             </span>
             <button
-              onClick={() => setMoreOpen(false)}
+              onClick={closeSheet}
               className="p-1 text-slate-400 hover:text-white transition-colors"
             >
               <X className="w-4 h-4" />
@@ -67,7 +110,7 @@ export default function MobileNav() {
               <li key={href}>
                 <Link
                   href={href}
-                  onClick={() => setMoreOpen(false)}
+                  onClick={closeSheet}
                   className={`flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-medium transition-colors ${
                     isActive(href)
                       ? 'bg-indigo-600 text-white'
