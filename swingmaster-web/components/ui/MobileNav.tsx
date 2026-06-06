@@ -36,6 +36,7 @@ export default function MobileNav() {
   const [dragY, setDragY] = useState(0);
   const touchStartY = useRef(0);
   const dragging = useRef(false);
+  const thresholdCrossed = useRef(false);
 
   function isActive(href: string) {
     return pathname === href || pathname.startsWith(href + '/');
@@ -55,12 +56,17 @@ export default function MobileNav() {
   function onTouchStart(e: React.TouchEvent) {
     touchStartY.current = e.touches[0].clientY;
     dragging.current = true;
+    thresholdCrossed.current = false;
   }
 
   function onTouchMove(e: React.TouchEvent) {
     if (!dragging.current) return;
-    const delta = e.touches[0].clientY - touchStartY.current;
-    setDragY(Math.max(0, delta));
+    const delta = Math.max(0, e.touches[0].clientY - touchStartY.current);
+    if (delta >= SWIPE_CLOSE_THRESHOLD && !thresholdCrossed.current) {
+      thresholdCrossed.current = true;
+      haptic();
+    }
+    setDragY(delta);
   }
 
   function onTouchEnd() {
