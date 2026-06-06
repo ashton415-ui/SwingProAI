@@ -5,8 +5,9 @@ import { ArrowLeft, CheckCircle, AlertTriangle, Zap, Clock } from "lucide-react"
 import { PuttingAnalysisPanel } from "@/components/putting/PuttingAnalysisPanel";
 import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
 import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
-import type { SubscriptionTier } from "@/lib/entitlements";
-import type { DeficiencyItem, HighlightItem } from "@/types/database";
+import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
+import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
+import type { EquipmentFitting } from "@/lib/types/swing";
 
 export default async function SwingDetailPage({
   params,
@@ -15,10 +16,17 @@ export default async function SwingDetailPage({
 }) {
   const supabase = await createClient();
   const session = await getServerSession();
-  const { data: profile } = await supabase.from("users").select("subscription_tier").eq("id", session?.user?.id ?? "").single();
-  const tier = (profile?.subscription_tier ?? "par") as SubscriptionTier;
+
   if (!session) redirect("/login");
   const user = session.user;
+
+  const { data: profile } = await supabase
+    .from("users")
+    .select("subscription_tier")
+    .eq("id", user.id)
+    .single();
+
+  const tier = (profile?.subscription_tier ?? "par") as SubscriptionTier;
 
   const { data: swing } = await supabase
     .from("swing_analysis")
@@ -41,15 +49,25 @@ export default async function SwingDetailPage({
     { label: "Shoulder Rotation", value: metrics?.shoulder_rotation_deg ?? null, unit: "°", ideal: "90–110°" },
   ];
 
-  // Parse suggestions from feedback or metrics
   const suggestions = metrics?.suggestions
     ? (metrics.suggestions as unknown as string[])
     : null;
 
-  // v4 granular telemetry arrays (default to [] via the migration)
+  // v4 granular telemetry arrays
   const highlights = (swing.swing_highlights ?? []) as HighlightItem[];
   const deficiencies = (swing.mechanical_deficiencies ?? []) as DeficiencyItem[];
   const detailedHtml = (swing.detailed_summary_html ?? null) as string | null;
+
+  // v5 equipment fitting — from analysis_v2 jsonb if present
+  const analysisV2 = swing.analysis_v2 as Record<string, unknown> | null;
+  const equipmentFitting = (analysisV2?.equipment_fitting ?? null) as EquipmentFitting | null;
+
+  // Entitlement check for equipment fitting
+  const hasEquipmentFitting = tier === "birdie" || tier === "eagle";
+
+  // Swing category for putting engine
+  const swingCategory = (swing.swing_category ?? analysisV2?.swing_category ?? null) as string | null;
+  const isPutt = swingCategory === "putt";
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
@@ -118,7 +136,7 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {/* Deep prose summary (un-truncated, sanitized HTML from the AI backend) */}
+      {/* Deep prose summary */}
       {detailedHtml && (
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
           <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-5 flex items-center gap-2">
@@ -132,17 +150,37 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {/* v4: Swing Highlights — what the golfer nailed (green success rings) */}
+      {/* v4: Swing Highlights */}
       <div className="mb-6">
         <SwingHighlightsPanel tier={tier} highlights={highlights} />
       </div>
 
-      {/* v4: Mechanical Deficiencies — severity badges + fix-drill callouts */}
+      {/* v4: Mechanical Deficiencies */}
       <div className="mb-6">
         <MechanicalDeficienciesPanel tier={tier} deficiencies={deficiencies} />
       </div>
 
-      {/* Suggestions from metrics jsonb */}
+      {/* Putting Analysis — existing panel (numeric metrics) */}
+      {!isPutt && (
+        <PuttingAnalysisPanel
+          tier={tier}
+          metrics={{
+            puttTempoRatio: swing.putt_tempo_ratio ?? null,
+            faceAngleAtImpactDeg: swing.face_angle_at_impact_deg ?? null,
+            pathDeviationMm: swing.path_deviation_mm ?? null,
+          }}
+        />
+      )}
+
+      {/* v5: Equipment Recommendations — Birdie/Eagle gated */}
+      <div className="mb-6">
+        <EquipmentRecommendations
+          fitting={hasEquipmentFitting ? equipmentFitting : null}
+          tier={tier === "coach_starter" || tier === "coach_pro" ? "birdie" : tier === "none" ? "par" : tier}
+        />
+      </div>
+
+      {/* Suggestions */}
       {suggestions && suggestions.length > 0 && (
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
           <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-6">
@@ -159,7 +197,7 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {/* Raw metrics dump (dev aid — only when metrics exist) */}
+      {/* Raw metrics dump */}
       {metrics && Object.keys(metrics).length > 0 && !suggestions && (
         <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 mb-6">
           <h3 className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-4">
@@ -171,25 +209,15 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {/* Processing / pending state */}
+      {/* Status banners */}
       {swing.status === "processing" && (
-        <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-4xl p-6">
+        <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-yellow-400 shrink-0" />
           <p className="text-yellow-300 text-xs font-bold uppercase tracking-wide">
             AI analysis in progress — full results incoming shortly.
           </p>
         </div>
       )}
-
-      {/* Putting Analysis Panel */}
-      <PuttingAnalysisPanel
-        tier={tier}
-        metrics={{
-          puttTempoRatio: swing.putt_tempo_ratio ?? null,
-          faceAngleAtImpactDeg: swing.face_angle_at_impact_deg ?? null,
-          pathDeviationMm: swing.path_deviation_mm ?? null,
-        }}
-      />
 
       {swing.status === "pending" && (
         <div className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-4xl p-6">
