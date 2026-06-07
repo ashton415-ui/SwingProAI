@@ -8,21 +8,24 @@ export const dynamic = "force-dynamic";
 
 const BUCKET = "swing-videos";
 
-interface Props {
-  params: Promise<{ id: string }>;
+interface SwingVideoRow {
+  id: string;
+  video_url: string;
+  storage_path: string | null;
+  original_filename: string | null;
+  club: string | null;
+  created_at: string;
 }
 
-export async function generateMetadata({ params }: Props) {
-  const { id } = await params;
-  return { title: `Swing Analysis ${id.slice(0, 8)}… — SwingProAI` };
+export async function generateMetadata({ params }: { params: { id: string } }) {
+  return { title: `Swing Analysis ${params.id.slice(0, 8)}… — SwingProAI` };
 }
 
-export default async function AnalysisPage({ params }: Props) {
-  const { id } = await params;
+export default async function AnalysisPage({ params }: { params: { id: string } }) {
+  const { id } = params;
 
   const supabase = await createClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
-
   if (authError || !user) redirect("/login");
 
   // Fetch analysis + joined video
@@ -41,26 +44,35 @@ export default async function AnalysisPage({ params }: Props) {
 
   if (error || !row) notFound();
 
-  // Get a short-lived signed URL so the video can be played in the browser
-  let videoSignedUrl: string | null = null;
-  const storagePath = (row.swing_video as { storage_path: string | null } | null)?.storage_path;
+  // Supabase infers the nested join as array — cast through unknown to the real shape
+  const video = (row.swing_video as unknown as SwingVideoRow | SwingVideoRow[] | null);
+  const videoRow: SwingVideoRow | null = Array.isArray(video) ? (video[0] ?? null) : video;
 
-  if (storagePath) {
+  // Generate a 1-hour signed URL for in-browser video playback
+  let videoSignedUrl: string | null = null;
+  if (videoRow?.storage_path) {
     const { data: signed } = await supabase.storage
       .from(BUCKET)
-      .createSignedUrl(storagePath, 3600); // 1-hour TTL
+      .createSignedUrl(videoRow.storage_path, 3600);
     videoSignedUrl = signed?.signedUrl ?? null;
   }
-
-  // Fall back to stored video_url if no signed URL
-  if (!videoSignedUrl) {
-    videoSignedUrl = (row.swing_video as { video_url: string } | null)?.video_url ?? null;
+  if (!videoSignedUrl && videoRow?.video_url) {
+    videoSignedUrl = videoRow.video_url;
   }
 
-  const analysis = row as unknown as AnalysisData;
+  const analysis: AnalysisData = {
+    id: row.id,
+    status: row.status,
+    score: row.score ?? null,
+    feedback: row.feedback ?? null,
+    swing_highlights: (row.swing_highlights as AnalysisData["swing_highlights"]) ?? null,
+    mechanical_deficiencies: (row.mechanical_deficiencies as AnalysisData["mechanical_deficiencies"]) ?? null,
+    metrics: (row.metrics as AnalysisData["metrics"]) ?? null,
+    swing_video: videoRow,
+  };
 
-  const formattedDate = row.swing_video
-    ? new Date((row.swing_video as { created_at: string }).created_at).toLocaleDateString("en-US", {
+  const formattedDate = videoRow?.created_at
+    ? new Date(videoRow.created_at).toLocaleDateString("en-US", {
         month: "short", day: "numeric", year: "numeric",
       })
     : null;
@@ -79,9 +91,7 @@ export default async function AnalysisPage({ params }: Props) {
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Swing Analysis</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {[(row.swing_video as { club: string | null } | null)?.club, formattedDate]
-              .filter(Boolean)
-              .join(" · ")}
+            {[videoRow?.club, formattedDate].filter(Boolean).join(" · ")}
           </p>
         </div>
       </div>
