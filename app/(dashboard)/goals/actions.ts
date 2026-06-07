@@ -1,7 +1,7 @@
 "use server";
 
 import OpenAI from "openai";
-import { getServerSession, createClient } from "@/utils/supabase/server";
+import { createClient } from "@/utils/supabase/server";
 import type { SyllabusData } from "./types";
 
 // ── Shared JSON schema for OpenAI Structured Outputs ─────────────────────────
@@ -154,8 +154,19 @@ async function callOpenAI(
 export async function submitGoals(
   formData: FormData
 ): Promise<{ error?: string }> {
-  const session = await getServerSession();
-  if (!session) return { error: "Not authenticated. Please sign in again." };
+  const supabase = await createClient();
+
+  // Use getUser() so the auth JWT is validated server-side and auth.uid() is
+  // guaranteed to match the session that createClient() embedded in the header.
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  console.log("[submitGoals] user:", JSON.stringify(user));
+  console.log("[submitGoals] authError:", authError);
+
+  if (authError || !user) {
+    console.error("[submitGoals] Auth failed — no user.", authError?.message);
+    return { error: "Not authenticated. Please sign in again." };
+  }
 
   const handicap_raw = formData.get("handicap_baseline") as string;
   const primary_miss = formData.get("primary_miss") as string;
@@ -164,13 +175,17 @@ export async function submitGoals(
   const handicap_baseline =
     handicap_raw !== "" ? parseFloat(handicap_raw) : null;
 
-  const supabase = await createClient();
+  console.log("[submitGoals] inserting for user_id:", user.id, {
+    handicap_baseline,
+    primary_miss,
+    target_goal,
+  });
 
   // Insert the goals row and get back its id
   const { data: inserted, error: insertError } = await supabase
     .from("user_goals")
     .insert({
-      user_id: session.user.id,
+      user_id: user.id,
       handicap_baseline,
       primary_miss: primary_miss || null,
       target_goal: target_goal || null,
@@ -178,7 +193,12 @@ export async function submitGoals(
     .select("id")
     .single();
 
-  if (insertError) return { error: insertError.message };
+  console.log("[submitGoals] insert result:", { inserted, insertError });
+
+  if (insertError) {
+    console.error("[submitGoals] Insert error:", insertError.message, insertError.details, insertError.hint);
+    return { error: insertError.message };
+  }
 
   // Generate syllabus immediately — if AI fails, the row still exists and
   // the plan page will offer a regenerate button.
@@ -189,10 +209,13 @@ export async function submitGoals(
   );
 
   if (syllabus && inserted?.id) {
-    await supabase
+    const { error: updateError } = await supabase
       .from("user_goals")
       .update({ ai_syllabus: syllabus })
       .eq("id", inserted.id);
+    if (updateError) {
+      console.error("[submitGoals] Syllabus update error:", updateError.message);
+    }
   }
 
   return {};
@@ -204,18 +227,25 @@ export async function generateSyllabus(): Promise<{
   syllabus?: SyllabusData;
   error?: string;
 }> {
-  const session = await getServerSession();
-  if (!session) return { error: "Not authenticated." };
-
   const supabase = await createClient();
+
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  console.log("[generateSyllabus] user:", user?.id, "authError:", authError?.message);
+
+  if (authError || !user) {
+    return { error: "Not authenticated." };
+  }
 
   const { data: goalRow, error: fetchError } = await supabase
     .from("user_goals")
     .select("id, handicap_baseline, primary_miss, target_goal")
-    .eq("user_id", session.user.id)
+    .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(1)
     .single();
+
+  console.log("[generateSyllabus] fetchError:", fetchError?.message);
 
   if (fetchError || !goalRow) {
     return { error: "No goals found. Please complete the goals form first." };
@@ -229,10 +259,12 @@ export async function generateSyllabus(): Promise<{
 
   if (result.error) return { error: result.error };
 
-  await supabase
+  const { error: updateError } = await supabase
     .from("user_goals")
     .update({ ai_syllabus: result.syllabus })
     .eq("id", goalRow.id);
+
+  console.log("[generateSyllabus] syllabus update error:", updateError?.message);
 
   return { syllabus: result.syllabus };
 }

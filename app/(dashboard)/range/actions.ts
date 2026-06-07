@@ -1,26 +1,46 @@
 "use server";
 
-import { getServerSession, createClient } from "@/utils/supabase/server";
+import { createClient } from "@/utils/supabase/server";
 
 export async function saveRangeSession(data: {
   sessionType: string;
   shotsTotal: number;
   shotsExecuted: number;
 }): Promise<{ error?: string }> {
-  const session = await getServerSession();
-  if (!session) return { error: "Not authenticated." };
-
   const supabase = await createClient();
 
-  const { error } = await supabase.from("range_sessions").insert({
-    user_id: session.user.id,
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  console.log("[saveRangeSession] user:", user?.id, "authError:", authError?.message);
+
+  if (authError || !user) {
+    console.error("[saveRangeSession] Auth failed — no user.");
+    return { error: "Not authenticated." };
+  }
+
+  const completionRate =
+    data.shotsTotal > 0 ? data.shotsExecuted / data.shotsTotal : 0;
+
+  console.log("[saveRangeSession] inserting:", {
+    user_id: user.id,
     session_type: data.sessionType,
     shots_total: data.shotsTotal,
     shots_executed: data.shotsExecuted,
-    completion_rate:
-      data.shotsTotal > 0 ? data.shotsExecuted / data.shotsTotal : 0,
+    completion_rate: completionRate,
   });
 
-  if (error) return { error: error.message };
+  const { error: insertError } = await supabase.from("range_sessions").insert({
+    user_id: user.id,
+    session_type: data.sessionType,
+    shots_total: data.shotsTotal,
+    shots_executed: data.shotsExecuted,
+    completion_rate: completionRate,
+  });
+
+  if (insertError) {
+    console.error("[saveRangeSession] Insert error:", insertError.message, insertError.details);
+    return { error: insertError.message };
+  }
+
   return {};
 }
