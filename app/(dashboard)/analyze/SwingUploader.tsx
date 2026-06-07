@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import {
   Upload,
   Video,
@@ -50,6 +51,7 @@ type Stage =
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function SwingUploader() {
+  const router = useRouter();
   const [file, setFile]           = useState<File | null>(null);
   const [stage, setStage]         = useState<Stage>("idle");
   const [progress, setProgress]   = useState(0);
@@ -162,6 +164,12 @@ export default function SwingUploader() {
 
     setAnalysisId(id ?? null);
     setStage("processing");
+
+    // Redirect to result page after a brief moment so the user sees the
+    // "processing" state before the page navigates.
+    if (id) {
+      setTimeout(() => router.push(`/analyze/${id}`), 1200);
+    }
   };
 
   const reset = () => {
