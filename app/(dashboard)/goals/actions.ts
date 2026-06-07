@@ -1,7 +1,155 @@
 "use server";
 
+import OpenAI from "openai";
 import { getServerSession, createClient } from "@/utils/supabase/server";
 import type { SyllabusData } from "./types";
+
+// ── Shared JSON schema for OpenAI Structured Outputs ─────────────────────────
+
+const SYLLABUS_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: {
+      type: "string",
+      description: "2-3 sentence overview of the plan rationale and expected outcome.",
+    },
+    weeks: {
+      type: "array",
+      description: "Exactly 4 weekly blocks, progressing from foundation to competition prep.",
+      items: {
+        type: "object",
+        properties: {
+          week: { type: "integer", description: "Week number 1-4." },
+          theme: {
+            type: "string",
+            description: "Short catchy name for the week, e.g. 'Foundation & Fault Diagnosis'.",
+          },
+          focus: {
+            type: "string",
+            description: "Primary technical area for this week.",
+          },
+          drills: {
+            type: "array",
+            description: "3-5 specific, executable drills.",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Specific named drill." },
+                description: {
+                  type: "string",
+                  description: "Clear, actionable instruction in 2-3 sentences.",
+                },
+                duration: {
+                  type: "string",
+                  description: "e.g. '20 min', '50 reps', '3 sets × 15 swings'.",
+                },
+                category: {
+                  type: "string",
+                  enum: ["driving", "irons", "short_game", "putting", "mental"],
+                },
+              },
+              required: ["name", "description", "duration", "category"],
+              additionalProperties: false,
+            },
+          },
+          weekly_goal: {
+            type: "string",
+            description: "Measurable, observable outcome to achieve by end of week.",
+          },
+          pro_tip: {
+            type: "string",
+            description: "One elite-level insight or swing thought for the week.",
+          },
+        },
+        required: ["week", "theme", "focus", "drills", "weekly_goal", "pro_tip"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["summary", "weeks"],
+  additionalProperties: false,
+} as const;
+
+// ── Shared prompt builder ─────────────────────────────────────────────────────
+
+function buildMessages(
+  handicap: number | null,
+  primaryMiss: string | null,
+  targetGoal: string | null
+): OpenAI.Chat.ChatCompletionMessageParam[] {
+  return [
+    {
+      role: "system",
+      content: `You are an expert PGA golf instructor and sports performance coach specialising in structured practice design.
+
+Generate a personalised 4-week golf practice plan tailored to the golfer's exact profile.
+
+Rules:
+- Exactly 4 weeks in the plan
+- Each week has 3-5 drills
+- Logical progression: Week 1 = diagnosis & foundation, Week 2 = pattern building, Week 3 = feel & variability, Week 4 = pressure simulation & competition prep
+- All drills must be executable at a practice range without special equipment
+- Tailor every detail — drill names, cues, focus areas — to the golfer's specific handicap, miss pattern, and goal`,
+    },
+    {
+      role: "user",
+      content: `Generate a 4-week personalised golf practice plan for this golfer:
+
+Handicap Index: ${handicap != null ? handicap : "Unknown (assume ~18)"}
+Primary miss: ${primaryMiss ?? "None specified"}
+Target goal: ${targetGoal ?? "General improvement"}`,
+    },
+  ];
+}
+
+// ── Internal AI call ──────────────────────────────────────────────────────────
+
+async function callOpenAI(
+  handicap: number | null,
+  primaryMiss: string | null,
+  targetGoal: string | null
+): Promise<{ syllabus?: SyllabusData; error?: string }> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return { error: "AI service is not configured." };
+
+  const openai = new OpenAI({ apiKey });
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: buildMessages(handicap, primaryMiss, targetGoal),
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "golf_lesson_plan",
+          strict: true,
+          schema: SYLLABUS_SCHEMA,
+        },
+      },
+    });
+
+    const raw = completion.choices[0]?.message?.content;
+    if (!raw) return { error: "Empty response from AI. Please try again." };
+
+    let syllabus: SyllabusData;
+    try {
+      syllabus = JSON.parse(raw) as SyllabusData;
+    } catch {
+      return { error: "AI returned malformed JSON. Please try again." };
+    }
+
+    if (!Array.isArray(syllabus?.weeks) || syllabus.weeks.length === 0) {
+      return { error: "AI returned an incomplete plan. Please try again." };
+    }
+
+    return { syllabus };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return { error: `AI service error: ${msg}` };
+  }
+}
+
+// ── submitGoals — insert goals + generate syllabus in one shot ────────────────
 
 export async function submitGoals(
   formData: FormData
@@ -13,18 +161,44 @@ export async function submitGoals(
   const primary_miss = formData.get("primary_miss") as string;
   const target_goal = (formData.get("target_goal") as string).trim();
 
+  const handicap_baseline =
+    handicap_raw !== "" ? parseFloat(handicap_raw) : null;
+
   const supabase = await createClient();
 
-  const { error } = await supabase.from("user_goals").insert({
-    user_id: session.user.id,
-    handicap_baseline: handicap_raw !== "" ? parseFloat(handicap_raw) : null,
-    primary_miss: primary_miss || null,
-    target_goal: target_goal || null,
-  });
+  // Insert the goals row and get back its id
+  const { data: inserted, error: insertError } = await supabase
+    .from("user_goals")
+    .insert({
+      user_id: session.user.id,
+      handicap_baseline,
+      primary_miss: primary_miss || null,
+      target_goal: target_goal || null,
+    })
+    .select("id")
+    .single();
 
-  if (error) return { error: error.message };
+  if (insertError) return { error: insertError.message };
+
+  // Generate syllabus immediately — if AI fails, the row still exists and
+  // the plan page will offer a regenerate button.
+  const { syllabus } = await callOpenAI(
+    handicap_baseline,
+    primary_miss || null,
+    target_goal || null
+  );
+
+  if (syllabus && inserted?.id) {
+    await supabase
+      .from("user_goals")
+      .update({ ai_syllabus: syllabus })
+      .eq("id", inserted.id);
+  }
+
   return {};
 }
+
+// ── generateSyllabus — regenerate from the plan page ─────────────────────────
 
 export async function generateSyllabus(): Promise<{
   syllabus?: SyllabusData;
@@ -35,7 +209,6 @@ export async function generateSyllabus(): Promise<{
 
   const supabase = await createClient();
 
-  // Fetch the most recent goals row for this user
   const { data: goalRow, error: fetchError } = await supabase
     .from("user_goals")
     .select("id, handicap_baseline, primary_miss, target_goal")
@@ -48,96 +221,18 @@ export async function generateSyllabus(): Promise<{
     return { error: "No goals found. Please complete the goals form first." };
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return { error: "AI service is not configured." };
+  const result = await callOpenAI(
+    goalRow.handicap_baseline as number | null,
+    goalRow.primary_miss as string | null,
+    goalRow.target_goal as string | null
+  );
 
-  const model = process.env.GEMINI_ADVANCED_MODEL ?? "gemini-2.5-flash";
+  if (result.error) return { error: result.error };
 
-  const systemInstruction = `You are an expert PGA golf instructor and sports performance coach specialising in structured practice design.
+  await supabase
+    .from("user_goals")
+    .update({ ai_syllabus: result.syllabus })
+    .eq("id", goalRow.id);
 
-Return ONLY a valid JSON object matching this exact schema — no markdown, no explanation:
-
-{
-  "summary": "string (2-3 sentences: plan rationale and expected outcome for this specific golfer)",
-  "weeks": [
-    {
-      "week": 1,
-      "theme": "string (short catchy name, e.g. 'Foundation & Fault Diagnosis')",
-      "focus": "string (primary technical area for this week, e.g. 'Clubface control at impact')",
-      "drills": [
-        {
-          "name": "string (specific named drill, e.g. 'Gate Drill')",
-          "description": "string (clear, actionable instruction — 2-3 sentences)",
-          "duration": "string (e.g. '20 min', '50 reps', '3 sets × 15 swings')",
-          "category": "driving | irons | short_game | putting | mental"
-        }
-      ],
-      "weekly_goal": "string (measurable, observable outcome to achieve by end of week)",
-      "pro_tip": "string (one elite-level insight or swing thought for the week)"
-    }
-  ]
-}
-
-Rules:
-- Exactly 4 objects in the weeks array (week 1-4)
-- Each week has 3-5 drills
-- Logical progression: Week 1 = diagnosis & foundation, Week 2 = pattern building, Week 3 = feel & variability, Week 4 = pressure simulation & competition prep
-- All drills must be executable at a practice range without special equipment
-- Tailor every detail to the golfer's handicap, miss pattern, and stated goal`;
-
-  const userContent = `Generate a 4-week personalised golf practice plan for this golfer:
-
-Handicap Index: ${goalRow.handicap_baseline != null ? goalRow.handicap_baseline : "Unknown (assume ~18)"}
-Primary miss: ${goalRow.primary_miss ?? "None specified"}
-Target goal: ${goalRow.target_goal ?? "General improvement"}`;
-
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemInstruction }] },
-          contents: [{ role: "user", parts: [{ text: userContent }] }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            temperature: 0.7,
-            maxOutputTokens: 4096,
-          },
-        }),
-      }
-    );
-
-    if (!res.ok) {
-      return { error: `AI service error (${res.status}). Please try again.` };
-    }
-
-    const body = await res.json();
-    const rawText: unknown = body?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!rawText) return { error: "Empty response from AI. Please try again." };
-
-    let syllabus: SyllabusData;
-    try {
-      syllabus =
-        typeof rawText === "string" ? JSON.parse(rawText) : (rawText as SyllabusData);
-    } catch {
-      return { error: "AI returned malformed JSON. Please try again." };
-    }
-
-    if (!Array.isArray(syllabus?.weeks) || syllabus.weeks.length === 0) {
-      return { error: "AI returned an incomplete plan. Please try again." };
-    }
-
-    // Persist to the user's goals row
-    await supabase
-      .from("user_goals")
-      .update({ ai_syllabus: syllabus })
-      .eq("id", goalRow.id);
-
-    return { syllabus };
-  } catch {
-    return { error: "Network error contacting AI service. Please try again." };
-  }
+  return { syllabus: result.syllabus };
 }

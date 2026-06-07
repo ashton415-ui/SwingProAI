@@ -220,7 +220,7 @@ export default function GoalsForm() {
             className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-golf-green hover:bg-golf-green/90 disabled:opacity-50 text-sm font-black uppercase tracking-widest text-white transition-colors"
           >
             {isPending ? (
-              "Saving…"
+              "Building Your Plan…"
             ) : step === STEPS.length ? (
               "Generate My Plan"
             ) : (
