@@ -513,7 +513,7 @@ export async function POST(req: NextRequest) {
 
     console.log("[analyze-swing] calling gemini-2.0-flash — parts:", contentParts.length, videoPayload ? "(video + text)" : "(text only)");
     console.log("[analyze-swing] merged metrics:", JSON.stringify(merged));
-    console.log("[analyze-swing] prompt (first 800 chars):", userPrompt.slice(0, 800));
+    console.log("[analyze-swing] prompt length (chars):", userPrompt.length);
 
     const result = await model.generateContent({
       contents: [{ role: "user", parts: contentParts }],
@@ -525,7 +525,10 @@ export async function POST(req: NextRequest) {
     });
     const rawText = result.response.text();
 
-    // Log the full response so we can see exactly what Gemini returned
+    // Log response length separately — Vercel clips long strings in the UI but the
+    // length value is always accurate, so this lets us confirm the response isn't
+    // being cut by Gemini before we even try to parse it.
+    console.log("[analyze-swing] Gemini response length (chars):", rawText.length);
     console.log("[analyze-swing] FULL Gemini response:", rawText);
 
     // ── Step 6: parse + validate ──────────────────────────────────────────
