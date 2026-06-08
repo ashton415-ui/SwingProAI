@@ -65,13 +65,12 @@ function parseTempoRatioToNumber(s: string): number | null {
 }
 
 /** Encode an ArrayBuffer to a base64 string without Node's Buffer API.
- *  Processes in 8 KB chunks to avoid stack-overflow on large videos. */
+ *  Uses an indexed loop — no spread operator, so no --downlevelIteration needed. */
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
 }
