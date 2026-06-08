@@ -26,8 +26,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 
-export const runtime    = 'edge';
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // Inline video budget sent to Gemini. Videos larger than this are analysed
 // from metadata + MediaPipe numbers only — still high quality.
@@ -228,19 +227,37 @@ CRITICAL OUTPUT RULES — READ BEFORE WRITING A SINGLE CHARACTER:
 You MUST return ONLY a valid JSON object matching this exact schema:
 {
   "score": integer (0-100, computed from the DYNAMIC SCORING ALGORITHM — REQUIRED, must appear first, never omit),
-  "overall_assessment": string (EXACTLY 2-3 concise, punchy sentences — cite real degree values, name the primary fault and its ball-flight consequence. No filler. No padding.),
+  "executive_summary": string (3-5 rich, expert sentences delivering the full coaching verdict — cite exact degree values, name every primary fault, state the resulting ball-flight pattern, and give the golfer a clear sense of their current level. This is the first thing they read; make it count.),
+  "fault_tags": string[] (2-4 short snake_case identifiers for the primary faults detected, e.g. ["early_extension", "restricted_backswing", "over_the_top", "casting"]),
   "spine_angle": number (echo the exact measured value — do NOT re-estimate),
   "hip_rotation": number (echo the exact measured value — do NOT re-estimate),
   "shoulder_rotation": number (echo the exact measured value — do NOT re-estimate),
   "tempo_ratio": string (echo measured value if provided, else estimate from video, e.g. "3.0:1"),
-  "highlights": string[] (EXACTLY 2 items — no more, no fewer. Each MUST reference a specific measured degree or visual observation unique to this golfer.),
-  "deficiencies": string[] (EXACTLY 2 items — no more, no fewer. Each MUST name the joint, the exact degree deviation, and ONE specific corrective drill for this golfer's exact fault.),
-  "the_feel": string (one visceral, first-person feel cue written for THIS golfer's exact flaw profile — e.g. if hip_rotation is 28° write about what unlocking frozen hips should physically feel like; must be unique to the measured data, never a generic cue),
-  "posture": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
-  "swing_plane": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
-  "impact": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
-  "practice_focus": string (single highest-priority sentence tied to the worst-scoring measurement),
-  "pro_cue": string (one elite swing thought in 10 words or fewer, specific to this golfer's primary fault)
+  "highlights": [
+    {
+      "title": string (3-6 word bold headline for this strength, e.g. "Strong Hip Clearance at Impact"),
+      "description": string (2-3 sentences — what the golfer is doing well, WHY it is mechanically correct, and what ball-flight benefit it produces. Reference measured data.)
+    }
+  ] (2-4 items — each must cite a specific measured value or visual observation unique to this golfer),
+  "deficiencies": [
+    {
+      "title": string (3-6 word bold headline naming the fault, e.g. "Severe Early Extension at Impact"),
+      "description": string (3-4 sentences — exact measurement → mechanical fault it creates → ball-flight consequence → why this specific golfer produces it based on their data)
+    }
+  ] (2-4 items — each MUST follow the pattern: measurement → fault → ball-flight → root cause),
+  "drills": [
+    {
+      "name": string (official drill name, e.g. "Wall Hip Drill", "Pump Drill", "Step-Through Drill"),
+      "the_why": string (2-3 sentences — the biomechanical reason THIS drill addresses THIS golfer's specific fault, referencing their exact measurements),
+      "the_how": string (3-5 sentences of precise step-by-step execution instructions — reps, tempo, what to feel, what to avoid),
+      "the_feel": string (1-2 sentences — one vivid, first-person kinesthetic cue that captures the target sensation for THIS golfer's exact flaw profile; must be unique to their data, never generic)
+    }
+  ] (one drill per deficiency — so 2-4 drills total, matching the deficiencies array length),
+  "posture": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string (2-3 sentences), "correction": string (2-3 sentences) },
+  "swing_plane": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string (2-3 sentences), "correction": string (2-3 sentences) },
+  "impact": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string (2-3 sentences), "correction": string (2-3 sentences) },
+  "practice_focus": string (1-2 sentences naming the single highest-priority change tied to the worst-scoring measurement — be specific about drill, reps, and timeline),
+  "pro_cue": string (one elite swing thought in 10 words or fewer, specific to this golfer's primary fault — the kind of cue a Tour coach whispers on the range)
 }
 `.trim();
 
@@ -290,12 +307,13 @@ HANDICAP BANDS (for context after you compute the score)
 
 COACHING STANDARDS
 ──────────────────
-• Name joints, planes, and degrees where possible.
-• Every deficiency must include: what is wrong → what the ball does → one specific drill.
-• Every highlight must reinforce a genuine positive — never generic praise.
-• Output EXACTLY 2 highlights and EXACTLY 2 deficiencies — a real coach focuses on the 2 most critical faults.
-• overall_assessment must be 2-3 punchy sentences. No padding. Every sentence earns its place.
-• The pro_cue must be a single feel-image a touring pro would recognise (10 words max).
+• Name joints, planes, and degrees in every observation — never write "your swing plane is off" when you can write "your shaft is 8° above plane at P6".
+• Every deficiency entry must follow the chain: [exact measurement] → [mechanical fault] → [ball-flight consequence] → [root cause for this golfer].
+• Every highlight entry must cite measured data or a specific visual observation — never generic praise like "good tempo".
+• The drills array must contain exactly one drill per deficiency. Each drill must be tailored to THIS golfer's numbers, not a generic prescription.
+• the_feel inside each drill must be a visceral, first-person kinesthetic cue tied to the measured fault — if hip_rotation is 28° the cue should describe what clearing frozen hips actually feels like for a body that has been blocking.
+• executive_summary must read like a paragraph from a PGA Tour coach's assessment letter — authoritative, detailed, and specific to this golfer's data.
+• The pro_cue must be the kind of one-liner a Tour coach whispers on the 18th tee (10 words max).
 
 CRITICAL CONSTRAINT — NUMERIC FIELDS
 ─────────────────────────────────────
@@ -513,14 +531,15 @@ export async function POST(req: NextRequest) {
     // ── Step 6: parse + validate ──────────────────────────────────────────
     let report: {
       score: number;
-      overall_assessment: string;
+      executive_summary: string;
+      fault_tags: string[];
       spine_angle: number;
       hip_rotation: number;
       shoulder_rotation: number;
       tempo_ratio: string;
-      highlights: string[];
-      deficiencies: string[];
-      the_feel: string;
+      highlights: { title: string; description: string }[];
+      deficiencies: { title: string; description: string }[];
+      drills: { name: string; the_why: string; the_how: string; the_feel: string }[];
       posture: { rating: string; observation: string; correction: string };
       swing_plane: { rating: string; observation: string; correction: string };
       impact: { rating: string; observation: string; correction: string };
@@ -546,8 +565,9 @@ export async function POST(req: NextRequest) {
 
     // Validate the hard-required fields — these are non-negotiable for a valid analysis
     const requiredFields = [
-      "score", "overall_assessment", "spine_angle", "hip_rotation",
-      "shoulder_rotation", "tempo_ratio", "highlights", "deficiencies",
+      "score", "executive_summary", "fault_tags",
+      "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
+      "highlights", "deficiencies", "drills",
       "posture", "swing_plane", "impact",
       "practice_focus", "pro_cue",
     ] as const;
@@ -559,9 +579,9 @@ export async function POST(req: NextRequest) {
       throw new Error(`Gemini response missing required fields: ${missing.join(", ")}`);
     }
 
-    // the_feel is optional — gracefully absent on older model responses
-    if (!report.the_feel) {
-      console.warn("[analyze-swing] the_feel not returned by Gemini — storing without it");
+    // drills is required but gracefully handle if absent
+    if (!report.drills || !Array.isArray(report.drills) || report.drills.length === 0) {
+      console.warn("[analyze-swing] drills array missing or empty — storing without drills");
     }
 
     console.log("[analyze-swing] parsed — score:", report.score, "spine:", report.spine_angle, "hips:", report.hip_rotation, "shoulders:", report.shoulder_rotation);
@@ -602,7 +622,7 @@ export async function POST(req: NextRequest) {
     const finalShoulderRotation = toNum(merged.shoulderRotation ?? report.shoulder_rotation);
     const finalTempoRatio       = toStr(merged.tempoRatio       ?? report.tempo_ratio) || null;
     const finalScore            = toInt(report.score);
-    const finalFeedback         = toStr(report.overall_assessment);
+    const finalFeedback         = toStr(report.executive_summary);
 
     console.log("[analyze-swing] metric source — spine:", merged.spineAngle != null ? "client" : "gemini",
       "hip:", merged.hipRotation != null ? "client" : "gemini",
@@ -610,13 +630,25 @@ export async function POST(req: NextRequest) {
     console.log("[analyze-swing] final values — score:", finalScore,
       "spine:", finalSpineAngle, "hip:", finalHipRotation, "shoulder:", finalShoulderRotation);
 
-    // JSONB metrics blob (backwards-compatible reads by older pages)
+    // Map drills array — one per deficiency
+    const drills = toArr(report.drills).map((d) => {
+      const drill = d as { name?: unknown; the_why?: unknown; the_how?: unknown; the_feel?: unknown };
+      return {
+        name:     toStr(drill?.name),
+        the_why:  toStr(drill?.the_why),
+        the_how:  toStr(drill?.the_how),
+        the_feel: toStr(drill?.the_feel),
+      };
+    });
+
+    // JSONB metrics blob
     const metrics = {
       spine_angle:       finalSpineAngle,
       hip_rotation:      finalHipRotation,
       shoulder_rotation: finalShoulderRotation,
       tempo_ratio:       finalTempoRatio,
-      the_feel:          toStr(report.the_feel) || null,
+      fault_tags:        toArr(report.fault_tags).map(toStr),
+      drills,
       posture:           toPillar(report.posture),
       swing_plane:       toPillar(report.swing_plane),
       impact:            toPillar(report.impact),
@@ -624,21 +656,28 @@ export async function POST(req: NextRequest) {
       pro_cue:           toStr(report.pro_cue) || null,
     };
 
-    // Wrap highlight strings into the JSONB array shape the DB column expects
-    const swing_highlights = toArr(report.highlights).map((h) => ({
-      checkpoint:         "impact",
-      positive_movement:  toStr(h),
-      mechanical_benefit: "",
-    }));
+    // Map highlight objects into the JSONB shape the DB column expects
+    const swing_highlights = toArr(report.highlights).map((h) => {
+      const hi = h as { title?: unknown; description?: unknown };
+      return {
+        checkpoint:         "impact",
+        positive_movement:  toStr(hi?.title),
+        mechanical_benefit: toStr(hi?.description),
+      };
+    });
 
-    // Wrap deficiency strings into the JSONB array shape the DB column expects
-    const mechanical_deficiencies = toArr(report.deficiencies).map((d) => ({
-      checkpoint:             "impact",
-      joint_coordinate:       { joint: "general", x: 0.5, y: 0.5 },
-      fault_description:      toStr(d),
-      severity:               "minor",
-      corrective_drill_title: "",
-    }));
+    // Map deficiency objects into the JSONB shape the DB column expects
+    const mechanical_deficiencies = toArr(report.deficiencies).map((d) => {
+      const def = d as { title?: unknown; description?: unknown };
+      return {
+        checkpoint:              "impact",
+        joint_coordinate:        { joint: "general", x: 0.5, y: 0.5 },
+        fault_description:       toStr(def?.title),
+        corrective_drill_detail: toStr(def?.description),
+        severity:                "minor",
+        corrective_drill_title:  "",
+      };
+    });
 
     const tempoNumeric = parseTempoRatioToNumber(finalTempoRatio ?? "");
 
