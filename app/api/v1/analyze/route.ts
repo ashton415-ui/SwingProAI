@@ -40,6 +40,13 @@ function resolveMode(tier: SubscriptionTier): string {
   return "basic";
 }
 
+const RATING_SCORE: Record<string, number> = {
+  beginner:     42,
+  intermediate: 63,
+  advanced:     78,
+  "tour-level": 92,
+};
+
 export async function POST(req: NextRequest) {
   const session = await getServerSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -97,13 +104,18 @@ export async function POST(req: NextRequest) {
       return (d.joint_coordinate as { joint?: string })?.joint ?? "";
     };
 
-    if (typeof a.score !== "number") {
-      console.warn("[v1/analyze] backend returned no score — backend response:", JSON.stringify(a).slice(0, 300));
+    if (a.score === undefined) {
+      console.warn("[v1/analyze] backend returned no score — full backend response:", JSON.stringify(a));
     }
+
+    const resolvedScore =
+      typeof a.score === "number"
+        ? a.score
+        : RATING_SCORE[a.overall_skill_rating ?? ""] ?? 60;
 
     const result = {
       feedback: a.overall_feedback ?? a.executive_summary ?? "",
-      score: typeof a.score === "number" ? a.score : 0,
+      score: resolvedScore,
       executive_summary: a.executive_summary ?? "",
       swing_plane_analysis: a.swing_plane_analysis ?? "",
       kinematic_sequence_notes: a.kinematic_sequence_notes ?? "",
