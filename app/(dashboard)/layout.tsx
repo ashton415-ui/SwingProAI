@@ -68,7 +68,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
               <p className="text-[9px] font-black uppercase tracking-widest text-gray-700 px-3 pb-1">Golfer</p>
             )}
             <NavLink href="/dashboard" icon={<LayoutDashboard size={16} />} label="Progress Hub" />
-            <NavLink href="/swings" icon={<TrendingUp size={16} />} label="Telemetry Logs" />
+            <NavLink href="/telemetry" icon={<TrendingUp size={16} />} label="Telemetry Logs" />
             <NavLink href="/analyze" icon={<Target size={16} />} label="Analyze Swing" />
             <NavLink href="/bag" icon={<Briefcase size={16} />} label="My Bag" />
             <NavLink href="/goals" icon={<Flag size={16} />} label="My Goals" />
