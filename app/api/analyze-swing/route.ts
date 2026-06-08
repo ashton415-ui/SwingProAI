@@ -26,6 +26,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 
+export const runtime    = 'edge';
 export const maxDuration = 60;
 
 // Inline video budget sent to Gemini. Videos larger than this are analysed
@@ -63,12 +64,24 @@ function parseTempoRatioToNumber(s: string): number | null {
   return null;
 }
 
+/** Encode an ArrayBuffer to a base64 string without Node's Buffer API.
+ *  Processes in 8 KB chunks to avoid stack-overflow on large videos. */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  }
+  return btoa(binary);
+}
+
 /** Fetch up to `limitBytes` from `url`. Returns null on network error or if the
  *  response is larger than the limit. */
 async function fetchVideoBytes(
   url: string,
   limitBytes: number,
-): Promise<{ buffer: Buffer; mimeType: string } | null> {
+): Promise<{ buffer: ArrayBuffer; mimeType: string } | null> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
@@ -100,7 +113,7 @@ async function fetchVideoBytes(
       return null;
     }
 
-    return { buffer: Buffer.from(arrayBuf), mimeType };
+    return { buffer: arrayBuf, mimeType };
   } catch (err) {
     console.warn("[analyze-swing] fetchVideoBytes error:", err instanceof Error ? err.message : err);
     return null;
@@ -428,7 +441,7 @@ export async function POST(req: NextRequest) {
       videoPayload = {
         inlineData: {
           mimeType: videoData.mimeType,
-          data: videoData.buffer.toString("base64"),
+          data: arrayBufferToBase64(videoData.buffer),
         },
       };
       console.log("[analyze-swing] video loaded inline:", (videoData.buffer.byteLength / 1_048_576).toFixed(1), "MB");
