@@ -208,9 +208,14 @@ function buildMetricsContext(metrics: {
 // ── JSON output schema (for the prompt — Gemini enforces via responseMimeType) ─
 
 const JSON_SCHEMA_DESCRIPTION = `
-You MUST return ONLY a valid JSON object matching this exact schema (no markdown, no comments):
+CRITICAL OUTPUT RULES — READ BEFORE WRITING A SINGLE CHARACTER:
+1. You MUST include the "score" field as an integer between 0 and 100. It MUST be the very first key in the object.
+2. Do NOT truncate the JSON. Every field listed below is required. The response is not complete until the final closing "}" is written.
+3. Return ONLY the raw JSON object — no markdown fences, no prose, no comments.
+
+You MUST return ONLY a valid JSON object matching this exact schema:
 {
-  "score": integer (0-100, computed from the DYNAMIC SCORING ALGORITHM — never default to 75),
+  "score": integer (0-100, computed from the DYNAMIC SCORING ALGORITHM — REQUIRED, must appear first, never omit),
   "overall_assessment": string (3-5 sentences that quote the actual degree values from GOLFER DATA and name the specific faults they indicate),
   "spine_angle": number (echo the exact measured value — do NOT re-estimate),
   "hip_rotation": number (echo the exact measured value — do NOT re-estimate),
@@ -483,9 +488,9 @@ export async function POST(req: NextRequest) {
     const result = await model.generateContent({
       contents: [{ role: "user", parts: contentParts }],
       generationConfig: {
-        responseMimeType: "application/json",
+        responseMimeType: "application/json",  // forces valid parseable JSON output
         temperature: 0.4,
-        maxOutputTokens: 4096,
+        maxOutputTokens: 8192,  // generous ceiling — long coaching text must not be cut off
       },
     });
     const rawText = result.response.text();
@@ -524,7 +529,7 @@ export async function POST(req: NextRequest) {
       report = JSON.parse(cleaned);
     } catch (parseErr) {
       console.error("[analyze-swing] JSON parse failure:", parseErr instanceof Error ? parseErr.message : parseErr);
-      console.error("[analyze-swing] raw response:", rawText);
+      console.error("[analyze-swing] RAW Gemini string that failed to parse:\n", rawText);
       throw new Error(`Gemini returned non-JSON response: ${String(parseErr)}`);
     }
 
