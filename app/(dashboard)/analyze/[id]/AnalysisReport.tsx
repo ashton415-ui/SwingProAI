@@ -149,10 +149,19 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
       setStep((s) => Math.min(s + 1, STEPS.length - 1));
     }, 2200);
 
+    // Pick up any client-side MediaPipe metrics stored by SwingUploader
+    let mediapipeMetrics: Record<string, unknown> | undefined;
+    try {
+      const raw = sessionStorage.getItem(`mediapipe_${analysisId}`);
+      if (raw) mediapipeMetrics = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // sessionStorage unavailable — proceed without metrics
+    }
+
     fetch("/api/analyze-swing", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysisId }),
+      body: JSON.stringify({ analysisId, ...(mediapipeMetrics ? { mediapipeMetrics } : {}) }),
     })
       .then((r) => r.json())
       .then((res) => {
@@ -160,6 +169,8 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
         if (res.error) {
           setError(res.error);
         } else {
+          // Clean up sessionStorage entry now that the API has consumed it
+          try { sessionStorage.removeItem(`mediapipe_${analysisId}`); } catch { /* ignore */ }
           onComplete(res.data as AnalysisData);
         }
       })

@@ -42,6 +42,7 @@ function isAccepted(f: File): boolean {
 type Stage =
   | "idle"        // no file selected
   | "ready"       // file selected, waiting for upload click
+  | "scanning"    // running local MediaPipe biomechanical scan
   | "signing"     // calling server action to get signed URL
   | "uploading"   // XHR to Supabase Storage in progress
   | "saving"      // calling server action to insert DB rows
@@ -96,6 +97,18 @@ export default function SwingUploader() {
     if (!file) return;
     setError(null);
     setProgress(0);
+
+    // Step 0 — run local MediaPipe biomechanical scan (best-effort; never blocks upload)
+    setStage("scanning");
+    let scannedMetrics: import("@/lib/biometrics").SwingMetrics | null = null;
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      const { extractSwingMetrics } = await import("@/lib/biometrics");
+      scannedMetrics = await extractSwingMetrics(objectUrl);
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      // scanning failure is non-fatal — proceed without metrics
+    }
 
     // Step 1 — get signed URL from server
     setStage("signing");
@@ -164,6 +177,15 @@ export default function SwingUploader() {
 
     setAnalysisId(id ?? null);
     setStage("processing");
+
+    // Persist scanned biomechanics so AnalysisReport can forward them to the API
+    if (id && scannedMetrics) {
+      try {
+        sessionStorage.setItem(`mediapipe_${id}`, JSON.stringify(scannedMetrics));
+      } catch {
+        // sessionStorage unavailable — non-fatal
+      }
+    }
 
     // Redirect to result page after a brief moment so the user sees the
     // "processing" state before the page navigates.
@@ -252,6 +274,31 @@ export default function SwingUploader() {
   }
 
   // ── Render: upload in progress ─────────────────────────────────────────────
+
+  if (stage === "scanning") {
+    return (
+      <div className="bg-golf-header border border-white/5 rounded-2xl p-6">
+        <div className="flex items-center gap-4 mb-5">
+          <div className="w-10 h-10 rounded-xl bg-golf-green/10 border border-golf-green/20 flex items-center justify-center shrink-0">
+            <FileVideo className="w-5 h-5 text-golf-green" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-bold text-white truncate">{file?.name}</p>
+            <p className="text-[11px] text-gray-600">{formatBytes(file?.size ?? 0)}</p>
+          </div>
+        </div>
+        <div className="h-2 bg-white/[0.06] rounded-full overflow-hidden mb-2">
+          <div className="h-full rounded-full bg-amber-400/70 animate-pulse" style={{ width: "30%" }} />
+        </div>
+        <div className="flex items-center gap-2">
+          <Loader2 className="w-3 h-3 text-amber-400 animate-spin shrink-0" />
+          <p className="text-[10px] font-bold uppercase tracking-widest text-amber-400">
+            Extracting swing telemetry…
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (stage === "signing" || stage === "uploading" || stage === "saving") {
     const label =
