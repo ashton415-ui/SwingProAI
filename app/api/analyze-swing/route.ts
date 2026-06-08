@@ -513,12 +513,18 @@ export async function POST(req: NextRequest) {
     };
 
     try {
-      // Strip any accidental markdown fence that slipped through
-      const cleaned = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+      // Extract the JSON object by finding the first { and last } — this handles
+      // any markdown fences, preamble text, or trailing commentary Gemini may add.
+      const firstBrace = rawText.indexOf("{");
+      const lastBrace  = rawText.lastIndexOf("}");
+      if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+        throw new Error("No JSON object found in response");
+      }
+      const cleaned = rawText.slice(firstBrace, lastBrace + 1);
       report = JSON.parse(cleaned);
     } catch (parseErr) {
       console.error("[analyze-swing] JSON parse failure:", parseErr instanceof Error ? parseErr.message : parseErr);
-      console.error("[analyze-swing] raw response (first 500 chars):", rawText.slice(0, 500));
+      console.error("[analyze-swing] raw response:", rawText);
       throw new Error(`Gemini returned non-JSON response: ${String(parseErr)}`);
     }
 
@@ -544,66 +550,88 @@ export async function POST(req: NextRequest) {
 
     console.log("[analyze-swing] parsed — score:", report.score, "spine:", report.spine_angle, "hips:", report.hip_rotation, "shoulders:", report.shoulder_rotation);
 
-    // ── Step 7: map to DB schema + save ──────────────────────────────────
+    // ── Step 7: type-safe mapping + DB write ─────────────────────────────
+
+    // Helpers: coerce Gemini output to correct types so a string "75" or null
+    // never causes a Supabase schema mismatch.
+    const toNum  = (v: unknown): number | null => { const n = Number(v); return (v == null || isNaN(n)) ? null : n; };
+    const toStr  = (v: unknown): string        => (v == null ? "" : String(v));
+    const toArr  = (v: unknown): unknown[]     => (Array.isArray(v) ? v : []);
+    const toPillar = (v: unknown): { rating: string; observation: string; correction: string } | null => {
+      if (!v || typeof v !== "object") return null;
+      const o = v as Record<string, unknown>;
+      const allowed = ["excellent", "good", "needs_work", "poor"];
+      return {
+        rating:      allowed.includes(String(o.rating)) ? String(o.rating) : "needs_work",
+        observation: toStr(o.observation),
+        correction:  toStr(o.correction),
+      };
+    };
+
     // Client-measured values are ground truth; fall back to Gemini's output only
     // when the client scan produced nothing (video too large / scan timed out).
-    const finalSpineAngle       = merged.spineAngle       ?? report.spine_angle;
-    const finalHipRotation      = merged.hipRotation      ?? report.hip_rotation;
-    const finalShoulderRotation = merged.shoulderRotation ?? report.shoulder_rotation;
-    const finalTempoRatio       = merged.tempoRatio       ?? report.tempo_ratio;
+    const finalSpineAngle       = toNum(merged.spineAngle       ?? report.spine_angle);
+    const finalHipRotation      = toNum(merged.hipRotation      ?? report.hip_rotation);
+    const finalShoulderRotation = toNum(merged.shoulderRotation ?? report.shoulder_rotation);
+    const finalTempoRatio       = toStr(merged.tempoRatio       ?? report.tempo_ratio) || null;
+    const finalScore            = toNum(report.score) ?? 0;
+    const finalFeedback         = toStr(report.overall_assessment);
 
     console.log("[analyze-swing] metric source — spine:", merged.spineAngle != null ? "client" : "gemini",
       "hip:", merged.hipRotation != null ? "client" : "gemini",
       "shoulder:", merged.shoulderRotation != null ? "client" : "gemini");
+    console.log("[analyze-swing] final values — score:", finalScore,
+      "spine:", finalSpineAngle, "hip:", finalHipRotation, "shoulder:", finalShoulderRotation);
 
-    // Populate both the JSONB metrics blob (for backwards-compatible reads) and
-    // the dedicated numeric columns that the telemetry page prefers.
+    // JSONB metrics blob (backwards-compatible reads by older pages)
     const metrics = {
       spine_angle:       finalSpineAngle,
       hip_rotation:      finalHipRotation,
       shoulder_rotation: finalShoulderRotation,
       tempo_ratio:       finalTempoRatio,
-      putting_analysis:  report.putting_analysis,
-      the_feel:          report.the_feel,
-      posture:           report.posture,
-      swing_plane:       report.swing_plane,
-      impact:            report.impact,
-      practice_focus:    report.practice_focus,
-      pro_cue:           report.pro_cue,
+      putting_analysis:  toStr(report.putting_analysis) || null,
+      the_feel:          toStr(report.the_feel) || null,
+      posture:           toPillar(report.posture),
+      swing_plane:       toPillar(report.swing_plane),
+      impact:            toPillar(report.impact),
+      practice_focus:    toStr(report.practice_focus) || null,
+      pro_cue:           toStr(report.pro_cue) || null,
     };
 
-    // Wrap plain strings into the JSONB array shapes required by DB constraints
-    const swing_highlights = report.highlights.map((h) => ({
-      checkpoint: "impact" as const,
-      positive_movement: h,
+    // Wrap highlight strings into the JSONB array shape the DB column expects
+    const swing_highlights = toArr(report.highlights).map((h) => ({
+      checkpoint:        "impact",
+      positive_movement: toStr(h),
       mechanical_benefit: "",
     }));
 
-    const mechanical_deficiencies = report.deficiencies.map((d) => ({
-      checkpoint: "impact" as const,
-      joint_coordinate: { joint: "general", x: 0.5, y: 0.5 },
-      fault_description: d,
-      severity: "minor" as const,
+    // Wrap deficiency strings into the JSONB array shape the DB column expects
+    const mechanical_deficiencies = toArr(report.deficiencies).map((d) => ({
+      checkpoint:             "impact",
+      joint_coordinate:       { joint: "general", x: 0.5, y: 0.5 },
+      fault_description:      toStr(d),
+      severity:               "minor",
       corrective_drill_title: "",
     }));
 
     const tempoNumeric = parseTempoRatioToNumber(finalTempoRatio ?? "");
 
-    console.log("[analyze-swing] writing to DB:", analysisId);
+    console.log("[analyze-swing] writing to DB — highlights:", swing_highlights.length,
+      "deficiencies:", mechanical_deficiencies.length);
 
     const { data: updated, error: updateErr } = await supabase
       .from("swing_analysis")
       .update({
         status:            "complete",
-        score:             report.score,
-        feedback:          report.overall_assessment,
-        // Dedicated numeric columns — exact measured values, not Gemini estimates
+        score:             finalScore,
+        feedback:          finalFeedback,
+        // Dedicated numeric columns
         spine_angle:       finalSpineAngle,
         hip_rotation:      finalHipRotation,
         shoulder_rotation: finalShoulderRotation,
         tempo_ratio:       tempoNumeric,
-        // Dedicated putting_analysis jsonb column
-        putting_analysis:  report.putting_analysis ? { analysis: report.putting_analysis } : null,
+        // Dedicated putting_analysis JSONB column
+        putting_analysis:  finalFeedback ? { analysis: toStr(report.putting_analysis) } : null,
         // JSONB blobs
         metrics,
         swing_highlights,
@@ -614,12 +642,25 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (updateErr) {
-      console.error("[analyze-swing] DB update error:", updateErr.message, updateErr.details, updateErr.hint, updateErr.code);
+      // Surface the exact Supabase error — message, details, and hint — so the
+      // frontend can display the real failure reason rather than a generic message.
+      console.error("[analyze-swing] DB update error — message:", updateErr.message);
+      console.error("[analyze-swing] DB update error — details:", updateErr.details);
+      console.error("[analyze-swing] DB update error — hint:", updateErr.hint);
+      console.error("[analyze-swing] DB update error — code:", updateErr.code);
       await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
-      return NextResponse.json({ error: `Failed to save analysis: ${updateErr.message}` }, { status: 500 });
+      return NextResponse.json(
+        {
+          error:   `Database write failed: ${updateErr.message}`,
+          details: updateErr.details ?? null,
+          hint:    updateErr.hint    ?? null,
+          code:    updateErr.code    ?? null,
+        },
+        { status: 400 },
+      );
     }
 
-    console.log("[analyze-swing] complete — status:", updated?.status);
+    console.log("[analyze-swing] complete — score:", finalScore, "status:", updated?.status);
     return NextResponse.json({ message: "Analysis complete", data: updated });
 
   } catch (err) {
