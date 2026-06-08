@@ -22,7 +22,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 
@@ -216,50 +216,99 @@ function buildMetricsContext(metrics: {
   return lines.join("\n");
 }
 
-// ── JSON output schema (for the prompt — Gemini enforces via responseMimeType) ─
+// ── Native Structured Output schema ──────────────────────────────────────────
+// Passed to generationConfig.responseSchema — Gemini enforces every field type
+// and shape at the API level, so no markdown fences can ever appear in the
+// response and JSON.parse() receives a clean string every time.
 
-const JSON_SCHEMA_DESCRIPTION = `
-CRITICAL OUTPUT RULES — READ BEFORE WRITING A SINGLE CHARACTER:
-1. You MUST include the "score" field as an integer between 0 and 100. It MUST be the very first key in the object.
-2. Do NOT truncate the JSON. Every field listed below is required. The response is not complete until the final closing "}" is written.
-3. Return ONLY the raw JSON object — no markdown fences, no prose, no comments.
+const pillarSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    rating:      { type: SchemaType.STRING, enum: ["excellent", "good", "needs_work", "poor"] },
+    observation: { type: SchemaType.STRING },
+    correction:  { type: SchemaType.STRING },
+  },
+  required: ["rating", "observation", "correction"],
+};
 
-You MUST return ONLY a valid JSON object matching this exact schema:
-{
-  "score": integer (0-100, computed from the DYNAMIC SCORING ALGORITHM — REQUIRED, must appear first, never omit),
-  "executive_summary": string (3-5 rich, expert sentences delivering the full coaching verdict — cite exact degree values, name every primary fault, state the resulting ball-flight pattern, and give the golfer a clear sense of their current level. This is the first thing they read; make it count.),
-  "fault_tags": string[] (2-4 short snake_case identifiers for the primary faults detected, e.g. ["early_extension", "restricted_backswing", "over_the_top", "casting"]),
-  "spine_angle": number (echo the exact measured value — do NOT re-estimate),
-  "hip_rotation": number (echo the exact measured value — do NOT re-estimate),
-  "shoulder_rotation": number (echo the exact measured value — do NOT re-estimate),
-  "tempo_ratio": string (echo measured value if provided, else estimate from video, e.g. "3.0:1"),
-  "highlights": [
-    {
-      "title": string (3-6 word bold headline for this strength, e.g. "Strong Hip Clearance at Impact"),
-      "description": string (2-3 sentences — what the golfer is doing well, WHY it is mechanically correct, and what ball-flight benefit it produces. Reference measured data.)
-    }
-  ] (2-4 items — each must cite a specific measured value or visual observation unique to this golfer),
-  "deficiencies": [
-    {
-      "title": string (3-6 word bold headline naming the fault, e.g. "Severe Early Extension at Impact"),
-      "description": string (3-4 sentences — exact measurement → mechanical fault it creates → ball-flight consequence → why this specific golfer produces it based on their data)
-    }
-  ] (2-4 items — each MUST follow the pattern: measurement → fault → ball-flight → root cause),
-  "drills": [
-    {
-      "name": string (official drill name, e.g. "Wall Hip Drill", "Pump Drill", "Step-Through Drill"),
-      "the_why": string (2-3 sentences — the biomechanical reason THIS drill addresses THIS golfer's specific fault, referencing their exact measurements),
-      "the_how": string (3-5 sentences of precise step-by-step execution instructions — reps, tempo, what to feel, what to avoid),
-      "the_feel": string (1-2 sentences — one vivid, first-person kinesthetic cue that captures the target sensation for THIS golfer's exact flaw profile; must be unique to their data, never generic)
-    }
-  ] (one drill per deficiency — so 2-4 drills total, matching the deficiencies array length),
-  "posture": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string (2-3 sentences), "correction": string (2-3 sentences) },
-  "swing_plane": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string (2-3 sentences), "correction": string (2-3 sentences) },
-  "impact": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string (2-3 sentences), "correction": string (2-3 sentences) },
-  "practice_focus": string (1-2 sentences naming the single highest-priority change tied to the worst-scoring measurement — be specific about drill, reps, and timeline),
-  "pro_cue": string (one elite swing thought in 10 words or fewer, specific to this golfer's primary fault — the kind of cue a Tour coach whispers on the range)
-}
-`.trim();
+const RESPONSE_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    score: {
+      type: SchemaType.INTEGER,
+      description: "0-100 from the dynamic scoring algorithm — never default to 75",
+    },
+    executive_summary: {
+      type: SchemaType.STRING,
+      description: "3-5 authoritative coaching sentences citing exact measurements, faults, and ball-flight patterns",
+    },
+    fault_tags: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "2-4 snake_case fault identifiers, e.g. early_extension, restricted_backswing",
+    },
+    spine_angle:       { type: SchemaType.NUMBER, description: "Echo exact measured value — do not re-estimate" },
+    hip_rotation:      { type: SchemaType.NUMBER, description: "Echo exact measured value — do not re-estimate" },
+    shoulder_rotation: { type: SchemaType.NUMBER, description: "Echo exact measured value — do not re-estimate" },
+    tempo_ratio:       { type: SchemaType.STRING, description: "e.g. '3.0:1' — echo measured value or estimate from video" },
+    highlights: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          title:       { type: SchemaType.STRING, description: "3-6 word headline for this strength" },
+          description: { type: SchemaType.STRING, description: "2-3 sentences citing measured data" },
+        },
+        required: ["title", "description"],
+      },
+      description: "2-4 genuine strengths — each must cite a measured value or specific visual observation",
+    },
+    deficiencies: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          title:       { type: SchemaType.STRING, description: "3-6 word headline naming the fault" },
+          description: { type: SchemaType.STRING, description: "3-4 sentences: measurement → fault → ball-flight → root cause" },
+        },
+        required: ["title", "description"],
+      },
+      description: "2-4 faults — each must follow: measurement → fault → ball-flight → root cause",
+    },
+    drills: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          name:     { type: SchemaType.STRING, description: "Official drill name, e.g. Wall Hip Drill" },
+          the_why:  { type: SchemaType.STRING, description: "2-3 sentences: biomechanical reason this drill fixes THIS golfer's fault" },
+          the_how:  { type: SchemaType.STRING, description: "3-5 sentences of step-by-step execution with reps and tempo" },
+          the_feel: { type: SchemaType.STRING, description: "1-2 sentences: vivid first-person kinesthetic cue unique to this golfer's data" },
+        },
+        required: ["name", "the_why", "the_how", "the_feel"],
+      },
+      description: "One drill per deficiency — tailored to this golfer's exact measurements",
+    },
+    posture:     pillarSchema,
+    swing_plane: pillarSchema,
+    impact:      pillarSchema,
+    practice_focus: {
+      type: SchemaType.STRING,
+      description: "Single highest-priority drill prescription with reps and timeline",
+    },
+    pro_cue: {
+      type: SchemaType.STRING,
+      description: "One elite swing thought in 10 words or fewer",
+    },
+  },
+  required: [
+    "score", "executive_summary", "fault_tags",
+    "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
+    "highlights", "deficiencies", "drills",
+    "posture", "swing_plane", "impact",
+    "practice_focus", "pro_cue",
+  ],
+};
 
 // ── System instruction ────────────────────────────────────────────────────────
 
@@ -322,8 +371,6 @@ spine_angle, hip_rotation, or shoulder_rotation, you MUST output those EXACT num
 in the corresponding JSON fields. Do NOT round, adjust, or substitute your own estimate —
 these values are computer-vision measurements and must be preserved verbatim. Your role
 is to INTERPRET and DIAGNOSE these numbers in your prose, not to recalculate them.
-
-${JSON_SCHEMA_DESCRIPTION}
 `.trim();
 
 // ── POST handler ──────────────────────────────────────────────────────────────
@@ -518,16 +565,15 @@ export async function POST(req: NextRequest) {
     const result = await model.generateContent({
       contents: [{ role: "user", parts: contentParts }],
       generationConfig: {
-        responseMimeType: "application/json",  // forces valid parseable JSON output
+        responseMimeType: "application/json",  // required alongside responseSchema
+        responseSchema:   RESPONSE_SCHEMA as Schema, // enforces structure at API level — no markdown fences possible
         temperature: 0.4,
-        maxOutputTokens: 8192,  // generous ceiling — long coaching text must not be cut off
+        maxOutputTokens: 8192,
       },
     });
     const rawText = result.response.text();
 
-    // Log response length separately — Vercel clips long strings in the UI but the
-    // length value is always accurate, so this lets us confirm the response isn't
-    // being cut by Gemini before we even try to parse it.
+    // responseSchema guarantees clean JSON — log length so we can verify in Vercel
     console.log("[analyze-swing] Gemini response length (chars):", rawText.length);
     console.log("[analyze-swing] FULL Gemini response:", rawText);
 
@@ -551,15 +597,8 @@ export async function POST(req: NextRequest) {
     };
 
     try {
-      // Extract the JSON object by finding the first { and last } — this handles
-      // any markdown fences, preamble text, or trailing commentary Gemini may add.
-      const firstBrace = rawText.indexOf("{");
-      const lastBrace  = rawText.lastIndexOf("}");
-      if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
-        throw new Error("No JSON object found in response");
-      }
-      const cleaned = rawText.slice(firstBrace, lastBrace + 1);
-      report = JSON.parse(cleaned);
+      // responseSchema means rawText is always valid JSON — no brace-extraction needed.
+      report = JSON.parse(rawText);
     } catch (parseErr) {
       console.error("[analyze-swing] JSON parse failure:", parseErr instanceof Error ? parseErr.message : parseErr);
       console.error("[analyze-swing] RAW Gemini string that failed to parse:\n", rawText);
