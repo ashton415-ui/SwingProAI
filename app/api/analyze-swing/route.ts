@@ -216,14 +216,13 @@ CRITICAL OUTPUT RULES — READ BEFORE WRITING A SINGLE CHARACTER:
 You MUST return ONLY a valid JSON object matching this exact schema:
 {
   "score": integer (0-100, computed from the DYNAMIC SCORING ALGORITHM — REQUIRED, must appear first, never omit),
-  "overall_assessment": string (3-5 sentences that quote the actual degree values from GOLFER DATA and name the specific faults they indicate),
+  "overall_assessment": string (EXACTLY 2-3 concise, punchy sentences — cite real degree values, name the primary fault and its ball-flight consequence. No filler. No padding.),
   "spine_angle": number (echo the exact measured value — do NOT re-estimate),
   "hip_rotation": number (echo the exact measured value — do NOT re-estimate),
   "shoulder_rotation": number (echo the exact measured value — do NOT re-estimate),
   "tempo_ratio": string (echo measured value if provided, else estimate from video, e.g. "3.0:1"),
-  "highlights": string[] (2-4 items — each MUST reference a specific measured degree or visual observation unique to this golfer),
-  "deficiencies": string[] (2-4 items — each MUST name the joint, the exact degree deviation, and ONE specific corrective drill that addresses this golfer's exact fault),
-  "putting_analysis": string (2-3 sentences derived from this golfer's specific setup angles and alignment tendencies),
+  "highlights": string[] (EXACTLY 2 items — no more, no fewer. Each MUST reference a specific measured degree or visual observation unique to this golfer.),
+  "deficiencies": string[] (EXACTLY 2 items — no more, no fewer. Each MUST name the joint, the exact degree deviation, and ONE specific corrective drill for this golfer's exact fault.),
   "the_feel": string (one visceral, first-person feel cue written for THIS golfer's exact flaw profile — e.g. if hip_rotation is 28° write about what unlocking frozen hips should physically feel like; must be unique to the measured data, never a generic cue),
   "posture": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
   "swing_plane": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
@@ -282,7 +281,8 @@ COACHING STANDARDS
 • Name joints, planes, and degrees where possible.
 • Every deficiency must include: what is wrong → what the ball does → one specific drill.
 • Every highlight must reinforce a genuine positive — never generic praise.
-• Putting analysis must connect the full-swing setup/alignment pattern to putting tendencies.
+• Output EXACTLY 2 highlights and EXACTLY 2 deficiencies — a real coach focuses on the 2 most critical faults.
+• overall_assessment must be 2-3 punchy sentences. No padding. Every sentence earns its place.
 • The pro_cue must be a single feel-image a touring pro would recognise (10 words max).
 
 CRITICAL CONSTRAINT — NUMERIC FIELDS
@@ -508,7 +508,6 @@ export async function POST(req: NextRequest) {
       tempo_ratio: string;
       highlights: string[];
       deficiencies: string[];
-      putting_analysis: string;
       the_feel: string;
       posture: { rating: string; observation: string; correction: string };
       swing_plane: { rating: string; observation: string; correction: string };
@@ -537,7 +536,7 @@ export async function POST(req: NextRequest) {
     const requiredFields = [
       "score", "overall_assessment", "spine_angle", "hip_rotation",
       "shoulder_rotation", "tempo_ratio", "highlights", "deficiencies",
-      "putting_analysis", "posture", "swing_plane", "impact",
+      "posture", "swing_plane", "impact",
       "practice_focus", "pro_cue",
     ] as const;
 
@@ -605,7 +604,6 @@ export async function POST(req: NextRequest) {
       hip_rotation:      finalHipRotation,
       shoulder_rotation: finalShoulderRotation,
       tempo_ratio:       finalTempoRatio,
-      putting_analysis:  toStr(report.putting_analysis) || null,
       the_feel:          toStr(report.the_feel) || null,
       posture:           toPillar(report.posture),
       swing_plane:       toPillar(report.swing_plane),
@@ -640,7 +638,6 @@ export async function POST(req: NextRequest) {
       hip_rotation:      finalHipRotation,
       shoulder_rotation: finalShoulderRotation,
       tempo_ratio:       tempoNumeric,
-      putting_analysis:  toStr(report.putting_analysis) ? { analysis: toStr(report.putting_analysis) } : null,
       metrics,
       swing_highlights,
       mechanical_deficiencies,
