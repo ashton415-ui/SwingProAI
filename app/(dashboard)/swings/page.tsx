@@ -12,7 +12,21 @@ import {
   ChevronRight,
   Zap,
   BarChart3,
+  Activity,
+  ArrowUpRight,
+  AlertTriangle,
+  Crosshair,
 } from "lucide-react";
+
+// ── Biomechanical data shape (from `metrics` JSONB) ───────────────────────────
+
+interface BioMetrics {
+  spine_angle?: number;
+  hip_rotation?: number;
+  shoulder_rotation?: number;
+  tempo_ratio?: string;
+  putting_analysis?: string;
+}
 
 // ── Unified timeline types ────────────────────────────────────────────────────
 
@@ -25,6 +39,9 @@ interface SwingEntry {
   feedback: string | null;
   club: string | null;
   filename: string | null;
+  bio: BioMetrics;
+  highlights: string[];
+  deficiencies: string[];
 }
 
 interface RangeEntry {
@@ -63,10 +80,10 @@ function sessionLabel(type: string) {
 }
 
 function scoreColor(score: number | null) {
-  if (score == null) return "text-gray-600 border-white/10";
-  if (score >= 80) return "text-golf-green border-golf-green/20";
-  if (score >= 65) return "text-yellow-400 border-yellow-400/20";
-  return "text-red-400 border-red-500/20";
+  if (score == null) return "text-gray-600";
+  if (score >= 80) return "text-golf-green";
+  if (score >= 65) return "text-yellow-400";
+  return "text-red-400";
 }
 
 function execPct(rate: number) {
@@ -107,59 +124,158 @@ function SwingStatusChip({ status }: { status: string }) {
   );
 }
 
+// ── Biomechanical metric badge ────────────────────────────────────────────────
+
+function MetricBadge({
+  label,
+  value,
+  unit,
+}: {
+  label: string;
+  value: string | number | undefined;
+  unit?: string;
+}) {
+  if (value == null) return null;
+  return (
+    <div className="flex flex-col items-center px-4 py-2.5 rounded-xl bg-black/30 border border-white/[0.08] min-w-[72px]">
+      <span className="text-base font-black font-mono text-white leading-none mb-1">
+        {typeof value === "number" ? value.toFixed(1) : value}
+        {unit && <span className="text-[10px] text-gray-500 ml-0.5">{unit}</span>}
+      </span>
+      <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-600 whitespace-nowrap">
+        {label}
+      </span>
+    </div>
+  );
+}
+
 // ── Swing card ────────────────────────────────────────────────────────────────
 
 function SwingCard({ entry }: { entry: SwingEntry }) {
   const label = entry.club ?? entry.filename ?? "Untitled Swing";
-  const truncatedFeedback = entry.feedback
-    ? entry.feedback.length > 120
-      ? entry.feedback.slice(0, 117) + "…"
-      : entry.feedback
-    : null;
+  const hasBio = entry.bio.spine_angle != null || entry.bio.hip_rotation != null || entry.bio.shoulder_rotation != null;
+  const hasHighlights = entry.highlights.length > 0;
+  const hasDeficiencies = entry.deficiencies.length > 0;
+  const hasPutting = !!entry.bio.putting_analysis;
+  const isComplete = entry.status === "complete";
 
   return (
-    <div className="group flex gap-4 p-5 rounded-2xl border border-white/[0.06] bg-golf-header hover:border-white/[0.12] transition-all">
-      {/* Icon */}
-      <div className="w-10 h-10 rounded-xl bg-golf-green/10 border border-golf-green/20 flex items-center justify-center shrink-0 mt-0.5">
-        <Video className="w-5 h-5 text-golf-green" />
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 min-w-0">
-        <div className="flex flex-wrap items-start gap-x-3 gap-y-1 mb-2">
-          <span className="text-sm font-black text-white truncate">{label}</span>
-          <SwingStatusChip status={entry.status} />
+    <div className="rounded-2xl border border-white/[0.07] bg-golf-header overflow-hidden hover:border-white/[0.14] transition-all">
+      {/* Top row */}
+      <div className="flex gap-4 p-5 pb-4">
+        <div className="w-10 h-10 rounded-xl bg-golf-green/10 border border-golf-green/20 flex items-center justify-center shrink-0 mt-0.5">
+          <Video className="w-5 h-5 text-golf-green" />
         </div>
 
-        <div className="flex items-center gap-1.5 text-[10px] text-gray-600 mb-3">
-          <Calendar className="w-3 h-3" />
-          <span>{fmtDate(entry.created_at)}</span>
-          <span>·</span>
-          <span>{fmtTime(entry.created_at)}</span>
-          {entry.score != null && (
-            <>
-              <span>·</span>
-              <span className={`font-black font-mono ${scoreColor(entry.score).split(" ")[0]}`}>
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-1.5">
+            <span className="text-sm font-black text-white truncate">{label}</span>
+            <SwingStatusChip status={entry.status} />
+            {entry.score != null && (
+              <span className={`text-sm font-black font-mono ${scoreColor(entry.score)}`}>
                 {entry.score} pts
               </span>
-            </>
-          )}
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-600">
+            <Calendar className="w-3 h-3" />
+            <span>{fmtDate(entry.created_at)}</span>
+            <span>·</span>
+            <span>{fmtTime(entry.created_at)}</span>
+          </div>
         </div>
+      </div>
 
-        {truncatedFeedback && (
-          <p className="text-[11px] text-gray-500 leading-relaxed mb-3 line-clamp-2">
-            {truncatedFeedback}
-          </p>
-        )}
+      {/* Biomechanical metric badges — only shown when complete + data present */}
+      {isComplete && hasBio && (
+        <div className="px-5 pb-4">
+          <div className="flex items-center gap-2 mb-2.5">
+            <Activity className="w-3 h-3 text-gray-700" />
+            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-gray-700">
+              Biomechanics
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <MetricBadge label="Spine Angle" value={entry.bio.spine_angle} unit="°" />
+            <MetricBadge label="Hip Rotation" value={entry.bio.hip_rotation} unit="°" />
+            <MetricBadge label="Shoulder Turn" value={entry.bio.shoulder_rotation} unit="°" />
+            <MetricBadge label="Tempo" value={entry.bio.tempo_ratio} />
+          </div>
+        </div>
+      )}
 
-        {entry.status === "complete" && (
+      {/* Highlights */}
+      {isComplete && hasHighlights && (
+        <div className="mx-5 mb-3 p-3.5 rounded-xl bg-golf-green/[0.06] border border-golf-green/10">
+          <div className="flex items-center gap-1.5 mb-2">
+            <ArrowUpRight className="w-3 h-3 text-golf-green" />
+            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-golf-green">
+              What You&apos;re Doing Well
+            </span>
+          </div>
+          <ul className="space-y-1">
+            {entry.highlights.map((h, i) => (
+              <li key={i} className="flex items-start gap-2 text-[11px] text-gray-300 leading-relaxed">
+                <span className="text-golf-green mt-0.5 shrink-0">✦</span>
+                <span>{h}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Deficiencies */}
+      {isComplete && hasDeficiencies && (
+        <div className="mx-5 mb-3 p-3.5 rounded-xl bg-red-400/[0.05] border border-red-400/10">
+          <div className="flex items-center gap-1.5 mb-2">
+            <AlertTriangle className="w-3 h-3 text-red-400" />
+            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-red-400">
+              Priority Faults
+            </span>
+          </div>
+          <ul className="space-y-1">
+            {entry.deficiencies.map((d, i) => (
+              <li key={i} className="flex items-start gap-2 text-[11px] text-gray-300 leading-relaxed">
+                <span className="text-red-400 mt-0.5 shrink-0">▸</span>
+                <span>{d}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Putting analysis */}
+      {isComplete && hasPutting && (
+        <div className="mx-5 mb-3 p-3.5 rounded-xl bg-amber-400/[0.05] border border-amber-400/10">
+          <div className="flex items-center gap-1.5 mb-2">
+            <Crosshair className="w-3 h-3 text-amber-400" />
+            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-amber-400">
+              Putting Analysis
+            </span>
+          </div>
+          <p className="text-[11px] text-gray-300 leading-relaxed">{entry.bio.putting_analysis}</p>
+        </div>
+      )}
+
+      {/* Footer */}
+      <div className="px-5 py-3 border-t border-white/[0.04] flex items-center justify-between">
+        <span className="text-[9px] font-mono text-gray-700">{entry.id.slice(0, 8)}…</span>
+        {isComplete ? (
           <Link
             href={`/analyze/${entry.id}`}
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-golf-green/10 border border-golf-green/20 text-[10px] font-black uppercase tracking-widest text-golf-green hover:bg-golf-green/20 transition-colors"
           >
             View AI Report <ChevronRight className="w-3 h-3" />
           </Link>
-        )}
+        ) : entry.status === "pending" || entry.status === "processing" ? (
+          <Link
+            href={`/analyze/${entry.id}`}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-white/10 text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white hover:border-white/20 transition-colors"
+          >
+            View Status <ChevronRight className="w-3 h-3" />
+          </Link>
+        ) : null}
       </div>
     </div>
   );
@@ -172,46 +288,49 @@ function RangeCard({ entry }: { entry: RangeEntry }) {
   const missed = entry.shots_total - entry.shots_executed;
 
   return (
-    <div className="group flex gap-4 p-5 rounded-2xl border border-white/[0.06] bg-golf-header hover:border-white/[0.12] transition-all">
-      {/* Icon */}
-      <div className="w-10 h-10 rounded-xl bg-amber-400/10 border border-amber-400/20 flex items-center justify-center shrink-0 mt-0.5">
-        <Target className="w-5 h-5 text-amber-400" />
+    <div className="rounded-2xl border border-white/[0.07] bg-golf-header overflow-hidden hover:border-white/[0.14] transition-all">
+      <div className="flex gap-4 p-5 pb-4">
+        <div className="w-10 h-10 rounded-xl bg-amber-400/10 border border-amber-400/20 flex items-center justify-center shrink-0 mt-0.5">
+          <Target className="w-5 h-5 text-amber-400" />
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-1.5">
+            <span className="text-sm font-black text-white">{sessionLabel(entry.session_type)}</span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-400/10 border border-amber-400/20 text-[9px] font-black uppercase tracking-widest text-amber-400">
+              <BarChart3 className="w-2.5 h-2.5" /> Range
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-600">
+            <Calendar className="w-3 h-3" />
+            <span>{fmtDate(entry.created_at)}</span>
+            <span>·</span>
+            <span>{fmtTime(entry.created_at)}</span>
+          </div>
+        </div>
       </div>
 
-      {/* Content */}
-      <div className="flex-1 min-w-0">
-        <div className="flex flex-wrap items-start gap-x-3 gap-y-1 mb-2">
-          <span className="text-sm font-black text-white">{sessionLabel(entry.session_type)}</span>
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-400/10 border border-amber-400/20 text-[9px] font-black uppercase tracking-widest text-amber-400">
-            <BarChart3 className="w-2.5 h-2.5" /> Range Session
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1.5 text-[10px] text-gray-600 mb-3">
-          <Calendar className="w-3 h-3" />
-          <span>{fmtDate(entry.created_at)}</span>
-          <span>·</span>
-          <span>{fmtTime(entry.created_at)}</span>
-        </div>
-
-        {/* Shot stats */}
-        <div className="flex items-center gap-4">
-          <div className="text-center">
-            <p className={`text-base font-black font-mono ${exec.color}`}>{exec.label}</p>
-            <p className="text-[9px] uppercase tracking-widest text-gray-700">Execution</p>
+      {/* Shot stat badges */}
+      <div className="px-5 pb-5">
+        <div className="flex flex-wrap gap-2">
+          <div className="flex flex-col items-center px-4 py-2.5 rounded-xl bg-black/30 border border-white/[0.08]">
+            <span className={`text-base font-black font-mono leading-none mb-1 ${exec.color}`}>
+              {exec.label}
+            </span>
+            <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-600">Execution</span>
           </div>
-          <div className="w-px h-7 bg-white/[0.06]" />
-          <div className="text-center">
-            <p className="text-base font-black font-mono text-white">{entry.shots_executed}</p>
-            <p className="text-[9px] uppercase tracking-widest text-gray-700">Executed</p>
+          <div className="flex flex-col items-center px-4 py-2.5 rounded-xl bg-black/30 border border-white/[0.08]">
+            <span className="text-base font-black font-mono text-white leading-none mb-1">{entry.shots_executed}</span>
+            <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-600">Executed</span>
           </div>
-          <div className="text-center">
-            <p className="text-base font-black font-mono text-red-400">{missed}</p>
-            <p className="text-[9px] uppercase tracking-widest text-gray-700">Missed</p>
+          <div className="flex flex-col items-center px-4 py-2.5 rounded-xl bg-black/30 border border-white/[0.08]">
+            <span className="text-base font-black font-mono text-red-400 leading-none mb-1">{missed}</span>
+            <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-600">Missed</span>
           </div>
-          <div className="text-center">
-            <p className="text-base font-black font-mono text-gray-400">{entry.shots_total}</p>
-            <p className="text-[9px] uppercase tracking-widest text-gray-700">Total</p>
+          <div className="flex flex-col items-center px-4 py-2.5 rounded-xl bg-black/30 border border-white/[0.08]">
+            <span className="text-base font-black font-mono text-gray-400 leading-none mb-1">{entry.shots_total}</span>
+            <span className="text-[8px] font-black uppercase tracking-[0.15em] text-gray-600">Total</span>
           </div>
         </div>
       </div>
@@ -226,11 +345,15 @@ export default async function SwingsPage() {
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) redirect("/login");
 
-  // Parallel fetch — both tables share the same auth client so RLS is applied
+  // Parallel fetch — same auth client, RLS scoped to user automatically
   const [swingResult, rangeResult] = await Promise.all([
     supabase
       .from("swing_analysis")
-      .select("id, status, score, feedback, created_at, swing_video:swing_videos(club, original_filename)")
+      .select(`
+        id, status, score, feedback, created_at,
+        metrics, swing_highlights, mechanical_deficiencies,
+        swing_video:swing_videos(club, original_filename)
+      `)
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(100),
@@ -243,12 +366,42 @@ export default async function SwingsPage() {
       .limit(100),
   ]);
 
-  // Map to unified timeline entries
+  if (swingResult.error) {
+    console.error("[swings/page] swing_analysis fetch error:", swingResult.error.message);
+  }
+  if (rangeResult.error) {
+    console.error("[swings/page] range_sessions fetch error:", rangeResult.error.message);
+  }
+
   type RawVideo = { club: string | null; original_filename: string | null } | null;
 
   const swingEntries: SwingEntry[] = (swingResult.data ?? []).map((r) => {
-    const vid = (r.swing_video as unknown as RawVideo | RawVideo[]);
+    const vid = r.swing_video as unknown as RawVideo | RawVideo[];
     const videoRow = Array.isArray(vid) ? (vid[0] ?? null) : vid;
+
+    // Extract biomechanics from metrics JSONB
+    const rawMetrics = (r.metrics as Record<string, unknown> | null) ?? {};
+    const bio: BioMetrics = {
+      spine_angle:       typeof rawMetrics.spine_angle === "number"       ? rawMetrics.spine_angle       : undefined,
+      hip_rotation:      typeof rawMetrics.hip_rotation === "number"      ? rawMetrics.hip_rotation      : undefined,
+      shoulder_rotation: typeof rawMetrics.shoulder_rotation === "number" ? rawMetrics.shoulder_rotation : undefined,
+      tempo_ratio:       typeof rawMetrics.tempo_ratio === "string"       ? rawMetrics.tempo_ratio       : undefined,
+      putting_analysis:  typeof rawMetrics.putting_analysis === "string"  ? rawMetrics.putting_analysis  : undefined,
+    };
+
+    // Extract simple strings from jsonb arrays
+    type RawHL = { positive_movement?: unknown };
+    type RawDF = { fault_description?: unknown };
+    const rawHL = (r.swing_highlights as RawHL[] | null) ?? [];
+    const rawDF = (r.mechanical_deficiencies as RawDF[] | null) ?? [];
+
+    const highlights = rawHL
+      .map((h) => (typeof h.positive_movement === "string" ? h.positive_movement : ""))
+      .filter(Boolean);
+    const deficiencies = rawDF
+      .map((d) => (typeof d.fault_description === "string" ? d.fault_description : ""))
+      .filter(Boolean);
+
     return {
       kind: "swing",
       id: r.id,
@@ -258,6 +411,9 @@ export default async function SwingsPage() {
       feedback: r.feedback ?? null,
       club: videoRow?.club ?? null,
       filename: videoRow?.original_filename ?? null,
+      bio,
+      highlights,
+      deficiencies,
     };
   });
 
@@ -271,13 +427,12 @@ export default async function SwingsPage() {
     completion_rate: r.completion_rate,
   }));
 
-  // Merge and sort newest first
   const timeline: TimelineEntry[] = [...swingEntries, ...rangeEntries].sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   );
 
-  const swingCount  = swingEntries.length;
-  const rangeCount  = rangeEntries.length;
+  const swingCount = swingEntries.length;
+  const rangeCount = rangeEntries.length;
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-10">
@@ -288,7 +443,7 @@ export default async function SwingsPage() {
             Telemetry Logs
           </h1>
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 mt-1">
-            All sessions — swing analyses &amp; range work
+            Swing analyses &amp; range sessions — chronological
           </p>
         </div>
         <div className="flex gap-2 mt-1">
@@ -350,7 +505,7 @@ export default async function SwingsPage() {
           </div>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {timeline.map((entry) =>
             entry.kind === "swing" ? (
               <SwingCard key={`swing-${entry.id}`} entry={entry} />

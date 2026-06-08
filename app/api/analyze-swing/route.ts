@@ -5,27 +5,65 @@ import { createClient } from "@/utils/supabase/server";
 export const maxDuration = 60;
 
 // ── Structured Output schema ──────────────────────────────────────────────────
-// Maps directly to swing_analysis DB columns:
-//   score, feedback, swing_highlights (jsonb), mechanical_deficiencies (jsonb),
-//   metrics (jsonb — stores posture/plane/impact + coaching cues)
+// Biomechanical values → stored in `metrics` JSONB column.
+// highlights / deficiencies → simple strings, wrapped into the jsonb array shapes
+// required by the DB constraints on swing_highlights / mechanical_deficiencies.
 
 const ANALYSIS_SCHEMA = {
   type: "object",
   properties: {
     score: {
       type: "integer",
-      description: "Overall swing quality 0-100. 60-80 is a typical mid-handicap range.",
+      description: "Overall swing quality 0-100. 40-65: high-handicapper; 65-78: mid; 78-88: low; 88+: elite.",
     },
     overall_assessment: {
       type: "string",
-      description: "3-5 sentence honest assessment covering the most important findings.",
+      description: "3-5 sentence honest assessment covering the most important biomechanical findings.",
     },
+
+    // ── Biomechanical measurements ──────────────────────────────────────────
+    spine_angle: {
+      type: "number",
+      description: "Estimated spine angle in degrees at address. Ideal range 35-45°. Return a realistic number.",
+    },
+    hip_rotation: {
+      type: "number",
+      description: "Estimated hip rotation in degrees through impact. Elite: 45-55°. Return a realistic number.",
+    },
+    shoulder_rotation: {
+      type: "number",
+      description: "Estimated shoulder turn in degrees at the top of backswing. Ideal: 90-100°. Return a realistic number.",
+    },
+    tempo_ratio: {
+      type: "string",
+      description: "Backswing-to-downswing time ratio expressed as a string, e.g. '3:1' or '2.5:1'. Tour average is 3:1.",
+    },
+
+    // ── Summary arrays (plain strings) ─────────────────────────────────────
+    highlights: {
+      type: "array",
+      description: "2-4 concise bullet strings describing what the golfer is doing well.",
+      items: { type: "string" },
+    },
+    deficiencies: {
+      type: "array",
+      description: "2-4 concise bullet strings describing the priority fault areas and their ball-flight consequence.",
+      items: { type: "string" },
+    },
+
+    // ── Putting analysis ────────────────────────────────────────────────────
+    putting_analysis: {
+      type: "string",
+      description: "2-3 sentence assessment of likely putting tendencies based on the observed setup, grip, and alignment in the swing. Note key stroke mechanics to work on.",
+    },
+
+    // ── Pillar detail (for the full AI Report page) ─────────────────────────
     posture: {
       type: "object",
       properties: {
         rating: { type: "string", enum: ["excellent", "good", "needs_work", "poor"] },
-        observation: { type: "string", description: "Specific, technical observation about the golfer's posture and setup." },
-        correction: { type: "string", description: "Actionable correction the golfer can apply immediately." },
+        observation: { type: "string" },
+        correction: { type: "string" },
       },
       required: ["rating", "observation", "correction"],
       additionalProperties: false,
@@ -34,8 +72,8 @@ const ANALYSIS_SCHEMA = {
       type: "object",
       properties: {
         rating: { type: "string", enum: ["excellent", "good", "needs_work", "poor"] },
-        observation: { type: "string", description: "Specific observation about takeaway, backswing plane, and transition." },
-        correction: { type: "string", description: "Actionable drill or swing thought to fix the plane." },
+        observation: { type: "string" },
+        correction: { type: "string" },
       },
       required: ["rating", "observation", "correction"],
       additionalProperties: false,
@@ -44,44 +82,16 @@ const ANALYSIS_SCHEMA = {
       type: "object",
       properties: {
         rating: { type: "string", enum: ["excellent", "good", "needs_work", "poor"] },
-        observation: { type: "string", description: "Observation about hand position, face angle, and weight transfer at impact." },
-        correction: { type: "string", description: "Specific drill or feel cue to improve impact position." },
+        observation: { type: "string" },
+        correction: { type: "string" },
       },
       required: ["rating", "observation", "correction"],
       additionalProperties: false,
     },
-    highlights: {
-      type: "array",
-      description: "2-4 things the golfer is doing well — reinforce positive habits.",
-      items: {
-        type: "object",
-        properties: {
-          movement: { type: "string", description: "The positive movement being performed." },
-          benefit: { type: "string", description: "Why this movement helps ball flight and consistency." },
-        },
-        required: ["movement", "benefit"],
-        additionalProperties: false,
-      },
-    },
-    deficiencies: {
-      type: "array",
-      description: "2-4 fault areas ranked by priority impact on score.",
-      items: {
-        type: "object",
-        properties: {
-          area: { type: "string", description: "Body part or swing phase (e.g. 'Hip rotation', 'Takeaway')." },
-          fault: { type: "string", description: "Clear description of what is going wrong and its ball-flight consequence." },
-          severity: { type: "string", enum: ["minor", "major"] },
-          drill_title: { type: "string", description: "Named drill to fix this fault." },
-          drill_detail: { type: "string", description: "Step-by-step instructions for the drill in 2-3 sentences." },
-        },
-        required: ["area", "fault", "severity", "drill_title", "drill_detail"],
-        additionalProperties: false,
-      },
-    },
+
     practice_focus: {
       type: "string",
-      description: "Single highest-priority area to work on this week.",
+      description: "Single highest-priority area to work on this week — one sentence.",
     },
     pro_cue: {
       type: "string",
@@ -90,29 +100,54 @@ const ANALYSIS_SCHEMA = {
   },
   required: [
     "score", "overall_assessment",
+    "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
+    "highlights", "deficiencies", "putting_analysis",
     "posture", "swing_plane", "impact",
-    "highlights", "deficiencies",
     "practice_focus", "pro_cue",
   ],
   additionalProperties: false,
 } as const;
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function parseTempoRatioToNumber(s: string): number | null {
+  // "3:1" → 3.0, "2.5:1" → 2.5
+  const parts = s.split(":").map(Number);
+  if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) && parts[1] !== 0) {
+    return parts[0] / parts[1];
+  }
+  return null;
+}
+
 // ── POST /api/analyze-swing ───────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  console.log("[analyze-swing] POST request received");
+
   const supabase = await createClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  console.log("[analyze-swing] auth user:", user?.id, "authError:", authError?.message);
 
   if (authError || !user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { analysisId } = await req.json().catch(() => ({}));
+  let body: { analysisId?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const { analysisId } = body;
   if (!analysisId) {
     return NextResponse.json({ error: "Missing analysisId" }, { status: 400 });
   }
 
-  // Fetch the analysis row + joined video metadata
+  console.log("[analyze-swing] fetching analysis row:", analysisId);
+
+  // Fetch analysis row + joined video metadata
   const { data: analysisRow, error: fetchErr } = await supabase
     .from("swing_analysis")
     .select("*, swing_video:swing_videos(id, club, original_filename, video_url, storage_path, mime_type, file_size)")
@@ -121,27 +156,34 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (fetchErr || !analysisRow) {
-    console.error("[analyze-swing] fetch error:", fetchErr?.message);
+    console.error("[analyze-swing] fetch error:", fetchErr?.message, fetchErr?.details, fetchErr?.hint);
     return NextResponse.json({ error: "Analysis record not found." }, { status: 404 });
   }
+
+  console.log("[analyze-swing] row status:", analysisRow.status);
 
   if (analysisRow.status === "complete") {
     return NextResponse.json({ message: "Already complete", data: analysisRow });
   }
 
   // Mark as processing
-  await supabase
+  const { error: markErr } = await supabase
     .from("swing_analysis")
     .update({ status: "processing" })
     .eq("id", analysisId);
 
+  if (markErr) {
+    console.error("[analyze-swing] failed to mark processing:", markErr.message, markErr.details, markErr.hint);
+  }
+
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
+    console.error("[analyze-swing] OPENAI_API_KEY not set");
     await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
     return NextResponse.json({ error: "AI service not configured." }, { status: 503 });
   }
 
-  // Build context from available metadata
+  // Build context from video metadata
   const video = analysisRow.swing_video as {
     club: string | null;
     original_filename: string | null;
@@ -163,80 +205,83 @@ export async function POST(req: NextRequest) {
   try {
     const openai = new OpenAI({ apiKey });
 
+    console.log("[analyze-swing] calling gpt-4o with Structured Outputs");
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
         {
           role: "system",
-          content: `You are a certified PGA Master Professional and sports biomechanics coach with 20+ years of teaching experience. You write detailed, honest swing analysis reports that coaches and serious golfers rely on.
+          content: `You are a certified PGA Master Professional and sports biomechanics coach with 20+ years of elite teaching experience. You produce detailed, honest swing analysis reports.
 
-Produce a comprehensive structural critique of a golf swing, focusing on three pillars:
-1. POSTURE & SETUP — spine angle, knee flex, stance width, ball position, grip pressure
-2. SWING PLANE — takeaway path, backswing plane, transition, downswing slot, club path through impact
-3. IMPACT POSITION — hand position (shaft lean), face angle, weight transfer, hip clearance, extension through the ball
+Analyse the described golf swing and return a complete structured critique. You MUST include realistic estimated biomechanical measurements:
+- spine_angle: spine tilt in degrees at address (realistic range 25-55°, typical 35-45°)
+- hip_rotation: hip turn through impact in degrees (realistic range 30-65°, elite 45-55°)
+- shoulder_rotation: shoulder turn at top of backswing in degrees (realistic range 60-110°, ideal 90-100°)
+- tempo_ratio: backswing-to-downswing ratio string like "3:1" (tour average), "2.5:1" (fast), "3.5:1" (slow)
 
-Standards:
-- Be specific and technical: name joints, positions, and degrees where relevant
-- Rate areas honestly — "good" means genuinely good technique, not a default
-- Score 40-65: high-handicapper; 65-78: mid-handicapper; 78-88: low-handicapper; 88+: elite
-- Give actionable corrections a golfer can apply on the range today
-- All drills must be executable without special equipment`,
+Standards for scoring:
+- 40-65: high-handicapper (slice, inconsistency, poor mechanics)
+- 65-78: mid-handicapper (solid contact, fixable faults)
+- 78-88: low-handicapper (near-scratch, tour-level approach)
+- 88+: elite / tour-level
+
+Be specific and technical. Name joints and degrees. Highlights must reinforce real positives — not generic praise. Deficiencies must name the fault and its ball-flight consequence. Putting analysis extrapolates from observed setup, grip, and alignment tendencies.`,
         },
         {
           role: "user",
-          content: `Analyse this golf swing and produce a full structural critique.
+          content: `Produce a full biomechanical swing analysis.
 
 Context:
 ${clubContext}
 ${sizeContext}
-Uploaded for AI coaching analysis.
+Session: AI coaching analysis upload
 
-Generate a thorough report covering posture, swing plane, and impact position. Be specific, honest, and actionable.`,
+Return the complete analysis with realistic biomechanical measurements, honest pillar ratings, concise highlight and deficiency bullets, and specific coaching cues.`,
         },
       ],
       response_format: {
         type: "json_schema",
         json_schema: {
-          name: "swing_analysis_report",
+          name: "swing_biomechanical_report",
           strict: true,
           schema: ANALYSIS_SCHEMA,
         },
       },
-      max_tokens: 2500,
+      max_tokens: 3000,
     });
 
     const raw = completion.choices[0]?.message?.content;
-    if (!raw) throw new Error("Empty response from AI.");
+    if (!raw) throw new Error("Empty response from OpenAI.");
+
+    console.log("[analyze-swing] received response, length:", raw.length);
 
     const report = JSON.parse(raw) as {
       score: number;
       overall_assessment: string;
+      spine_angle: number;
+      hip_rotation: number;
+      shoulder_rotation: number;
+      tempo_ratio: string;
+      highlights: string[];
+      deficiencies: string[];
+      putting_analysis: string;
       posture: { rating: string; observation: string; correction: string };
       swing_plane: { rating: string; observation: string; correction: string };
       impact: { rating: string; observation: string; correction: string };
-      highlights: { movement: string; benefit: string }[];
-      deficiencies: { area: string; fault: string; severity: string; drill_title: string; drill_detail: string }[];
       practice_focus: string;
       pro_cue: string;
     };
 
-    // Map to DB schema
-    const swing_highlights = report.highlights.map((h) => ({
-      checkpoint: "impact" as const,
-      positive_movement: h.movement,
-      mechanical_benefit: h.benefit,
-    }));
+    console.log("[analyze-swing] parsed report — score:", report.score, "spine:", report.spine_angle, "hips:", report.hip_rotation);
 
-    const mechanical_deficiencies = report.deficiencies.map((d) => ({
-      checkpoint: "impact" as const,
-      joint_coordinate: { joint: d.area, x: 0.5, y: 0.5 },
-      fault_description: d.fault,
-      severity: d.severity as "minor" | "major",
-      corrective_drill_title: d.drill_title,
-      corrective_drill_detail: d.drill_detail,
-    }));
-
+    // Biomechanical + pillar data all go into `metrics` JSONB
     const metrics = {
+      spine_angle: report.spine_angle,
+      hip_rotation: report.hip_rotation,
+      shoulder_rotation: report.shoulder_rotation,
+      tempo_ratio: report.tempo_ratio,
+      putting_analysis: report.putting_analysis,
       posture: report.posture,
       swing_plane: report.swing_plane,
       impact: report.impact,
@@ -244,31 +289,58 @@ Generate a thorough report covering posture, swing plane, and impact position. B
       pro_cue: report.pro_cue,
     };
 
+    // Wrap string arrays into the JSONB shapes required by DB constraints
+    const swing_highlights = report.highlights.map((h) => ({
+      checkpoint: "impact" as const,
+      positive_movement: h,
+      mechanical_benefit: "",
+    }));
+
+    const mechanical_deficiencies = report.deficiencies.map((d) => ({
+      checkpoint: "impact" as const,
+      joint_coordinate: { joint: "general", x: 0.5, y: 0.5 },
+      fault_description: d,
+      severity: "minor" as const,
+      corrective_drill_title: "",
+    }));
+
+    // Parse "3:1" string → numeric ratio for the dedicated column
+    const tempoNumeric = parseTempoRatioToNumber(report.tempo_ratio);
+
+    console.log("[analyze-swing] updating swing_analysis row:", analysisId);
+
     const { data: updated, error: updateErr } = await supabase
       .from("swing_analysis")
       .update({
         status: "complete",
         score: report.score,
         feedback: report.overall_assessment,
+        tempo_ratio: tempoNumeric,
+        metrics,
         swing_highlights,
         mechanical_deficiencies,
-        metrics,
       })
       .eq("id", analysisId)
       .select()
       .single();
 
     if (updateErr) {
-      console.error("[analyze-swing] update error:", updateErr.message);
+      console.error("[analyze-swing] DB update error:", updateErr.message, updateErr.details, updateErr.hint, updateErr.code);
       await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
-      return NextResponse.json({ error: "Failed to save analysis." }, { status: 500 });
+      return NextResponse.json({ error: `Failed to save analysis: ${updateErr.message}` }, { status: 500 });
     }
 
+    console.log("[analyze-swing] successfully saved, status:", updated?.status);
     return NextResponse.json({ message: "Analysis complete", data: updated });
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[analyze-swing] OpenAI error:", msg);
-    await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+    console.error("[analyze-swing] error:", msg);
+    try {
+      await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+    } catch (failErr) {
+      console.error("[analyze-swing] also failed to mark row as failed:", failErr);
+    }
     return NextResponse.json({ error: `AI analysis failed: ${msg}` }, { status: 500 });
   }
 }
