@@ -26,7 +26,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 // Inline video budget sent to Gemini. Videos larger than this are analysed
 // from metadata + MediaPipe numbers only — still high quality.
@@ -314,6 +314,11 @@ export async function POST(req: NextRequest) {
   }
 
   const { analysisId, mediapipeMetrics: clientMetrics } = body;
+
+  // ── DIAGNOSTIC: log the incoming payload so we can verify the client is sending real angles
+  console.log("INCOMING MEDIAPIPE PAYLOAD:", JSON.stringify(clientMetrics ?? null));
+  console.log("[analyze-swing] analysisId:", analysisId);
+
   if (!analysisId) {
     return NextResponse.json({ error: "Missing analysisId" }, { status: 400 });
   }
@@ -333,8 +338,12 @@ export async function POST(req: NextRequest) {
   }
 
   console.log("[analyze-swing] row status:", analysisRow.status);
+  // NOTE: we intentionally do NOT short-circuit on status === "complete".
+  // Returning cached data caused stale/generic results to be served forever.
+  // Every POST re-runs Gemini. The client-side useRef guard in ProcessingState
+  // ensures this endpoint is called at most once per page load.
   if (analysisRow.status === "complete") {
-    return NextResponse.json({ message: "Already complete", data: analysisRow });
+    console.warn("[analyze-swing] row was already complete — re-running Gemini to refresh");
   }
 
   // Mark as processing
@@ -348,10 +357,11 @@ export async function POST(req: NextRequest) {
   }
 
   const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY;
+  console.log("[analyze-swing] Gemini key present:", !!geminiKey, geminiKey ? `(${geminiKey.slice(0, 8)}...)` : "MISSING");
   if (!geminiKey) {
-    console.error("[analyze-swing] no Gemini API key (GEMINI_API_KEY / GOOGLE_AI_API_KEY)");
+    console.error("[analyze-swing] FATAL: no Gemini API key — set GEMINI_API_KEY or GOOGLE_AI_API_KEY in Vercel env vars");
     await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
-    return NextResponse.json({ error: "AI service not configured." }, { status: 503 });
+    return NextResponse.json({ error: "AI service not configured. Set GEMINI_API_KEY in environment variables." }, { status: 503 });
   }
 
   // ── Video metadata ────────────────────────────────────────────────────────
@@ -472,6 +482,8 @@ export async function POST(req: NextRequest) {
     parts.push(userPrompt);
 
     console.log("[analyze-swing] calling gemini-1.5-pro, parts:", parts.length, videoPayload ? "(video + text)" : "(text only)");
+    console.log("[analyze-swing] prompt preview (first 600 chars):", userPrompt.slice(0, 600));
+    console.log("[analyze-swing] merged metrics being sent:", JSON.stringify(merged));
 
     const result = await model.generateContent(parts);
     const rawText = result.response.text();
@@ -508,19 +520,24 @@ export async function POST(req: NextRequest) {
       throw new Error(`Gemini returned non-JSON response: ${String(parseErr)}`);
     }
 
-    // Validate required top-level fields
+    // Validate the hard-required fields — these are non-negotiable for a valid analysis
     const requiredFields = [
       "score", "overall_assessment", "spine_angle", "hip_rotation",
       "shoulder_rotation", "tempo_ratio", "highlights", "deficiencies",
-      "putting_analysis", "the_feel", "posture", "swing_plane", "impact",
+      "putting_analysis", "posture", "swing_plane", "impact",
       "practice_focus", "pro_cue",
     ] as const;
 
     const missing = requiredFields.filter((f) => report[f] == null);
     if (missing.length > 0) {
-      console.error("[analyze-swing] response missing fields:", missing.join(", "));
-      console.error("[analyze-swing] full response:", rawText);
+      console.error("[analyze-swing] response missing required fields:", missing.join(", "));
+      console.error("[analyze-swing] full raw response:", rawText);
       throw new Error(`Gemini response missing required fields: ${missing.join(", ")}`);
+    }
+
+    // the_feel is optional — gracefully absent on older model responses
+    if (!report.the_feel) {
+      console.warn("[analyze-swing] the_feel not returned by Gemini — storing without it");
     }
 
     console.log("[analyze-swing] parsed — score:", report.score, "spine:", report.spine_angle, "hips:", report.hip_rotation, "shoulders:", report.shoulder_rotation);

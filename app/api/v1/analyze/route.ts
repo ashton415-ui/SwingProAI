@@ -97,9 +97,13 @@ export async function POST(req: NextRequest) {
       return (d.joint_coordinate as { joint?: string })?.joint ?? "";
     };
 
+    if (typeof a.score !== "number") {
+      console.warn("[v1/analyze] backend returned no score — backend response:", JSON.stringify(a).slice(0, 300));
+    }
+
     const result = {
       feedback: a.overall_feedback ?? a.executive_summary ?? "",
-      score: a.score ?? 75,
+      score: typeof a.score === "number" ? a.score : 0,
       executive_summary: a.executive_summary ?? "",
       swing_plane_analysis: a.swing_plane_analysis ?? "",
       kinematic_sequence_notes: a.kinematic_sequence_notes ?? "",
