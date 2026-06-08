@@ -26,7 +26,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 
-export const maxDuration = 120;
+export const maxDuration = 60;
 
 // Inline video budget sent to Gemini. Videos larger than this are analysed
 // from metadata + MediaPipe numbers only — still high quality.
