@@ -552,11 +552,22 @@ export async function POST(req: NextRequest) {
 
     // ── Step 7: type-safe mapping + DB write ─────────────────────────────
 
-    // Helpers: coerce Gemini output to correct types so a string "75" or null
-    // never causes a Supabase schema mismatch.
-    const toNum  = (v: unknown): number | null => { const n = Number(v); return (v == null || isNaN(n)) ? null : n; };
-    const toStr  = (v: unknown): string        => (v == null ? "" : String(v));
-    const toArr  = (v: unknown): unknown[]     => (Array.isArray(v) ? v : []);
+    // ── Type-coercion helpers ─────────────────────────────────────────────
+    // Every value from Gemini goes through these before touching Postgres.
+    // toNum: NaN / undefined / null / non-numeric strings all become null
+    const toNum = (v: unknown): number | null => {
+      if (v == null) return null;
+      const n = Number(v);
+      return isNaN(n) ? null : n;
+    };
+    // toInt: for integer columns (score). parseInt handles "75.9" → 75, "abc" → NaN → 0
+    const toInt = (v: unknown): number => {
+      const i = parseInt(String(v ?? "0"), 10);
+      return isNaN(i) ? 0 : i;
+    };
+    const toStr = (v: unknown): string => (v == null ? "" : String(v));
+    // toArr: guarantees an array even when Gemini returns a single object or omits the field
+    const toArr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
     const toPillar = (v: unknown): { rating: string; observation: string; correction: string } | null => {
       if (!v || typeof v !== "object") return null;
       const o = v as Record<string, unknown>;
@@ -574,7 +585,7 @@ export async function POST(req: NextRequest) {
     const finalHipRotation      = toNum(merged.hipRotation      ?? report.hip_rotation);
     const finalShoulderRotation = toNum(merged.shoulderRotation ?? report.shoulder_rotation);
     const finalTempoRatio       = toStr(merged.tempoRatio       ?? report.tempo_ratio) || null;
-    const finalScore            = toNum(report.score) ?? 0;
+    const finalScore            = toInt(report.score);
     const finalFeedback         = toStr(report.overall_assessment);
 
     console.log("[analyze-swing] metric source — spine:", merged.spineAngle != null ? "client" : "gemini",
@@ -600,8 +611,8 @@ export async function POST(req: NextRequest) {
 
     // Wrap highlight strings into the JSONB array shape the DB column expects
     const swing_highlights = toArr(report.highlights).map((h) => ({
-      checkpoint:        "impact",
-      positive_movement: toStr(h),
+      checkpoint:         "impact",
+      positive_movement:  toStr(h),
       mechanical_benefit: "",
     }));
 
@@ -616,38 +627,31 @@ export async function POST(req: NextRequest) {
 
     const tempoNumeric = parseTempoRatioToNumber(finalTempoRatio ?? "");
 
-    console.log("[analyze-swing] writing to DB — highlights:", swing_highlights.length,
-      "deficiencies:", mechanical_deficiencies.length);
+    const payload = {
+      status:            "complete",
+      score:             finalScore,
+      feedback:          finalFeedback,
+      spine_angle:       finalSpineAngle,
+      hip_rotation:      finalHipRotation,
+      shoulder_rotation: finalShoulderRotation,
+      tempo_ratio:       tempoNumeric,
+      putting_analysis:  toStr(report.putting_analysis) ? { analysis: toStr(report.putting_analysis) } : null,
+      metrics,
+      swing_highlights,
+      mechanical_deficiencies,
+    };
+
+    console.log("FINAL SUPABASE PAYLOAD:", JSON.stringify(payload));
 
     const { data: updated, error: updateErr } = await supabase
       .from("swing_analysis")
-      .update({
-        status:            "complete",
-        score:             finalScore,
-        feedback:          finalFeedback,
-        // Dedicated numeric columns
-        spine_angle:       finalSpineAngle,
-        hip_rotation:      finalHipRotation,
-        shoulder_rotation: finalShoulderRotation,
-        tempo_ratio:       tempoNumeric,
-        // Dedicated putting_analysis JSONB column
-        putting_analysis:  finalFeedback ? { analysis: toStr(report.putting_analysis) } : null,
-        // JSONB blobs
-        metrics,
-        swing_highlights,
-        mechanical_deficiencies,
-      })
+      .update(payload)
       .eq("id", analysisId)
       .select()
       .single();
 
     if (updateErr) {
-      // Surface the exact Supabase error — message, details, and hint — so the
-      // frontend can display the real failure reason rather than a generic message.
-      console.error("[analyze-swing] DB update error — message:", updateErr.message);
-      console.error("[analyze-swing] DB update error — details:", updateErr.details);
-      console.error("[analyze-swing] DB update error — hint:", updateErr.hint);
-      console.error("[analyze-swing] DB update error — code:", updateErr.code);
+      console.error("SUPABASE REJECTION:", updateErr);
       await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
       return NextResponse.json(
         {
