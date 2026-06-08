@@ -468,28 +468,30 @@ export async function POST(req: NextRequest) {
     const model = genAI.getGenerativeModel({
       model: "gemini-1.5-pro",
       systemInstruction: SYSTEM_INSTRUCTION,
+    });
+
+    // Build explicit content parts so the SDK never misinterprets a bare string
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const contentParts: any[] = [];
+    if (videoPayload) contentParts.push(videoPayload);
+    contentParts.push({ text: userPrompt });
+
+    console.log("[analyze-swing] calling gemini-1.5-pro — parts:", contentParts.length, videoPayload ? "(video + text)" : "(text only)");
+    console.log("[analyze-swing] merged metrics:", JSON.stringify(merged));
+    console.log("[analyze-swing] prompt (first 800 chars):", userPrompt.slice(0, 800));
+
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: contentParts }],
       generationConfig: {
         responseMimeType: "application/json",
         temperature: 0.4,
         maxOutputTokens: 4096,
       },
     });
-
-    // Build content parts: [video (optional), text prompt]
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parts: any[] = [];
-    if (videoPayload) parts.push(videoPayload);
-    parts.push(userPrompt);
-
-    console.log("[analyze-swing] calling gemini-1.5-pro, parts:", parts.length, videoPayload ? "(video + text)" : "(text only)");
-    console.log("[analyze-swing] prompt preview (first 600 chars):", userPrompt.slice(0, 600));
-    console.log("[analyze-swing] merged metrics being sent:", JSON.stringify(merged));
-
-    const result = await model.generateContent(parts);
     const rawText = result.response.text();
 
-    console.log("[analyze-swing] Gemini response length:", rawText.length);
-    console.log("[analyze-swing] response preview:", rawText.slice(0, 200));
+    // Log the full response so we can see exactly what Gemini returned
+    console.log("[analyze-swing] FULL Gemini response:", rawText);
 
     // ── Step 6: parse + validate ──────────────────────────────────────────
     let report: {

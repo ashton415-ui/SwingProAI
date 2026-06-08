@@ -472,11 +472,15 @@ function VideoPlayer({ signedUrl, filename }: { signedUrl: string | null; filena
 
 export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl }: Props) {
   const [analysis, setAnalysis] = useState<AnalysisData>(initialAnalysis);
+  // When true, force the ProcessingState even if the DB row is already "complete"
+  const [forceReanalyze, setForceReanalyze] = useState(false);
 
   const isPending    = analysis.status === "pending";
   const isProcessing = analysis.status === "processing";
   const isComplete   = analysis.status === "complete";
   const isFailed     = analysis.status === "failed";
+
+  const showProcessing = isPending || isProcessing || forceReanalyze;
 
   return (
     <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
@@ -506,28 +510,46 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
             </span>
           </div>
         </div>
+
+        {/* Re-analyze button — lets the user force a fresh Gemini run on any complete row */}
+        {isComplete && !forceReanalyze && (
+          <button
+            onClick={() => setForceReanalyze(true)}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] text-xs font-bold text-gray-500 hover:text-white hover:bg-white/[0.06] hover:border-white/[0.14] transition-colors"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            Re-analyze with AI
+          </button>
+        )}
       </div>
 
       {/* ── Right: report ── */}
       <div className="flex-1 min-w-0">
-        {(isPending || isProcessing) && (
+        {showProcessing && (
           <ProcessingState
+            key={forceReanalyze ? "reanalyze" : "initial"}
             analysisId={analysis.id}
-            onComplete={(data) => setAnalysis(data)}
+            onComplete={(data) => { setForceReanalyze(false); setAnalysis(data); }}
           />
         )}
 
-        {isFailed && (
+        {isFailed && !showProcessing && (
           <div className="text-center py-16 max-w-sm mx-auto">
             <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
               <AlertCircle className="w-7 h-7 text-red-400" />
             </div>
             <p className="text-white font-bold mb-2">Analysis Failed</p>
             <p className="text-sm text-gray-500">There was an error processing your swing. Please try uploading again.</p>
+            <button
+              onClick={() => setForceReanalyze(true)}
+              className="mt-4 flex items-center gap-2 mx-auto px-5 py-2.5 rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" /> Retry
+            </button>
           </div>
         )}
 
-        {isComplete && <CoachingReport analysis={analysis} />}
+        {isComplete && !showProcessing && <CoachingReport analysis={analysis} />}
       </div>
     </div>
   );
