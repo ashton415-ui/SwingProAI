@@ -255,6 +255,14 @@ COACHING STANDARDS
 • Putting analysis must connect the full-swing setup/alignment pattern to putting tendencies.
 • The pro_cue must be a single feel-image a touring pro would recognise (10 words max).
 
+CRITICAL CONSTRAINT — NUMERIC FIELDS
+─────────────────────────────────────
+When the RAW BIOMECHANICAL MEASUREMENTS section contains specific degree values for
+spine_angle, hip_rotation, or shoulder_rotation, you MUST output those EXACT numbers
+in the corresponding JSON fields. Do NOT round, adjust, or substitute your own estimate —
+these values are computer-vision measurements and must be preserved verbatim. Your role
+is to INTERPRET and DIAGNOSE these numbers in your prose, not to recalculate them.
+
 ${JSON_SCHEMA_DESCRIPTION}
 `.trim();
 
@@ -476,17 +484,30 @@ export async function POST(req: NextRequest) {
     console.log("[analyze-swing] parsed — score:", report.score, "spine:", report.spine_angle, "hips:", report.hip_rotation, "shoulders:", report.shoulder_rotation);
 
     // ── Step 7: map to DB schema + save ──────────────────────────────────
+    // Client-measured values are ground truth; fall back to Gemini's output only
+    // when the client scan produced nothing (video too large / scan timed out).
+    const finalSpineAngle       = merged.spineAngle       ?? report.spine_angle;
+    const finalHipRotation      = merged.hipRotation      ?? report.hip_rotation;
+    const finalShoulderRotation = merged.shoulderRotation ?? report.shoulder_rotation;
+    const finalTempoRatio       = merged.tempoRatio       ?? report.tempo_ratio;
+
+    console.log("[analyze-swing] metric source — spine:", merged.spineAngle != null ? "client" : "gemini",
+      "hip:", merged.hipRotation != null ? "client" : "gemini",
+      "shoulder:", merged.shoulderRotation != null ? "client" : "gemini");
+
+    // Populate both the JSONB metrics blob (for backwards-compatible reads) and
+    // the dedicated numeric columns that the telemetry page prefers.
     const metrics = {
-      spine_angle:      report.spine_angle,
-      hip_rotation:     report.hip_rotation,
-      shoulder_rotation: report.shoulder_rotation,
-      tempo_ratio:      report.tempo_ratio,
-      putting_analysis: report.putting_analysis,
-      posture:          report.posture,
-      swing_plane:      report.swing_plane,
-      impact:           report.impact,
-      practice_focus:   report.practice_focus,
-      pro_cue:          report.pro_cue,
+      spine_angle:       finalSpineAngle,
+      hip_rotation:      finalHipRotation,
+      shoulder_rotation: finalShoulderRotation,
+      tempo_ratio:       finalTempoRatio,
+      putting_analysis:  report.putting_analysis,
+      posture:           report.posture,
+      swing_plane:       report.swing_plane,
+      impact:            report.impact,
+      practice_focus:    report.practice_focus,
+      pro_cue:           report.pro_cue,
     };
 
     // Wrap plain strings into the JSONB array shapes required by DB constraints
@@ -504,17 +525,24 @@ export async function POST(req: NextRequest) {
       corrective_drill_title: "",
     }));
 
-    const tempoNumeric = parseTempoRatioToNumber(report.tempo_ratio);
+    const tempoNumeric = parseTempoRatioToNumber(finalTempoRatio ?? "");
 
     console.log("[analyze-swing] writing to DB:", analysisId);
 
     const { data: updated, error: updateErr } = await supabase
       .from("swing_analysis")
       .update({
-        status: "complete",
-        score:                  report.score,
-        feedback:               report.overall_assessment,
-        tempo_ratio:            tempoNumeric,
+        status:            "complete",
+        score:             report.score,
+        feedback:          report.overall_assessment,
+        // Dedicated numeric columns — exact measured values, not Gemini estimates
+        spine_angle:       finalSpineAngle,
+        hip_rotation:      finalHipRotation,
+        shoulder_rotation: finalShoulderRotation,
+        tempo_ratio:       tempoNumeric,
+        // Dedicated putting_analysis jsonb column
+        putting_analysis:  report.putting_analysis ? { analysis: report.putting_analysis } : null,
+        // JSONB blobs
         metrics,
         swing_highlights,
         mechanical_deficiencies,

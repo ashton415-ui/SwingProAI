@@ -653,6 +653,7 @@ export default async function TelemetryPage() {
       .from("swing_analysis")
       .select(`
         id, status, score, feedback, created_at,
+        spine_angle, hip_rotation, shoulder_rotation,
         metrics, swing_highlights, mechanical_deficiencies,
         swing_video:swing_videos(club, original_filename)
       `)
@@ -682,10 +683,19 @@ export default async function TelemetryPage() {
     const rawHL  = (r.swing_highlights as RawHL[] | null) ?? [];
     const rawDF  = (r.mechanical_deficiencies as RawDF[] | null) ?? [];
 
+    // Prefer dedicated numeric columns (written by API route from client measurements);
+    // fall back to the JSONB metrics blob for records written before the dedicated columns existed.
+    const spineAngle       = typeof r.spine_angle === "number"       ? r.spine_angle
+                           : typeof raw.spine_angle === "number"     ? raw.spine_angle       : undefined;
+    const hipRotation      = typeof r.hip_rotation === "number"      ? r.hip_rotation
+                           : typeof raw.hip_rotation === "number"    ? raw.hip_rotation      : undefined;
+    const shoulderRotation = typeof r.shoulder_rotation === "number" ? r.shoulder_rotation
+                           : typeof raw.shoulder_rotation === "number" ? raw.shoulder_rotation : undefined;
+
     const bio: BiometricsData = {
-      spine_angle:       typeof raw.spine_angle === "number"       ? raw.spine_angle       : undefined,
-      hip_rotation:      typeof raw.hip_rotation === "number"      ? raw.hip_rotation      : undefined,
-      shoulder_rotation: typeof raw.shoulder_rotation === "number" ? raw.shoulder_rotation : undefined,
+      spine_angle:       spineAngle,
+      hip_rotation:      hipRotation,
+      shoulder_rotation: shoulderRotation,
       tempo_ratio:       typeof raw.tempo_ratio === "string"       ? raw.tempo_ratio       : undefined,
       putting_analysis:  typeof raw.putting_analysis === "string"  ? raw.putting_analysis  : undefined,
       posture:           raw.posture  as BiometricsData["posture"]  ?? undefined,
