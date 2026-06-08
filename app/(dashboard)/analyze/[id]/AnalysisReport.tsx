@@ -36,6 +36,7 @@ interface Metrics {
   impact?: Pillar;
   practice_focus?: string;
   pro_cue?: string;
+  the_feel?: string;
 }
 
 export interface AnalysisData {
@@ -275,6 +276,17 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
           <div>
             <p className="text-[9px] font-black uppercase tracking-widest text-amber-400 mb-0.5">Pro Cue</p>
             <p className="text-sm font-semibold text-white italic">"{metrics.pro_cue}"</p>
+          </div>
+        </div>
+      )}
+
+      {/* The Feel */}
+      {metrics.the_feel && (
+        <div className="flex items-start gap-3 bg-golf-green/[0.05] border border-golf-green/20 rounded-2xl px-5 py-4">
+          <Zap className="w-4 h-4 text-golf-green shrink-0 mt-0.5" />
+          <div>
+            <p className="text-[9px] font-black uppercase tracking-widest text-golf-green mb-1.5">The Feel</p>
+            <p className="text-sm text-gray-200 leading-relaxed italic">"{metrics.the_feel}"</p>
           </div>
         </div>
       )}

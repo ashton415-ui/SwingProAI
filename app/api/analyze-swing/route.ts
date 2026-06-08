@@ -210,20 +210,21 @@ function buildMetricsContext(metrics: {
 const JSON_SCHEMA_DESCRIPTION = `
 You MUST return ONLY a valid JSON object matching this exact schema (no markdown, no comments):
 {
-  "score": integer (0-100),
-  "overall_assessment": string (3-5 sentences integrating the biomechanical findings above),
-  "spine_angle": number (degrees — use measured value if provided, else visually estimate),
-  "hip_rotation": number (degrees),
-  "shoulder_rotation": number (degrees),
-  "tempo_ratio": string (e.g. "3:1"),
-  "highlights": string[] (2-4 concise positives with ball-flight benefit),
-  "deficiencies": string[] (2-4 priority faults with ball-flight consequence and drill),
-  "putting_analysis": string (2-3 sentences on putting tendencies from setup/grip/alignment),
+  "score": integer (0-100, computed from the DYNAMIC SCORING ALGORITHM — never default to 75),
+  "overall_assessment": string (3-5 sentences that quote the actual degree values from GOLFER DATA and name the specific faults they indicate),
+  "spine_angle": number (echo the exact measured value — do NOT re-estimate),
+  "hip_rotation": number (echo the exact measured value — do NOT re-estimate),
+  "shoulder_rotation": number (echo the exact measured value — do NOT re-estimate),
+  "tempo_ratio": string (echo measured value if provided, else estimate from video, e.g. "3.0:1"),
+  "highlights": string[] (2-4 items — each MUST reference a specific measured degree or visual observation unique to this golfer),
+  "deficiencies": string[] (2-4 items — each MUST name the joint, the exact degree deviation, and ONE specific corrective drill that addresses this golfer's exact fault),
+  "putting_analysis": string (2-3 sentences derived from this golfer's specific setup angles and alignment tendencies),
+  "the_feel": string (one visceral, first-person feel cue written for THIS golfer's exact flaw profile — e.g. if hip_rotation is 28° write about what unlocking frozen hips should physically feel like; must be unique to the measured data, never a generic cue),
   "posture": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
   "swing_plane": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
   "impact": { "rating": "excellent"|"good"|"needs_work"|"poor", "observation": string, "correction": string },
-  "practice_focus": string (single highest-priority sentence),
-  "pro_cue": string (one elite swing thought, 10 words or fewer)
+  "practice_focus": string (single highest-priority sentence tied to the worst-scoring measurement),
+  "pro_cue": string (one elite swing thought in 10 words or fewer, specific to this golfer's primary fault)
 }
 `.trim();
 
@@ -234,18 +235,42 @@ You are a world-class PGA Tour swing coach with 25+ years of experience on Tour,
 
 YOUR CORE MANDATE
 ────────────────
-When raw biomechanical measurements are provided (spine angle, hip rotation, shoulder rotation, tempo ratio), you MUST interpret those specific numbers in your analysis. Do not give generic feedback — reference the actual measured values and diagnose the specific fault each number reveals. For example:
-• A measured spine angle drop of >5° from setup to impact is a confirmed early extension — say so explicitly.
-• A shoulder rotation <80° is a restricted backswing — identify the likely cause (thoracic mobility, grip tension).
-• A hip rotation <35° at impact means the arms are racing the body — name the resulting ball flight (block, push-draw, thin).
-• A tempo ratio <2.5:1 indicates casting or early release — prescribe a specific rehearsal drill.
+Every sentence of your output MUST be directly derivable from the GOLFER-SPECIFIC DATA block
+printed in the user prompt. Never substitute a template, a generic example, or a previous
+player's data. If you cannot trace a claim to a specific measured number or a visual
+observation from the video, do not write it.
 
-SCORING RUBRIC
-──────────────
-40-65: high-handicapper — systemic faults causing slices, chunks, and inconsistency
+DIAGNOSTIC RULES (apply mechanically — no template substitution)
+────────────────────────────────────────────────────────────────
+• EARLY EXTENSION: spine_angle_setup − spine_angle_impact > 5° → diagnose confirmed early
+  extension. Cite the exact degree drop. Name the resulting ball flight pattern.
+• RESTRICTED BACKSWING: shoulder_rotation < 80° → identify the specific restricting structure
+  (thoracic rotation, lead arm tension, grip pressure). State the exact measured value.
+• BODY BLOCK: hip_rotation_at_impact < 35° → diagnose arms racing the body. Name the ball
+  flight (block, push-draw, or thin contact). State the exact measured value.
+• CASTING / EARLY RELEASE: tempo_ratio < 2.5 → diagnose lag loss. Name the release timing
+  fault and prescribe a one-movement rehearsal drill tied to this golfer's tempo number.
+• X-FACTOR DEFICIT: (shoulder_rotation − hip_rotation) < 30° → diagnose insufficient power
+  differential. Reference both measured values.
+Every deficiency output must follow: [exact measurement] → [mechanical fault] → [ball-flight consequence] → [specific drill name].
+
+DYNAMIC SCORING ALGORITHM (compute this — do NOT default to 75 or any round number)
+────────────────────────────────────────────────────────────────────────────────────
+Start at 100. Apply deductions from the GOLFER-SPECIFIC DATA:
+• Spine angle loss (setup→impact): −3 pts per degree of drop exceeding 5°
+• Hip rotation at impact: −2 pts per degree below 42° (e.g. 28° hip = 42−28=14° deficit → −28 pts)
+• Shoulder rotation at top: −1.5 pts per degree below 85° (e.g. 70° = 85−70=15° deficit → −22.5 pts)
+• Tempo ratio: −5 pts if ratio < 2.0 or > 4.5; −3 pts if < 2.5 or > 4.0; 0 pts if 2.5–4.0
+• X-Factor deficit: −1 pt per degree that (shoulder − hip) falls below 30°
+Floor: 38. Ceiling: 97. Round to nearest integer.
+If measurements are unavailable, estimate from video and document the basis for your score.
+
+HANDICAP BANDS (for context after you compute the score)
+─────────────────────────────────────────────────────────
+38-65: high-handicapper — systemic faults causing slices, chunks, and inconsistency
 65-78: mid-handicapper — solid contact but fixable mechanical leaks
 78-88: low-handicapper / near-scratch — subtle faults costing yards and dispersion
-88+:   elite / tour-level — fine-tuning only
+88-97: elite / tour-level — fine-tuning only
 
 COACHING STANDARDS
 ──────────────────
@@ -398,18 +423,34 @@ export async function POST(req: NextRequest) {
   // ── Step 5: build Gemini request ──────────────────────────────────────────
   const metricsContext = buildMetricsContext(merged);
 
-  const userPrompt = [
-    `Perform a complete biomechanical swing analysis for this golfer.`,
+  // Build a clearly-labelled data block that Gemini must read before writing anything
+  const exactValuesBlock = [
+    `╔══════════════════════════════════════════════════════════════╗`,
+    `║          GOLFER-SPECIFIC DATA — READ BEFORE WRITING          ║`,
+    `╚══════════════════════════════════════════════════════════════╝`,
+    `Session: ${clubLabel} ${sizeLabel}`,
     ``,
-    `Session context: ${clubLabel} ${sizeLabel}`,
+    `EXACT COMPUTER-VISION MEASUREMENTS (use verbatim in numeric JSON fields):`,
+    merged.spineAngle       != null ? `  Spine Angle (address):    ${merged.spineAngle}°` : `  Spine Angle (address):    NOT MEASURED — estimate from video`,
+    merged.hipRotation      != null ? `  Hip Rotation (impact):    ${merged.hipRotation}°` : `  Hip Rotation (impact):    NOT MEASURED — estimate from video`,
+    merged.shoulderRotation != null ? `  Shoulder Rotation (top):  ${merged.shoulderRotation}°` : `  Shoulder Rotation (top):  NOT MEASURED — estimate from video`,
+    merged.tempoRatio       != null ? `  Tempo Ratio:              ${merged.tempoRatio}` : `  Tempo Ratio:              NOT MEASURED — estimate from video`,
+    merged.setupSpineAngle  != null && merged.impactSpineAngle != null
+      ? `  Spine angle change (setup→impact): ${merged.setupSpineAngle}° → ${merged.impactSpineAngle}° (${(merged.setupSpineAngle - merged.impactSpineAngle).toFixed(1)}° drop)`
+      : `  Spine angle change: insufficient frame data`,
     ``,
+    `DIAGNOSTIC FINDINGS FROM MEASUREMENTS:`,
     metricsContext,
+  ].join("\n");
+
+  const userPrompt = [
+    exactValuesBlock,
     ``,
     videoPayload
-      ? `You have the actual swing video. Use it to visually verify the measured numbers and add observations about grip, alignment, ball position, and any visual cues the numbers do not capture.`
-      : `No video data was transmitted (file too large or unavailable). Base your visual observations on the biomechanical measurements above and context clues. Be explicit about which findings are inferred from the numbers vs. directly observed.`,
+      ? `You have the actual swing video attached. Use it to visually verify the measured numbers above and add observations about grip, alignment, ball position, and any visual cues the numbers do not capture. Do NOT contradict the measured values — they are ground truth.`
+      : `No video was attached (file too large for inline). Base ALL visual observations on the measurements above. Be explicit about which findings come from the numbers vs. your inference.`,
     ``,
-    `Return ONLY the JSON object described in your instructions. No markdown fencing, no preamble.`,
+    `Now apply the DYNAMIC SCORING ALGORITHM and output the JSON object. No markdown, no preamble.`,
   ].join("\n");
 
   try {
@@ -449,6 +490,7 @@ export async function POST(req: NextRequest) {
       highlights: string[];
       deficiencies: string[];
       putting_analysis: string;
+      the_feel: string;
       posture: { rating: string; observation: string; correction: string };
       swing_plane: { rating: string; observation: string; correction: string };
       impact: { rating: string; observation: string; correction: string };
@@ -470,7 +512,7 @@ export async function POST(req: NextRequest) {
     const requiredFields = [
       "score", "overall_assessment", "spine_angle", "hip_rotation",
       "shoulder_rotation", "tempo_ratio", "highlights", "deficiencies",
-      "putting_analysis", "posture", "swing_plane", "impact",
+      "putting_analysis", "the_feel", "posture", "swing_plane", "impact",
       "practice_focus", "pro_cue",
     ] as const;
 
@@ -503,6 +545,7 @@ export async function POST(req: NextRequest) {
       shoulder_rotation: finalShoulderRotation,
       tempo_ratio:       finalTempoRatio,
       putting_analysis:  report.putting_analysis,
+      the_feel:          report.the_feel,
       posture:           report.posture,
       swing_plane:       report.swing_plane,
       impact:            report.impact,

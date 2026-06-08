@@ -17,6 +17,7 @@ interface BiometricsData {
   shoulder_rotation?: number;
   tempo_ratio?:       string;
   putting_analysis?:  string;
+  the_feel?:          string;
   posture?:           { rating: string; observation: string; correction: string };
   swing_plane?:       { rating: string; observation: string; correction: string };
   impact?:            { rating: string; observation: string; correction: string };
@@ -527,6 +528,17 @@ function SwingLogCard({ log }: { log: SwingLog }) {
         </div>
       )}
 
+      {/* ── The Feel ─────────────────────────────────────────────────────── */}
+      {isComplete && log.bio.the_feel && (
+        <div className="mx-5 mb-3 flex items-start gap-3 bg-golf-green/[0.05] border border-golf-green/[0.12] rounded-2xl px-5 py-4">
+          <Zap className="w-4 h-4 text-golf-green shrink-0 mt-0.5" />
+          <div>
+            <p className="text-[8px] font-black uppercase tracking-[0.22em] text-golf-green mb-1.5">The Feel</p>
+            <p className="text-xs text-gray-200 leading-relaxed italic">"{log.bio.the_feel}"</p>
+          </div>
+        </div>
+      )}
+
       {/* ── Equipment Optimizer ───────────────────────────────────────────── */}
       {isComplete && equipment && (
         <div className="px-5 pb-4">
@@ -698,6 +710,7 @@ export default async function TelemetryPage() {
       shoulder_rotation: shoulderRotation,
       tempo_ratio:       typeof raw.tempo_ratio === "string"       ? raw.tempo_ratio       : undefined,
       putting_analysis:  typeof raw.putting_analysis === "string"  ? raw.putting_analysis  : undefined,
+      the_feel:          typeof raw.the_feel === "string"          ? raw.the_feel          : undefined,
       posture:           raw.posture  as BiometricsData["posture"]  ?? undefined,
       swing_plane:       raw.swing_plane as BiometricsData["swing_plane"] ?? undefined,
       impact:            raw.impact   as BiometricsData["impact"]   ?? undefined,

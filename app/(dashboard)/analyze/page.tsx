@@ -356,22 +356,28 @@ export default function AnalyzePage() {
             </div>
 
             {/* HUD telemetry overlay */}
-            {result && (
-              <div className="absolute top-4 left-4 z-30">
-                <div className="bg-black/70 backdrop-blur-md border border-white/10 px-5 py-3 rounded-2xl flex items-center gap-5 shadow-2xl">
-                  {[
-                    { label: "Swing Speed", value: `${result.metrics.swingSpeed}`, unit: "MPH", color: "text-white" },
-                    { label: "Ball Speed", value: `${result.metrics.ballSpeed}`, unit: "MPH", color: "text-golf-green" },
-                    { label: "Smash", value: result.metrics.smashFactor.toFixed(2), unit: "", color: "text-amber-400" },
-                  ].map((m, i) => (
-                    <div key={i} className="text-center">
-                      <p className="text-[8px] text-gray-500 font-black uppercase tracking-widest mb-0.5">{m.label}</p>
-                      <p className={`text-lg font-black italic ${m.color}`}>{m.value}<span className="text-[9px] text-gray-600 ml-0.5">{m.unit}</span></p>
-                    </div>
-                  ))}
+            {result && (() => {
+              const hasLaunchData = result.metrics.swingSpeed > 0 || result.metrics.ballSpeed > 0;
+              const hudItems = [
+                ...(result.metrics.swingSpeed > 0 ? [{ label: "Swing Speed", value: `${result.metrics.swingSpeed}`, unit: "MPH", color: "text-white" }] : []),
+                ...(result.metrics.ballSpeed > 0  ? [{ label: "Ball Speed",  value: `${result.metrics.ballSpeed}`,  unit: "MPH", color: "text-golf-green" }] : []),
+                { label: "Smash", value: result.metrics.smashFactor.toFixed(2), unit: "", color: "text-amber-400" },
+              ];
+              return (
+                <div className="absolute top-4 left-4 z-30">
+                  <div className="bg-black/70 backdrop-blur-md border border-white/10 px-5 py-3 rounded-2xl flex items-center gap-5 shadow-2xl">
+                    {hasLaunchData ? hudItems.map((m, i) => (
+                      <div key={i} className="text-center">
+                        <p className="text-[8px] text-gray-500 font-black uppercase tracking-widest mb-0.5">{m.label}</p>
+                        <p className={`text-lg font-black italic ${m.color}`}>{m.value}<span className="text-[9px] text-gray-600 ml-0.5">{m.unit}</span></p>
+                      </div>
+                    )) : (
+                      <span className="text-[9px] font-black uppercase tracking-widest text-gray-600">No Launch Monitor</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Pro toggle */}
             <div className="absolute top-4 right-4 z-40">
@@ -617,19 +623,29 @@ export default function AnalyzePage() {
             {/* Launch telemetry */}
             <div>
               <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] mb-3">Launch Telemetry</p>
-              <div className="grid grid-cols-2 gap-3">
-                {[
-                  { label: "Swing Velocity", value: result.metrics.swingSpeed, unit: "MPH", color: "text-white" },
-                  { label: "Ball Velocity", value: result.metrics.ballSpeed, unit: "MPH", color: "text-golf-green" },
-                  { label: "Launch Angle", value: `${result.metrics.launchAngle}°`, unit: "", color: "text-blue-400" },
-                  { label: "Smash Factor", value: result.metrics.smashFactor.toFixed(2), unit: "", color: "text-amber-400" },
-                ].map((m, i) => (
-                  <div key={i} className="bg-golf-surface p-4 rounded-xl border border-white/5">
-                    <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-1">{m.label}</p>
-                    <p className={`text-2xl font-black italic ${m.color}`}>{m.value}<span className="text-[10px] text-gray-600 ml-1">{m.unit}</span></p>
+              {result.metrics.swingSpeed === 0 && result.metrics.ballSpeed === 0 ? (
+                <div className="flex items-center gap-3 px-4 py-3.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+                  <Activity size={14} className="text-gray-600 shrink-0" />
+                  <div>
+                    <p className="text-[9px] font-black uppercase tracking-widest text-gray-600">Launch Monitor Data Not Connected</p>
+                    <p className="text-[10px] text-gray-700 mt-0.5">Connect a TrackMan, FlightScope, or compatible device to capture velocity and launch data.</p>
                   </div>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    ...(result.metrics.swingSpeed > 0 ? [{ label: "Swing Velocity", value: result.metrics.swingSpeed, unit: "MPH", color: "text-white" }] : []),
+                    ...(result.metrics.ballSpeed  > 0 ? [{ label: "Ball Velocity",  value: result.metrics.ballSpeed,  unit: "MPH", color: "text-golf-green" }] : []),
+                    { label: "Launch Angle",  value: `${result.metrics.launchAngle}°`,       unit: "", color: "text-blue-400" },
+                    { label: "Smash Factor",  value: result.metrics.smashFactor.toFixed(2),  unit: "", color: "text-amber-400" },
+                  ].map((m, i) => (
+                    <div key={i} className="bg-golf-surface p-4 rounded-xl border border-white/5">
+                      <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-1">{m.label}</p>
+                      <p className={`text-2xl font-black italic ${m.color}`}>{m.value}<span className="text-[10px] text-gray-600 ml-1">{m.unit}</span></p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Pro advanced metrics */}
