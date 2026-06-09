@@ -336,16 +336,47 @@ DIAGNOSTIC RULES (apply mechanically — no template substitution)
   differential. Reference both measured values.
 Every deficiency output must follow: [exact measurement] → [mechanical fault] → [ball-flight consequence] → [specific drill name].
 
-DYNAMIC SCORING ALGORITHM (compute this — do NOT default to 75 or any round number)
-────────────────────────────────────────────────────────────────────────────────────
-Start at 100. Apply deductions from the GOLFER-SPECIFIC DATA:
+SCORING RUBRIC — MANDATORY DETERMINISTIC CALCULATION
+──────────────────────────────────────────────────────────────────────────────────
+You MUST calculate the score using this exact algorithm every time. Do NOT use
+intuition, prior examples, or creative reasoning. Apply every applicable deduction
+mechanically and show the running total before outputting the final integer.
+
+STEP 1 — Start at 100.
+
+STEP 2 — Apply CONTINUOUS deductions from the GOLFER-SPECIFIC DATA:
 • Spine angle loss (setup→impact): −3 pts per degree of drop exceeding 5°
-• Hip rotation at impact: −2 pts per degree below 42° (e.g. 28° hip = 42−28=14° deficit → −28 pts)
-• Shoulder rotation at top: −1.5 pts per degree below 85° (e.g. 70° = 85−70=15° deficit → −22.5 pts)
+  Example: 9° drop → (9−5) × 3 = −12 pts
+• Hip rotation at impact: −2 pts per degree below 42°
+  Example: 28° hip → (42−28) × 2 = −28 pts
+• Shoulder rotation at top: −1.5 pts per degree below 85°
+  Example: 70° shoulder → (85−70) × 1.5 = −22.5 pts
 • Tempo ratio: −5 pts if ratio < 2.0 or > 4.5; −3 pts if < 2.5 or > 4.0; 0 pts if 2.5–4.0
-• X-Factor deficit: −1 pt per degree that (shoulder − hip) falls below 30°
-Floor: 38. Ceiling: 97. Round to nearest integer.
-If measurements are unavailable, estimate from video and document the basis for your score.
+• X-Factor deficit: −1 pt per degree that (shoulder_rotation − hip_rotation) falls below 30°
+
+STEP 3 — Apply FAULT-TIER deductions for each tagged deficiency in the deficiencies array:
+• MAJOR fault   (severe early extension, extreme over-the-top, complete loss of posture,
+                 casting/chicken-wing at impact, reverse pivot): −15 pts each
+• MODERATE fault (laid-off at top, cupped lead wrist, restricted hip turn, blocked follow-
+                  through, shallow attack angle causing fat/thin): −10 pts each
+• MINOR fault   (grip pressure inconsistency, minor alignment drift, slight tempo rush,
+                 small setup errors, cosmetic plane deviation): −5 pts each
+
+Each fault tagged in the deficiencies array MUST map to exactly one tier above and
+contribute its deduction to the total. If a fault was already penalised by STEP 2
+continuous math (e.g. early extension penalised via spine-angle drop), do NOT
+double-count — apply the larger of the two deductions, not both.
+
+STEP 4 — Clamp: Floor 38, Ceiling 97. Round to the nearest integer.
+
+VERIFICATION REQUIREMENT: Before writing the score field, mentally confirm:
+  (100) − (STEP 2 total) − (STEP 3 total) = raw score → clamped → integer output.
+The final score MUST mathematically align with the exact faults tagged. A swing with
+zero deficiencies and ideal measurements must score ≥ 88. A swing with two MAJOR
+faults must score ≤ 70 regardless of strong measurements elsewhere.
+
+If measurements are unavailable, estimate from video, state the estimated values
+explicitly in prose, and apply the same algorithm to those estimates.
 
 HANDICAP BANDS (for context after you compute the score)
 ─────────────────────────────────────────────────────────
@@ -567,7 +598,7 @@ export async function POST(req: NextRequest) {
       generationConfig: {
         responseMimeType: "application/json",  // required alongside responseSchema
         responseSchema:   RESPONSE_SCHEMA as Schema, // enforces structure at API level — no markdown fences possible
-        temperature: 0.4,
+        temperature: 0.0,
         maxOutputTokens: 8192,
       },
     });
