@@ -234,9 +234,13 @@ const pillarSchema = {
 const RESPONSE_SCHEMA = {
   type: SchemaType.OBJECT,
   properties: {
+    scoring_breakdown: {
+      type: SchemaType.STRING,
+      description: "Show your math. Start at 100 and list every deduction based on the rubric before arriving at the final number. E.g., '100 - 15 (Early Ext) - 10 (Laid Off) = 75'.",
+    },
     score: {
       type: SchemaType.INTEGER,
-      description: "0-100 from the dynamic scoring algorithm — never default to 75",
+      description: "The exact final integer calculated in the scoring_breakdown.",
     },
     executive_summary: {
       type: SchemaType.STRING,
@@ -302,7 +306,7 @@ const RESPONSE_SCHEMA = {
     },
   },
   required: [
-    "score", "executive_summary", "fault_tags",
+    "scoring_breakdown", "score", "executive_summary", "fault_tags",
     "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
     "highlights", "deficiencies", "drills",
     "posture", "swing_plane", "impact",
@@ -338,9 +342,11 @@ Every deficiency output must follow: [exact measurement] → [mechanical fault] 
 
 SCORING RUBRIC — MANDATORY DETERMINISTIC CALCULATION
 ──────────────────────────────────────────────────────────────────────────────────
-You MUST calculate the score using this exact algorithm every time. Do NOT use
-intuition, prior examples, or creative reasoning. Apply every applicable deduction
-mechanically and show the running total before outputting the final integer.
+You MUST write out the mathematical deduction formula in the 'scoring_breakdown'
+field BEFORE generating the final 'score' integer. Do NOT use intuition, prior
+examples, or creative reasoning. Apply every applicable deduction mechanically
+and record the running total in scoring_breakdown. The 'score' field must equal
+the final number you arrive at in scoring_breakdown — any mismatch is an error.
 
 STEP 1 — Start at 100.
 
@@ -369,9 +375,9 @@ double-count — apply the larger of the two deductions, not both.
 
 STEP 4 — Clamp: Floor 38, Ceiling 97. Round to the nearest integer.
 
-VERIFICATION REQUIREMENT: Before writing the score field, mentally confirm:
-  (100) − (STEP 2 total) − (STEP 3 total) = raw score → clamped → integer output.
-The final score MUST mathematically align with the exact faults tagged. A swing with
+VERIFICATION REQUIREMENT: The scoring_breakdown string must show the full chain,
+  e.g. "100 - 28 (hip 28° deficit ×2) - 15 (early_extension major) - 10 (laid_off moderate) = 47 → clamped 47".
+  Copy the final clamped integer verbatim into the score field. A swing with
 zero deficiencies and ideal measurements must score ≥ 88. A swing with two MAJOR
 faults must score ≤ 70 regardless of strong measurements elsewhere.
 
@@ -610,6 +616,7 @@ export async function POST(req: NextRequest) {
 
     // ── Step 6: parse + validate ──────────────────────────────────────────
     let report: {
+      scoring_breakdown: string;
       score: number;
       executive_summary: string;
       fault_tags: string[];
@@ -638,7 +645,7 @@ export async function POST(req: NextRequest) {
 
     // Validate the hard-required fields — these are non-negotiable for a valid analysis
     const requiredFields = [
-      "score", "executive_summary", "fault_tags",
+      "scoring_breakdown", "score", "executive_summary", "fault_tags",
       "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
       "highlights", "deficiencies", "drills",
       "posture", "swing_plane", "impact",
