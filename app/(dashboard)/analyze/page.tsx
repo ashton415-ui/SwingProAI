@@ -60,6 +60,7 @@ interface AnalysisResult {
     shoulderRotation?: OverlayMetric; headStability?: OverlayMetric;
     [key: string]: unknown;
   };
+  scoring_breakdown?: string;
   // v4 granular telemetry (persisted into swing_analysis)
   swing_highlights?: HighlightItem[];
   mechanical_deficiencies?: DeficiencyItem[];
@@ -238,8 +239,9 @@ export default function AnalyzePage() {
       return "basic" as const;
     })();
     return {
-      feedback:   String(row.feedback ?? ""),
-      score:      typeof row.score === "number" ? row.score : 0,
+      feedback:          String(row.feedback ?? ""),
+      score:             typeof row.score === "number" ? row.score : 0,
+      scoring_breakdown: typeof row.scoring_breakdown === "string" ? row.scoring_breakdown : undefined,
       weakSpots:  defs.slice(0, 4).map((d) => d.fault_description ?? "").filter(Boolean),
       drills:     rawDrills.map((d) => ({
         name:     d.name     ?? "",
@@ -616,6 +618,12 @@ export default function AnalyzePage() {
                 <p className={`text-5xl font-black italic ${result.score >= 80 ? "text-golf-green" : result.score >= 60 ? "text-amber-400" : "text-red-400"}`}>
                   {result.score}
                 </p>
+                {result.scoring_breakdown && (
+                  <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
+                    <span className="font-black uppercase tracking-widest text-gray-600">Scoring Math: </span>
+                    {result.scoring_breakdown}
+                  </p>
+                )}
               </div>
               <div className="bg-golf-surface p-6 rounded-2xl border border-white/5">
                 <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Fault Tags</p>
