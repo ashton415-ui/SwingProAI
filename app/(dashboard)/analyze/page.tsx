@@ -227,6 +227,38 @@ export default function AnalyzePage() {
     });
   };
 
+  // ── Map the DB row returned by /api/analyze-swing to the AnalysisResult shape ──
+  function dbRowToResult(row: Record<string, unknown>): AnalysisResult {
+    const m = (row.metrics as Record<string, unknown>) ?? {};
+    const defs = (row.mechanical_deficiencies as DeficiencyItem[]) ?? [];
+    const rawDrills = (Array.isArray(m.drills) ? m.drills : []) as Record<string, string>[];
+    const mode = (() => {
+      if (userTier === "eagle" || userTier === "coach_pro") return "ultra" as const;
+      if (userTier === "birdie" || userTier === "coach_starter") return "advanced" as const;
+      return "basic" as const;
+    })();
+    return {
+      feedback:   String(row.feedback ?? ""),
+      score:      typeof row.score === "number" ? row.score : 0,
+      weakSpots:  defs.slice(0, 4).map((d) => d.fault_description ?? "").filter(Boolean),
+      drills:     rawDrills.map((d) => ({
+        name:     d.name     ?? "",
+        why:      d.the_why  ?? "",
+        how:      d.the_how  ?? "",
+        feel:     d.the_feel ?? "",
+        videoUrl: "",
+      })),
+      // Launch monitor data is not available in this flow — render shows "Not Connected"
+      metrics: { swingSpeed: 0, ballSpeed: 0, launchAngle: 0, smashFactor: 0 },
+      swing_highlights:       (row.swing_highlights as HighlightItem[]) ?? [],
+      mechanical_deficiencies: defs,
+      detailed_summary_html:  null,
+      tempo_ratio:            typeof row.tempo_ratio === "number" ? row.tempo_ratio : null,
+      swing_speed_mph:        null,
+      _mode:                  mode,
+    };
+  }
+
   // ── Analysis flow ──────────────────────────────────────────────────────────
   const startAnalysis = async () => {
     if (!file) return;
@@ -239,19 +271,47 @@ export default function AnalyzePage() {
     try {
       const blob = await getTrimmedBlob();
 
-      // Convert to base64
-      const base64Data: string = await new Promise((res, rej) => {
-        const reader = new FileReader();
-        reader.onload = () => res((reader.result as string).split(",")[1]);
-        reader.onerror = rej;
-        reader.readAsDataURL(blob);
-      });
+      // Auth is required upfront — we need to upload the video before calling the API
+      const session = getSessionFromCookie();
+      if (!session) throw new Error("Not authenticated. Please sign in and try again.");
+      const supabase = getAuthClient();
 
-      // Call our secure Gemini proxy
-      const analysisRes = await fetch("/api/v1/analyze", {
-        method: "POST",
+      // 1. Upload video to Supabase Storage
+      const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const storagePath = `${session.user_id}/${crypto.randomUUID()}/${safeFilename}`;
+      const { error: uploadErr } = await supabase.storage
+        .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
+      if (uploadErr) throw new Error(`Video upload failed: ${uploadErr.message}`);
+
+      // 2. Create the swing_videos record
+      const { data: videoRow, error: videoErr } = await supabase
+        .from("swing_videos").insert({
+          user_id:           session.user_id,
+          storage_path:      storagePath,
+          video_url:         storagePath,
+          original_filename: safeFilename,
+          file_size:         blob.size,
+          mime_type:         blob.type,
+          trim_start:        trimStart,
+          trim_end:          trimEnd,
+          status:            "uploaded",
+        }).select().single();
+      if (videoErr || !videoRow) throw new Error(`Failed to register video: ${videoErr?.message}`);
+
+      // 3. Create a pending swing_analysis row so the API route has an ID to work with
+      const { data: analysisRow, error: analysisErr } = await supabase
+        .from("swing_analysis").insert({
+          swing_video_id: videoRow.id,
+          user_id:        session.user_id,
+          status:         "pending",
+        }).select("id").single();
+      if (analysisErr || !analysisRow) throw new Error(`Failed to create analysis record: ${analysisErr?.message}`);
+
+      // 4. Call the direct Gemini pipeline — it fetches the video from Storage itself
+      const analysisRes = await fetch("/api/analyze-swing", {
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoData: base64Data, mimeType: blob.type || "video/webm", isAdvanced }),
+        body:    JSON.stringify({ analysisId: analysisRow.id }),
       });
 
       if (!analysisRes.ok) {
@@ -259,53 +319,9 @@ export default function AnalyzePage() {
         throw new Error(err.error ?? `Analysis failed (${analysisRes.status})`);
       }
 
-      const analysis: AnalysisResult = await analysisRes.json();
+      const { data: updatedRow } = await analysisRes.json() as { data: Record<string, unknown> };
+      setResult(dbRowToResult(updatedRow));
 
-      // Save to Supabase (non-blocking — don't fail the UI if DB write fails)
-      try {
-        const session = getSessionFromCookie();
-        if (session) {
-          const supabase = getAuthClient();
-
-          // Upload video to Storage
-          const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-          const storagePath = `${session.user_id}/${crypto.randomUUID()}/${safeFilename}`;
-          const { error: uploadErr } = await supabase.storage
-            .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
-
-          if (!uploadErr) {
-            // Create swing_videos record
-            const { data: videoRow } = await supabase.from("swing_videos").insert({
-              user_id: session.user_id,
-              storage_path: storagePath, video_url: storagePath,
-              original_filename: safeFilename, file_size: blob.size,
-              mime_type: blob.type, trim_start: trimStart, trim_end: trimEnd, status: "uploaded",
-            }).select().single();
-
-            // Create swing_analysis record
-            if (videoRow) {
-              await supabase.from("swing_analysis").insert({
-                swing_video_id: videoRow.id, user_id: session.user_id,
-                score: analysis.score, feedback: analysis.feedback,
-                tempo_ratio:
-                  analysis.tempo_ratio ??
-                  (analysis.metrics.swingSpeed ? analysis.metrics.swingSpeed / 100 : null),
-                swing_speed_mph: analysis.swing_speed_mph ?? analysis.metrics.swingSpeed,
-                status: "complete",
-                metrics: analysis.metrics,
-                // v4 granular telemetry (defaults to [] / null via migration)
-                swing_highlights: analysis.swing_highlights ?? [],
-                mechanical_deficiencies: analysis.mechanical_deficiencies ?? [],
-                detailed_summary_html: analysis.detailed_summary_html ?? null,
-              });
-            }
-          }
-        }
-      } catch (dbErr) {
-        console.warn("DB save failed (non-fatal):", dbErr);
-      }
-
-      setResult(analysis);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Analysis failed.");
     } finally {
