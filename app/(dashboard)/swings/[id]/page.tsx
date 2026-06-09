@@ -38,20 +38,19 @@ export default async function SwingDetailPage({
   if (!swing) notFound();
 
   // Extract individual metrics from the jsonb metrics field
-  const metrics = swing.metrics as Record<string, number> | null;
+  const metrics = swing.metrics as Record<string, unknown> | null;
+  const scoringBreakdown = typeof metrics?.scoring_breakdown === "string" ? metrics.scoring_breakdown : null;
 
   const metricCards = [
     { label: "Swing Score", value: swing.score, unit: " pts", ideal: "80–100 pts" },
     { label: "Tempo Ratio", value: swing.tempo_ratio, unit: ":1", ideal: "3.0 : 1" },
     { label: "Swing Speed", value: swing.swing_speed_mph, unit: " mph", ideal: "90–110 mph" },
-    { label: "Spine Angle", value: metrics?.spine_angle_deg ?? null, unit: "°", ideal: "28–35°" },
-    { label: "Hip Rotation", value: metrics?.hip_rotation_deg ?? null, unit: "°", ideal: "45–55°" },
-    { label: "Shoulder Rotation", value: metrics?.shoulder_rotation_deg ?? null, unit: "°", ideal: "90–110°" },
+    { label: "Spine Angle", value: typeof metrics?.spine_angle_deg === "number" ? metrics.spine_angle_deg : null, unit: "°", ideal: "28–35°" },
+    { label: "Hip Rotation", value: typeof metrics?.hip_rotation_deg === "number" ? metrics.hip_rotation_deg : null, unit: "°", ideal: "45–55°" },
+    { label: "Shoulder Rotation", value: typeof metrics?.shoulder_rotation_deg === "number" ? metrics.shoulder_rotation_deg : null, unit: "°", ideal: "90–110°" },
   ];
 
-  const suggestions = metrics?.suggestions
-    ? (metrics.suggestions as unknown as string[])
-    : null;
+  const suggestions = Array.isArray(metrics?.suggestions) ? (metrics.suggestions as string[]) : null;
 
   // v4 granular telemetry arrays
   const highlights = (swing.swing_highlights ?? []) as HighlightItem[];
@@ -121,6 +120,14 @@ export default async function SwingDetailPage({
           </div>
         ))}
       </div>
+
+      {/* Scoring Math — chain-of-thought breakdown from the AI */}
+      {scoringBreakdown && (
+        <div className="bg-golf-surface border border-white/5 rounded-4xl px-6 py-4 mb-6">
+          <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-1">Scoring Math</p>
+          <p className="text-xs text-gray-400 font-mono leading-relaxed">{scoringBreakdown}</p>
+        </div>
+      )}
 
       {/* AI Feedback */}
       {swing.feedback && (

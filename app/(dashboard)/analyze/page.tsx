@@ -241,7 +241,7 @@ export default function AnalyzePage() {
     return {
       feedback:          String(row.feedback ?? ""),
       score:             typeof row.score === "number" ? row.score : 0,
-      scoring_breakdown: typeof row.scoring_breakdown === "string" ? row.scoring_breakdown : undefined,
+      scoring_breakdown: typeof m.scoring_breakdown === "string" ? m.scoring_breakdown : undefined,
       weakSpots:  defs.slice(0, 4).map((d) => d.fault_description ?? "").filter(Boolean),
       drills:     rawDrills.map((d) => ({
         name:     d.name     ?? "",

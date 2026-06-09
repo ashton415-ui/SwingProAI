@@ -734,6 +734,7 @@ export async function POST(req: NextRequest) {
 
     // JSONB metrics blob
     const metrics = {
+      scoring_breakdown: toStr(report.scoring_breakdown) || null,
       spine_angle:       finalSpineAngle,
       hip_rotation:      finalHipRotation,
       shoulder_rotation: finalShoulderRotation,
