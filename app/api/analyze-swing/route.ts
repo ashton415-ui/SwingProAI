@@ -548,7 +548,7 @@ export async function POST(req: NextRequest) {
   try {
     const genAI = new GoogleGenerativeAI(geminiKey);
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       systemInstruction: SYSTEM_INSTRUCTION,
     });
 
@@ -558,7 +558,7 @@ export async function POST(req: NextRequest) {
     if (videoPayload) contentParts.push(videoPayload);
     contentParts.push({ text: userPrompt });
 
-    console.log("[analyze-swing] calling gemini-2.0-flash — parts:", contentParts.length, videoPayload ? "(video + text)" : "(text only)");
+    console.log("[analyze-swing] calling gemini-2.5-flash — parts:", contentParts.length, videoPayload ? "(video + text)" : "(text only)");
     console.log("[analyze-swing] merged metrics:", JSON.stringify(merged));
     console.log("[analyze-swing] prompt length (chars):", userPrompt.length);
 
