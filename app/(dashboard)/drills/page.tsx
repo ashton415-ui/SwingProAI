@@ -82,6 +82,7 @@ export default function DrillsPage() {
   const [selectedId, setSelectedId]       = useState<string | null>(null);
   const [videoFile, setVideoFile]         = useState<File | null>(null);
   const [isVerifying, setIsVerifying]     = useState(false);
+  const [uploadPhase, setUploadPhase]     = useState<"uploading" | "analyzing" | null>(null);
   const [verifyResult, setVerifyResult]   = useState<VerifyResult | null>(null);
   const [verifyError, setVerifyError]     = useState<string | null>(null);
 
@@ -139,16 +140,30 @@ export default function DrillsPage() {
     if (!session) { setVerifyError("Not authenticated. Please sign in."); return; }
 
     setIsVerifying(true);
+    setUploadPhase("uploading");
     setVerifyResult(null);
     setVerifyError(null);
 
     try {
-      const fd = new FormData();
-      fd.append("drillId", selectedId);
-      fd.append("userId",  session.user_id);
-      fd.append("video",   videoFile);
+      // Phase 1 — upload directly to Supabase Storage (bypasses Vercel 4.5 MB limit)
+      const supabase = getAuthClient();
+      const safeFilename = videoFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const storagePath  = `${session.user_id}/${Date.now()}_${safeFilename}`;
 
-      const res = await fetch("/api/verify-drill", { method: "POST", body: fd });
+      const { error: uploadErr } = await supabase.storage
+        .from("drill_videos")
+        .upload(storagePath, videoFile, { contentType: videoFile.type || "video/mp4", upsert: false });
+
+      if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`);
+
+      // Phase 2 — send storage path to backend; backend downloads + calls Gemini File API
+      setUploadPhase("analyzing");
+
+      const res = await fetch("/api/verify-drill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drillId: selectedId, userId: session.user_id, videoStoragePath: storagePath }),
+      });
       const data = await res.json();
 
       if (!res.ok) throw new Error(data.error ?? `Verification failed (${res.status})`);
@@ -172,6 +187,7 @@ export default function DrillsPage() {
       setVerifyError(err instanceof Error ? err.message : "Verification failed.");
     } finally {
       setIsVerifying(false);
+      setUploadPhase(null);
     }
   }
 
@@ -412,7 +428,7 @@ export default function DrillsPage() {
                   {isVerifying ? (
                     <>
                       <Loader2 size={14} className="animate-spin" />
-                      AI Coach Analyzing…
+                      {uploadPhase === "uploading" ? "Uploading Video…" : "AI Coach Analyzing…"}
                     </>
                   ) : (
                     <>

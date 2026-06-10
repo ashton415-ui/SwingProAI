@@ -1,18 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
 import { createClient } from "@/utils/supabase/server";
+import { createAdminClient } from "@/utils/supabase/admin";
+import fs from "fs";
+import path from "path";
 
 export const maxDuration = 120;
-
-/** Encode an ArrayBuffer to base64 without spread/downlevelIteration. */
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
 
 // ── Structured output schema ──────────────────────────────────────────────────
 
@@ -31,6 +25,15 @@ const VERIFICATION_SCHEMA = {
   required: ["pass", "feedback"],
 };
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function mimeTypeFromPath(storagePath: string): string {
+  const ext = storagePath.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "mov") return "video/quicktime";
+  if (ext === "webm") return "video/webm";
+  return "video/mp4";
+}
+
 // ── POST /api/verify-drill ────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -42,17 +45,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // ── Parse FormData ──────────────────────────────────────────────────────────
-  let formData: FormData;
+  // ── Parse JSON body ─────────────────────────────────────────────────────────
+  let body: { drillId?: unknown; userId?: unknown; videoStoragePath?: unknown };
   try {
-    formData = await req.formData();
+    body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid form data" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const drillId   = formData.get("drillId");
-  const userId    = formData.get("userId");
-  const videoFile = formData.get("video");
+  const { drillId, userId, videoStoragePath } = body;
 
   if (!drillId || typeof drillId !== "string") {
     return NextResponse.json({ error: "Missing drillId" }, { status: 400 });
@@ -60,8 +61,8 @@ export async function POST(req: NextRequest) {
   if (!userId || typeof userId !== "string") {
     return NextResponse.json({ error: "Missing userId" }, { status: 400 });
   }
-  if (!videoFile || !(videoFile instanceof File)) {
-    return NextResponse.json({ error: "Missing video file" }, { status: 400 });
+  if (!videoStoragePath || typeof videoStoragePath !== "string") {
+    return NextResponse.json({ error: "Missing videoStoragePath" }, { status: 400 });
   }
 
   // Prevent a user submitting a verification on behalf of someone else
@@ -81,24 +82,72 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Drill not found" }, { status: 404 });
   }
 
-  // ── Gemini setup ────────────────────────────────────────────────────────────
+  // ── Gemini key ──────────────────────────────────────────────────────────────
   const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY;
   if (!geminiKey) {
     console.error("[verify-drill] FATAL: no Gemini API key");
     return NextResponse.json({ error: "AI service not configured" }, { status: 503 });
   }
 
-  // ── Convert video file → inline base64 ─────────────────────────────────────
-  const arrayBuf = await videoFile.arrayBuffer();
-  const base64   = arrayBufferToBase64(arrayBuf);
-  const mimeType = videoFile.type || "video/mp4";
+  // ── Download video from Supabase Storage ────────────────────────────────────
+  const admin = createAdminClient();
+  console.log("[verify-drill] downloading from drill_videos:", videoStoragePath);
 
-  console.log("[verify-drill] drill:", drill.name, "| video size:", (arrayBuf.byteLength / 1_048_576).toFixed(1), "MB");
+  const { data: videoBlob, error: downloadErr } = await admin.storage
+    .from("drill_videos")
+    .download(videoStoragePath);
 
-  // ── Call Gemini 2.5 Flash ───────────────────────────────────────────────────
+  if (downloadErr || !videoBlob) {
+    console.error("[verify-drill] storage download failed:", downloadErr?.message);
+    return NextResponse.json({ error: "Failed to download video from storage" }, { status: 502 });
+  }
+
+  const mimeType = mimeTypeFromPath(videoStoragePath);
+  const ext      = mimeType === "video/quicktime" ? "mov" : mimeType === "video/webm" ? "webm" : "mp4";
+  const tmpName  = `drill_${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+  const tmpPath  = path.join("/tmp", tmpName);
+
+  console.log("[verify-drill] video size:", (videoBlob.size / 1_048_576).toFixed(1), "MB | tmp:", tmpPath);
+
+  // ── Write to /tmp ───────────────────────────────────────────────────────────
+  const arrayBuf = await videoBlob.arrayBuffer();
+  fs.writeFileSync(tmpPath, Buffer.from(arrayBuf));
+
+  // ── Upload to Gemini File API + call model ──────────────────────────────────
   let verificationResult: { pass: boolean; feedback: string };
+  let geminiFileName: string | undefined;
 
   try {
+    const fileManager = new GoogleAIFileManager(geminiKey);
+
+    console.log("[verify-drill] uploading to Gemini File API…");
+    const uploadResponse = await fileManager.uploadFile(tmpPath, {
+      mimeType,
+      displayName: `drill-${drillId}-${Date.now()}`,
+    });
+
+    geminiFileName = uploadResponse.file.name;
+    console.log("[verify-drill] Gemini file uploaded:", geminiFileName, "| state:", uploadResponse.file.state);
+
+    // Poll until the file is ACTIVE (usually instant for short clips)
+    let geminiFile = uploadResponse.file;
+    let pollAttempts = 0;
+    while (geminiFile.state === FileState.PROCESSING && pollAttempts < 12) {
+      await new Promise((r) => setTimeout(r, 5_000));
+      geminiFile = await fileManager.getFile(geminiFile.name);
+      pollAttempts++;
+      console.log("[verify-drill] polling Gemini file state:", geminiFile.state, `(attempt ${pollAttempts})`);
+    }
+
+    if (geminiFile.state === FileState.FAILED) {
+      throw new Error("Gemini file processing failed");
+    }
+    if (geminiFile.state !== FileState.ACTIVE) {
+      throw new Error(`Gemini file still not active after polling (state: ${geminiFile.state})`);
+    }
+
+    console.log("[verify-drill] Gemini file ACTIVE — calling gemini-2.5-flash");
+
     const genAI = new GoogleGenerativeAI(geminiKey);
     const model = genAI.getGenerativeModel({
       model: "gemini-2.5-flash",
@@ -108,16 +157,19 @@ export async function POST(req: NextRequest) {
         "Be direct and specific — cite what you see in the video, not generalities.",
     });
 
-    const result = await model.generateContent({
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { inlineData: { mimeType, data: base64 } },
-            { text: drill.ai_verification_prompt },
-          ],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const contentParts: any[] = [
+      {
+        fileData: {
+          mimeType: geminiFile.mimeType,
+          fileUri:  geminiFile.uri,
         },
-      ],
+      },
+      { text: drill.ai_verification_prompt },
+    ];
+
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: contentParts }],
       generationConfig: {
         responseMimeType: "application/json",
         responseSchema:   VERIFICATION_SCHEMA as Schema,
@@ -129,17 +181,23 @@ export async function POST(req: NextRequest) {
     const rawText = result.response.text();
     console.log("[verify-drill] Gemini response:", rawText);
     verificationResult = JSON.parse(rawText);
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[verify-drill] Gemini error:", msg);
     return NextResponse.json({ error: `AI verification failed: ${msg}` }, { status: 500 });
+  } finally {
+    // Always clean up /tmp and Gemini file, regardless of success or failure
+    try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+    if (geminiFileName) {
+      const fileManager = new GoogleAIFileManager(geminiKey);
+      fileManager.deleteFile(geminiFileName).catch(() => { /* non-fatal */ });
+    }
   }
 
   const status = verificationResult.pass ? "verified" : "needs_work";
 
   // ── Upsert user_drills ──────────────────────────────────────────────────────
-  // Select-then-update pattern: avoids needing a unique constraint on (user_id, drill_id).
-  // RLS on user_drills allows the authenticated user to insert/update their own rows.
   const { data: existing } = await supabase
     .from("user_drills")
     .select("id")
@@ -152,13 +210,13 @@ export async function POST(req: NextRequest) {
   if (existing) {
     const { error } = await supabase
       .from("user_drills")
-      .update({ status, latest_ai_feedback: verificationResult.feedback })
+      .update({ status, latest_ai_feedback: verificationResult.feedback, video_url: videoStoragePath })
       .eq("id", existing.id);
     dbError = error;
   } else {
     const { error } = await supabase
       .from("user_drills")
-      .insert({ user_id: userId, drill_id: drillId, status, latest_ai_feedback: verificationResult.feedback });
+      .insert({ user_id: userId, drill_id: drillId, status, latest_ai_feedback: verificationResult.feedback, video_url: videoStoragePath });
     dbError = error;
   }
 
