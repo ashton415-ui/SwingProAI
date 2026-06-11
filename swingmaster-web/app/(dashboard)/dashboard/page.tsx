@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/utils/supabase/server';
-import { Video, Activity, Briefcase, TrendingUp, ChevronRight, Zap } from 'lucide-react';
+import { Video, Activity, Briefcase, TrendingUp, ChevronRight, Zap, CheckCircle2 } from 'lucide-react';
+import ConnectToCoachForm from '@/components/dashboard/ConnectToCoachForm';
 
 export const metadata = { title: 'Dashboard — SwingMaster' };
 
@@ -24,7 +25,7 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const [{ data: swings }, { data: equipment }] = await Promise.all([
+  const [{ data: swings }, { data: equipment }, { data: profile }, { data: coachLink }] = await Promise.all([
     supabase
       .from('swing_analysis')
       .select('id, score, status, created_at, swing_video:swing_videos(club, original_filename)')
@@ -36,7 +37,22 @@ export default async function DashboardPage() {
       .from('user_equipment')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', user.id),
+    supabase
+      .from('users')
+      .select('role, full_name')
+      .eq('id', user.id)
+      .single(),
+    supabase
+      .from('coach_student_relationships')
+      .select('id')
+      .eq('student_id', user.id)
+      .eq('status', 'active')
+      .limit(1)
+      .maybeSingle(),
   ]);
+
+  const isCoach  = profile?.role === 'coach';
+  const hasCoach = !!coachLink;
 
   const recentSwings = swings ?? [];
   const completedCount = recentSwings.length;
@@ -98,6 +114,24 @@ export default async function DashboardPage() {
           <ChevronRight className="w-4 h-4 text-slate-600 ml-auto shrink-0" />
         </Link>
       </div>
+
+      {/* Coach Connection — golfers only */}
+      {!isCoach && (
+        <div>
+          <h2 className="text-sm font-semibold text-slate-300 mb-3">Coach Connection</h2>
+          {hasCoach ? (
+            <div className="flex items-center gap-3 bg-emerald-500/[0.06] border border-emerald-500/20 rounded-2xl px-5 py-4">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-white">Coach Connected</p>
+                <p className="text-xs text-slate-400 mt-0.5">Your coach has access to your training data.</p>
+              </div>
+            </div>
+          ) : (
+            <ConnectToCoachForm />
+          )}
+        </div>
+      )}
 
       {/* Recent swings */}
       <div>

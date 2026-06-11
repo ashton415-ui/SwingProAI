@@ -5,6 +5,7 @@ import { createClient } from '@/utils/supabase/client';
 import {
   Users, Loader2, Activity, Dumbbell, AlertTriangle,
   CheckCircle2, Clock, XCircle, Target, ChevronRight, ArrowLeft,
+  Copy, Check, Share2,
 } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -234,6 +235,52 @@ function DrillItem({
   );
 }
 
+// ── InviteCard ────────────────────────────────────────────────────────────────
+
+function InviteCard({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch { /* ignore — clipboard blocked */ }
+  }
+
+  return (
+    <div className="mx-2 mt-2 mb-1 bg-indigo-600/10 border border-indigo-500/20 rounded-2xl px-4 py-3.5">
+      <div className="flex items-center gap-1.5 mb-1">
+        <Share2 className="w-3 h-3 text-indigo-400" />
+        <p className="text-[9px] font-black uppercase tracking-widest text-indigo-400">Your Invite Code</p>
+      </div>
+      <p className="text-[10px] text-slate-500 mb-2.5">
+        Share this with students to connect instantly.
+      </p>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 bg-slate-900/70 border border-white/10 rounded-xl py-2 text-center">
+          <span className="text-2xl font-black tracking-[0.3em] text-white font-mono select-all">
+            {code}
+          </span>
+        </div>
+        <button
+          onClick={copy}
+          className={`shrink-0 flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-xl transition-colors ${
+            copied
+              ? 'bg-emerald-600 text-white'
+              : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+          }`}
+        >
+          {copied
+            ? <><Check className="w-3.5 h-3.5" /> Copied!</>
+            : <><Copy className="w-3.5 h-3.5" /> Copy</>
+          }
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── RosterItem ────────────────────────────────────────────────────────────────
 
 function RosterItem({
@@ -284,6 +331,7 @@ export default function CoachHubPage() {
 
   const [loadingRoster, setLoadingRoster] = useState(true);
   const [roster, setRoster] = useState<Student[]>([]);
+  const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobileShowDetail, setMobileShowDetail] = useState(false);
 
@@ -298,6 +346,14 @@ export default function CoachHubPage() {
       setLoadingRoster(true);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { setLoadingRoster(false); return; }
+
+      // Fetch coach's own invite code alongside roster
+      const { data: profile } = await supabase
+        .from('users')
+        .select('coach_invite_code')
+        .eq('id', user.id)
+        .single();
+      setInviteCode(profile?.coach_invite_code ?? null);
 
       const { data: rels } = await supabase
         .from('coach_student_relationships')
@@ -472,6 +528,9 @@ export default function CoachHubPage() {
             </div>
           </div>
         </div>
+
+        {/* Invite card */}
+        {inviteCode && <InviteCard code={inviteCode} />}
 
         {/* List */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
