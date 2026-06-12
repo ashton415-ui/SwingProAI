@@ -10,12 +10,14 @@ import {
   Users,
   BookOpen,
   Zap,
+  TrendingUp,
 } from 'lucide-react';
 
 const NAV_ITEMS = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { label: 'Analyze', href: '/analyze', icon: Video },
   { label: 'Swings', href: '/swings', icon: Activity },
+  { label: 'History', href: '/history', icon: TrendingUp },
   { label: 'My Bag', href: '/bag', icon: Briefcase },
   { label: 'Coach', href: '/coach', icon: Users },
   { label: 'Lessons', href: '/lessons', icon: BookOpen },

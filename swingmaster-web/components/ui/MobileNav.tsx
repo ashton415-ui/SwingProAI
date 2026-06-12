@@ -13,6 +13,7 @@ import {
   Users,
   BookOpen,
   Zap,
+  TrendingUp,
 } from 'lucide-react';
 
 const PRIMARY_TABS = [
@@ -23,6 +24,7 @@ const PRIMARY_TABS = [
 ] as const;
 
 const MORE_ITEMS = [
+  { label: 'History', href: '/history', icon: TrendingUp },
   { label: 'Coach', href: '/coach', icon: Users },
   { label: 'Lessons', href: '/lessons', icon: BookOpen },
   { label: 'Upgrade', href: '/upgrade', icon: Zap },
