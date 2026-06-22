@@ -32,3 +32,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# playwright — session fixtures must never be committed (see CLAUDE.md)
+**/storage-state.json
+**/*.storageState.json
+playwright/.auth/
+**/auth.json
+test-results/
+playwright-report/
