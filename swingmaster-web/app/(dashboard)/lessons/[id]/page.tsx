@@ -151,6 +151,10 @@ const LESSON_CONTENT: Record<string, LessonContent> = {
   },
 };
 
+export function generateStaticParams() {
+  return Object.keys(LESSON_CONTENT).map((id) => ({ id }));
+}
+
 export async function generateMetadata({ params }: { params: { id: string } }) {
   const lesson = LESSON_CONTENT[params.id];
   return { title: lesson ? `${lesson.title} — SwingMaster` : 'Lesson Not Found — SwingMaster' };

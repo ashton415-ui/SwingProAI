@@ -6,7 +6,13 @@ import {
 } from 'lucide-react';
 import SwingDetailClient from './SwingDetailClient';
 
-export const dynamic = 'force-dynamic';
+// generateStaticParams returns [] so `next build --output export` succeeds.
+// This page requires a live user session and a signed storage URL, so it must
+// be converted to a client-fetching component before it will work in the
+// Capacitor native shell. The Vercel web deployment is unaffected.
+export function generateStaticParams() {
+  return [];
+}
 
 export async function generateMetadata({ params }: { params: { id: string } }) {
   return { title: `Swing Analysis — SwingMaster` };
