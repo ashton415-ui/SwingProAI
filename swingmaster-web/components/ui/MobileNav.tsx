@@ -97,9 +97,13 @@ export default function MobileNav() {
     setDragY(0);
   }
 
+  // ROOT IS A SINGLE <nav> — no fragment wrapper.
+  // The backdrop and sheet use position:fixed so they escape the flex layout.
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-[100] w-full bg-slate-950 border-t border-white/10 flex items-center justify-around px-2 py-3 md:hidden pb-[max(env(safe-area-inset-bottom),0.75rem)]">
-      {/* Backdrop — fixed positioning removes it from the flex layout */}
+    <nav
+      className="fixed bottom-0 left-0 right-0 z-[100] w-full bg-slate-950 border-t border-white/10 flex items-center justify-around px-2 md:hidden"
+      style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)', paddingTop: '0.75rem' }}
+    >
       {moreOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/60"
@@ -107,7 +111,6 @@ export default function MobileNav() {
         />
       )}
 
-      {/* More sheet — fixed positioning removes it from the flex layout */}
       {moreOpen && (
         <div
           className={`fixed bottom-16 inset-x-0 z-50 bg-slate-900 border-t border-white/10 rounded-t-2xl px-4 pt-3 pb-6 ${
@@ -150,7 +153,6 @@ export default function MobileNav() {
         </div>
       )}
 
-      {/* Tab items — these participate in the flex layout */}
       {PRIMARY_TABS.map(({ label, href, icon: Icon }) => {
         const active = isActive(href);
         return (
@@ -158,7 +160,7 @@ export default function MobileNav() {
             key={href}
             href={href}
             onClick={() => !active && navigator.vibrate?.(10)}
-            className={`flex-1 flex flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition-colors min-w-0 ${
+            className={`flex-1 flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-colors min-w-0 ${
               active ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
             }`}
           >
@@ -168,13 +170,12 @@ export default function MobileNav() {
         );
       })}
 
-      {/* More button */}
       <button
         onClick={() => {
           if (moreOpen) { haptic(); closeSheet(); }
           else { navigator.vibrate?.(10); setMoreOpen(true); }
         }}
-        className={`flex-1 flex flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition-colors min-w-0 ${
+        className={`flex-1 flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-colors min-w-0 ${
           moreIsActive || moreOpen ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
         }`}
       >

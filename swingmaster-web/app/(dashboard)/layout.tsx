@@ -39,7 +39,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const displayName = profile?.display_name ?? profile?.full_name ?? user.email;
 
   return (
-    <div className="flex min-h-screen bg-golf-dark overflow-x-hidden">
+    <div className="relative flex h-screen bg-golf-dark">
       
       {/* Desktop Sidebar: Hidden on Mobile (hidden md:flex) */}
       <aside className="hidden md:flex w-64 bg-golf-header border-r border-white/5 flex-col fixed h-full overflow-y-auto z-20">
@@ -129,7 +129,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       </aside>
 
       {/* Main Content: Full width on mobile, right-aligned on desktop. Padding bottom ensures content isn't hidden behind the MobileNav. */}
-      <main className="flex-1 w-full pb-24 md:pb-0 overflow-y-auto">
+      <main className="flex-1 min-w-0 overflow-y-auto pb-24 md:pb-0">
         {children}
       </main>
 
