@@ -8,11 +8,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="h-full">
+    <html lang="en" className="h-full overflow-x-hidden">
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
       </head>
-      <body className="h-full bg-slate-950 text-slate-100 antialiased">
+      <body className="h-full w-full bg-slate-950 text-slate-100 antialiased overflow-x-hidden">
         {children}
       </body>
     </html>
