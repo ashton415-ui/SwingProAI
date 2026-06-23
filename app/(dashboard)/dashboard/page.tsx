@@ -116,68 +116,71 @@ export default async function DashboardPage() {
             </Link>
           </div>
         ) : (
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
-                <th className="px-8 py-4">Timestamp</th>
-                <th className="px-8 py-4">Club</th>
-                <th className="px-8 py-4">Score</th>
-                <th className="px-8 py-4">Tempo</th>
-                <th className="px-8 py-4">Status</th>
-                <th className="px-8 py-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {swings.map((swing) => (
-                <tr key={swing.id} className="group hover:bg-white/5 transition-colors">
-                  <td className="px-8 py-5">
-                    <div className="flex items-center gap-2">
-                      <Calendar size={12} className="text-gray-600" />
-                      <span className="text-xs font-mono text-gray-400">
-                        {new Date(swing.created_at).toLocaleDateString("en-US", {
-                          month: "short", day: "numeric", year: "numeric",
-                        })}
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-8 py-5">
-                    <span className="text-sm font-bold text-gray-200 capitalize">
-                      {swing.swing_video?.club ?? "Unknown"}
-                    </span>
-                  </td>
-                  <td className="px-8 py-5">
-                    <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${
-                      (swing.score ?? 0) >= 80
-                        ? "text-golf-green border-golf-green/20"
-                        : (swing.score ?? 0) >= 60
-                        ? "text-yellow-400 border-yellow-400/20"
-                        : "text-red-400 border-red-500/20"
-                    }`}>
-                      {swing.score != null ? `${swing.score} pts` : "—"}
-                    </div>
-                  </td>
-                  <td className="px-8 py-5">
-                    <span className="text-xs font-mono font-black text-white">
-                      {swing.tempo_ratio?.toFixed(1) ?? "—"}
-                    </span>
-                  </td>
-                  <td className="px-8 py-5">
-                    <span className="px-3 py-1 bg-white/5 text-gray-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-white/5">
-                      {swing.status ?? "pending"}
-                    </span>
-                  </td>
-                  <td className="px-8 py-5 text-right">
-                    <Link
-                      href={`/swings/${swing.id}`}
-                      className="p-1 text-gray-700 group-hover:text-golf-green transition-all inline-block"
-                    >
-                      <ChevronRight size={16} />
-                    </Link>
-                  </td>
+          /* THE FIX: Added overflow-x-auto wrapper here */
+          <div className="overflow-x-auto w-full">
+            <table className="w-full text-left min-w-[800px]">
+              <thead>
+                <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
+                  <th className="px-8 py-4">Timestamp</th>
+                  <th className="px-8 py-4">Club</th>
+                  <th className="px-8 py-4">Score</th>
+                  <th className="px-8 py-4">Tempo</th>
+                  <th className="px-8 py-4">Status</th>
+                  <th className="px-8 py-4"></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {swings.map((swing) => (
+                  <tr key={swing.id} className="group hover:bg-white/5 transition-colors">
+                    <td className="px-8 py-5">
+                      <div className="flex items-center gap-2">
+                        <Calendar size={12} className="text-gray-600" />
+                        <span className="text-xs font-mono text-gray-400">
+                          {new Date(swing.created_at).toLocaleDateString("en-US", {
+                            month: "short", day: "numeric", year: "numeric",
+                          })}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-8 py-5">
+                      <span className="text-sm font-bold text-gray-200 capitalize">
+                        {swing.swing_video?.club ?? "Unknown"}
+                      </span>
+                    </td>
+                    <td className="px-8 py-5">
+                      <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${
+                        (swing.score ?? 0) >= 80
+                          ? "text-golf-green border-golf-green/20"
+                          : (swing.score ?? 0) >= 60
+                          ? "text-yellow-400 border-yellow-400/20"
+                          : "text-red-400 border-red-500/20"
+                      }`}>
+                        {swing.score != null ? `${swing.score} pts` : "—"}
+                      </div>
+                    </td>
+                    <td className="px-8 py-5">
+                      <span className="text-xs font-mono font-black text-white">
+                        {swing.tempo_ratio?.toFixed(1) ?? "—"}
+                      </span>
+                    </td>
+                    <td className="px-8 py-5">
+                      <span className="px-3 py-1 bg-white/5 text-gray-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-white/5">
+                        {swing.status ?? "pending"}
+                      </span>
+                    </td>
+                    <td className="px-8 py-5 text-right">
+                      <Link
+                        href={`/swings/${swing.id}`}
+                        className="p-1 text-gray-700 group-hover:text-golf-green transition-all inline-block"
+                      >
+                        <ChevronRight size={16} />
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
