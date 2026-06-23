@@ -21,14 +21,15 @@ export default function ConnectToCoachForm() {
     e.preventDefault();
     if (code.length !== 6 || isPending) return;
 
-    startTransition(async () => {
-      const result = await linkStudentToCoach(code);
-      if (result.success) {
-        setSuccess(true);
-        router.refresh();
-      } else {
-        setError(result.error ?? 'Something went wrong.');
-      }
+    startTransition(() => {
+      linkStudentToCoach(code).then((result) => {
+        if (result.success) {
+          setSuccess(true);
+          router.refresh();
+        } else {
+          setError(result.error ?? 'Something went wrong.');
+        }
+      });
     });
   }
 

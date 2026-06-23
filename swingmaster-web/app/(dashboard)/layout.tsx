@@ -1,4 +1,4 @@
-import { createClient, getServerSession } from "@/utils/supabase/server";
+import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import {
@@ -10,10 +10,9 @@ import MobileNav from "@/components/ui/MobileNav";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const session = await getServerSession();
-  if (!session) redirect("/login");
-  const user = session.user;
   const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
 
   const { data: profile } = await supabase
     .from("users")
