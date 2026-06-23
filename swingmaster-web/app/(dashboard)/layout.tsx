@@ -40,7 +40,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="relative flex h-screen bg-golf-dark">
-      
+      <MobileNav />
+
       {/* Desktop Sidebar: Hidden on Mobile (hidden md:flex) */}
       <aside className="hidden md:flex w-64 bg-golf-header border-r border-white/5 flex-col fixed h-full overflow-y-auto z-20">
         <div className="px-6 py-7 border-b border-white/5">
@@ -133,8 +134,6 @@ export default async function DashboardLayout({ children }: { children: React.Re
         {children}
       </main>
 
-      {/* Bottom Tab Bar: Handled by its own component, uses md:hidden internally */}
-      <MobileNav />
     </div>
   );
 }
