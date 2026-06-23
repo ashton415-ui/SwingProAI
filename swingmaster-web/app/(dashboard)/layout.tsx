@@ -9,8 +9,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <DashboardNav />
       </aside>
 
-      {/* Main content — extra bottom padding on mobile keeps content above tab bar */}
-      <main className="flex-1 min-w-0 pb-16 md:pb-0">{children}</main>
+<main className="flex-1 min-w-0 pb-16 md:pb-0 overflow-x-hidden">{children}</main>
 
       {/* Bottom tab bar — mobile only */}
       <MobileNav />
