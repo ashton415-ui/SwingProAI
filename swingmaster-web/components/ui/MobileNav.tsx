@@ -98,19 +98,19 @@ export default function MobileNav() {
   }
 
   return (
-    <>
-      {/* Backdrop */}
+    <nav className="fixed bottom-0 left-0 right-0 z-[100] w-full bg-slate-950 border-t border-white/10 flex items-center justify-around px-2 py-3 md:hidden pb-[max(env(safe-area-inset-bottom),0.75rem)]">
+      {/* Backdrop — fixed positioning removes it from the flex layout */}
       {moreOpen && (
         <div
-          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          className="fixed inset-0 z-40 bg-black/60"
           onClick={() => { haptic(); closeSheet(); }}
         />
       )}
 
-      {/* More sheet */}
+      {/* More sheet — fixed positioning removes it from the flex layout */}
       {moreOpen && (
         <div
-          className={`fixed bottom-16 inset-x-0 z-50 bg-slate-900 border-t border-white/10 rounded-t-2xl px-4 pt-3 pb-6 md:hidden ${
+          className={`fixed bottom-16 inset-x-0 z-50 bg-slate-900 border-t border-white/10 rounded-t-2xl px-4 pt-3 pb-6 ${
             dragY === 0 ? 'transition-transform duration-200' : ''
           }`}
           style={{ transform: `translateY(${dragY}px)` }}
@@ -119,15 +119,11 @@ export default function MobileNav() {
           onTouchEnd={onTouchEnd}
           onTouchCancel={onTouchCancel}
         >
-          {/* Drag handle */}
           <div className="flex justify-center mb-3">
             <div className="w-10 h-1 rounded-full bg-white/20" />
           </div>
-
           <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">
-              More
-            </span>
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-widest">More</span>
             <button
               onClick={() => { haptic(); closeSheet(); }}
               className="p-1 text-slate-400 hover:text-white transition-colors"
@@ -142,9 +138,7 @@ export default function MobileNav() {
                   href={href}
                   onClick={() => { haptic(); closeSheet(); }}
                   className={`flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-medium transition-colors ${
-                    isActive(href)
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-slate-300 hover:bg-white/[0.06]'
+                    isActive(href) ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-white/[0.06]'
                   }`}
                 >
                   <Icon className="w-5 h-5 shrink-0" />
@@ -156,39 +150,37 @@ export default function MobileNav() {
         </div>
       )}
 
-      {/* Tab bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 flex md:hidden bg-slate-900/95 backdrop-blur-sm border-t border-white/10 w-full overflow-hidden">
-        {PRIMARY_TABS.map(({ label, href, icon: Icon }) => {
-          const active = isActive(href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              onClick={() => !active && navigator.vibrate?.(10)}
-              className={`flex-1 flex flex-col items-center justify-center gap-1 py-3 text-[10px] font-medium transition-colors min-w-0 ${
-                active ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
-              }`}
-            >
-              <Icon className={`w-5 h-5 transition-transform ${active ? 'scale-110' : ''}`} />
-              <span className="truncate">{label}</span>
-            </Link>
-          );
-        })}
+      {/* Tab items — these participate in the flex layout */}
+      {PRIMARY_TABS.map(({ label, href, icon: Icon }) => {
+        const active = isActive(href);
+        return (
+          <Link
+            key={href}
+            href={href}
+            onClick={() => !active && navigator.vibrate?.(10)}
+            className={`flex-1 flex flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition-colors min-w-0 ${
+              active ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
+            }`}
+          >
+            <Icon className={`w-5 h-5 transition-transform ${active ? 'scale-110' : ''}`} />
+            <span className="truncate">{label}</span>
+          </Link>
+        );
+      })}
 
-        {/* More button */}
-        <button
-          onClick={() => {
-            if (moreOpen) { haptic(); closeSheet(); } 
-            else { navigator.vibrate?.(10); setMoreOpen(true); }
-          }}
-          className={`flex-1 flex flex-col items-center justify-center gap-1 py-3 text-[10px] font-medium transition-colors min-w-0 ${
-            moreIsActive || moreOpen ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
-          }`}
-        >
-          <MoreHorizontal className="w-5 h-5" />
-          <span className="truncate">More</span>
-        </button>
-      </nav>
-    </>
+      {/* More button */}
+      <button
+        onClick={() => {
+          if (moreOpen) { haptic(); closeSheet(); }
+          else { navigator.vibrate?.(10); setMoreOpen(true); }
+        }}
+        className={`flex-1 flex flex-col items-center justify-center gap-1 py-1 text-[10px] font-medium transition-colors min-w-0 ${
+          moreIsActive || moreOpen ? 'text-indigo-400' : 'text-slate-500 active:text-slate-300'
+        }`}
+      >
+        <MoreHorizontal className="w-5 h-5" />
+        <span className="truncate">More</span>
+      </button>
+    </nav>
   );
 }

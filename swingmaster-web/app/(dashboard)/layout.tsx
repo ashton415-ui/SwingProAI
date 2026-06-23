@@ -129,7 +129,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       </aside>
 
       {/* Main Content: Full width on mobile, right-aligned on desktop. Padding bottom ensures content isn't hidden behind the MobileNav. */}
-      <main className="flex-1 w-full md:ml-64 min-h-screen pb-24 md:pb-0">
+      <main className="flex-1 w-full pb-24 md:pb-0 overflow-y-auto">
         {children}
       </main>
 
