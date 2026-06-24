@@ -30,7 +30,12 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+  console.log('--- MIDDLEWARE FINAL CHECK ---');
+  console.log('Pathname:', request.nextUrl.pathname);
+  console.log('User ID from Supabase:', user?.id);
+  console.log('Auth Error:', authError);
 
   const isPublicPath = PUBLIC_PATHS.some((p) => request.nextUrl.pathname.startsWith(p));
 
