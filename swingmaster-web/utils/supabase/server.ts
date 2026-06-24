@@ -9,26 +9,30 @@ export async function createClient() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return cookieStore.getAll();
+        get(name: string) {
+          return cookieStore.get(name)?.value;
         },
-        setAll(cookiesToSet) {
+        set(name: string, value: string, options: Record<string, unknown>) {
           try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, {
-                ...options,
-                // path:'/' ensures the cookie is sent on every request,
-                // not just the path it was originally set on.
-                path: '/',
-                // Only mark secure in production — localhost is not HTTPS.
-                secure: process.env.NODE_ENV === 'production',
-                // lax allows the cookie through same-site navigations
-                // (e.g. redirect from /login to /dashboard).
-                sameSite: 'lax',
-              })
-            );
+            cookieStore.set(name, value, {
+              ...options,
+              path: '/',
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: 'lax',
+            } as Parameters<typeof cookieStore.set>[2]);
           } catch {
-            // Server Component context — cookie writes are intentional no-ops.
+            // Server Component context — writes are intentional no-ops.
+          }
+        },
+        remove(name: string, options: Record<string, unknown>) {
+          try {
+            cookieStore.set(name, '', {
+              ...options,
+              path: '/',
+              maxAge: 0,
+            } as Parameters<typeof cookieStore.set>[2]);
+          } catch {
+            // Server Component context — writes are intentional no-ops.
           }
         },
       },
