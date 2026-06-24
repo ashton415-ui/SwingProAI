@@ -56,36 +56,70 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect('/login');
 
-  const [
-    { data: swings },
-    { data: equipment },
-    { data: profile },
-    { data: coachLink },
-  ] = await Promise.all([
-    supabase
-      .from('swing_analysis')
-      .select('id, score, status, created_at, swing_video:swing_videos(club, original_filename)')
-      .eq('user_id', user.id)
-      .eq('status', 'complete')
-      .order('created_at', { ascending: false })
-      .limit(5),
-    supabase
-      .from('user_equipment')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', user.id),
-    supabase
-      .from('users')
-      .select('role, full_name, display_name')
-      .eq('id', user.id)
-      .single(),
-    supabase
-      .from('coach_student_relationships')
-      .select('id')
-      .eq('student_id', user.id)
-      .eq('status', 'active')
-      .limit(1)
-      .maybeSingle(),
-  ]);
+  // Run all queries in parallel. Each is independent — a missing table or
+  // empty result in one must not blank the whole page.
+  let swings:     Awaited<ReturnType<typeof supabase.from<'swing_analysis', never>>>['data']       = null;
+  let bagCount    = 0;
+  let profile:    { role: string; full_name: string | null; display_name: string | null } | null   = null;
+  let coachLink:  { id: string } | null                                                             = null;
+  let fetchError: string | null = null;
+
+  try {
+    const [swingsRes, equipRes, profileRes, coachRes] = await Promise.all([
+      supabase
+        .from('swing_analysis')
+        .select('id, score, status, created_at, swing_video:swing_videos(club, original_filename)')
+        .eq('user_id', user.id)
+        .eq('status', 'complete')
+        .order('created_at', { ascending: false })
+        .limit(5),
+      // head:true returns count on the result object, not inside data.
+      supabase
+        .from('user_equipment')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', user.id),
+      // maybeSingle() returns null (not an error) when no row exists yet.
+      supabase
+        .from('users')
+        .select('role, full_name, display_name')
+        .eq('id', user.id)
+        .maybeSingle(),
+      supabase
+        .from('coach_student_relationships')
+        .select('id')
+        .eq('student_id', user.id)
+        .eq('status', 'active')
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    if (swingsRes.error)  console.error('[dashboard] swing_analysis:', swingsRes.error);
+    if (equipRes.error)   console.error('[dashboard] user_equipment:', equipRes.error);
+    if (profileRes.error) console.error('[dashboard] users:', profileRes.error);
+    if (coachRes.error)   console.error('[dashboard] coach_student_relationships:', coachRes.error);
+
+    swings    = swingsRes.data;
+    bagCount  = equipRes.count ?? 0;
+    profile   = profileRes.data;
+    coachLink = coachRes.data;
+
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[dashboard] Promise.all threw:', message);
+    fetchError = message;
+  }
+
+  if (fetchError) {
+    return (
+      <div className="min-h-full bg-slate-950 flex items-center justify-center p-8">
+        <div className="max-w-lg w-full bg-red-500/10 border border-red-500/30 rounded-2xl px-6 py-6">
+          <p className="text-sm font-bold text-red-400 mb-2">Dashboard data fetch failed</p>
+          <pre className="text-xs text-red-300/80 whitespace-pre-wrap break-all">{fetchError}</pre>
+          <p className="text-xs text-slate-500 mt-4">Check the server terminal for full error details.</p>
+        </div>
+      </div>
+    );
+  }
 
   const isCoach      = profile?.role === 'coach';
   const hasCoach     = !!coachLink;
@@ -94,7 +128,6 @@ export default async function DashboardPage() {
   const avgScore = completedCount > 0
     ? Math.round(recentSwings.reduce((s, r) => s + (r.score ?? 0), 0) / completedCount)
     : null;
-  const bagCount = (equipment as unknown as { count: number } | null)?.count ?? 0;
   const displayName = profile?.display_name ?? profile?.full_name ?? user.email ?? 'Golfer';
 
   return (
