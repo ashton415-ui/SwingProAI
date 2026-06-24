@@ -33,14 +33,14 @@ export default function LoginPage() {
         return;
       }
 
-      // router.refresh() tells Next.js to invalidate all cached Server Component
-      // data. This forces the middleware to re-read the session cookie that
-      // createBrowserClient just wrote to the browser before we navigate.
-      router.refresh();
+      // Give the browser 1 second to finish persisting the auth cookie that
+      // signInWithPassword triggered internally. Without this delay, router.push
+      // fires before the cookie write completes and the middleware sees no
+      // session, causing a redirect loop back to /login.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      // Hard navigation — bypasses the Next.js client router cache entirely
-      // and sends a fresh GET /dashboard with the new session cookie attached.
-      window.location.href = '/dashboard';
+      router.push('/dashboard');
+      router.refresh();
 
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'An unexpected error occurred.';
