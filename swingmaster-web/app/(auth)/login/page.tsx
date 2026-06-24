@@ -1,14 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/utils/supabase/client';
 import { Loader2 } from 'lucide-react';
 
 export default function LoginPage() {
+  // Stable client — never recreated across renders.
+  const supabase = useMemo(() => createClient(), []);
   const router = useRouter();
-  const supabase = createClient();
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -19,21 +21,37 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
 
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    try {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-    } else {
-      router.push('/dashboard');
+      if (signInError) {
+        setError(signInError.message);
+        setLoading(false);
+        return;
+      }
+
+      // router.refresh() tells Next.js to invalidate all cached Server Component
+      // data. This forces the middleware to re-read the session cookie that
+      // createBrowserClient just wrote to the browser before we navigate.
       router.refresh();
+
+      // Hard navigation — bypasses the Next.js client router cache entirely
+      // and sends a fresh GET /dashboard with the new session cookie attached.
+      window.location.href = '/dashboard';
+
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An unexpected error occurred.';
+      setError(message);
+      setLoading(false);
     }
   }
 
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        {/* Logo */}
         <div className="text-center mb-8">
           <span className="text-2xl font-bold text-white tracking-tight">
             Swing<span className="text-indigo-400">Master</span>
