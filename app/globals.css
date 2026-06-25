@@ -92,6 +92,13 @@
   cursor: ew-resize;
 }
 
+/* ── Dark scrollbars ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+* { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.1) transparent; }
+
 @layer base {
   :root {
     --color-golf-green: #4ADE80;
@@ -100,10 +107,15 @@
     --color-golf-header: #161812;
   }
 
+  html {
+    overflow-x: hidden;
+  }
+
   body {
     background-color: #0F110C;
     color: #f3f4f6;
     font-family: 'Space Grotesk', sans-serif;
     -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
   }
 }
