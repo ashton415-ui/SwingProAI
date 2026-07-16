@@ -1,25 +1,47 @@
 import 'dotenv/config';
 import { createClient } from '@supabase/supabase-js';
-import express from 'express';
-import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { GoogleAIFileManager, FileState } from '@google/generative-ai/server';
 import { calcSpineAngle, calcHipRotation, calcShoulderRotation } from './biometrics.js';
+import { createApp } from './app.js';
+import { logSafe } from './safeLog.js';
 
-process.on('uncaughtException', (err) => {
-  console.error('❌ FATAL UNCAUGHT EXCEPTION:', err);
+process.on('uncaughtException', () => {
+  logSafe('uncaught_exception');
 });
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ FATAL UNHANDLED REJECTION:', reason);
+process.on('unhandledRejection', () => {
+  logSafe('unhandled_rejection');
 });
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const geminiApiKey = process.env.GEMINI_API_KEY;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+function assertStartupConfig() {
+  const required = {
+    SUPABASE_URL: supabaseUrl,
+    SUPABASE_SERVICE_ROLE_KEY: supabaseKey,
+    GEMINI_API_KEY: geminiApiKey,
+  };
+
+  const missing = Object.keys(required).filter((name) => !required[name]);
+  if (missing.length > 0) {
+    console.error(`[Startup] Missing required environment variable(s): ${missing.join(', ')}`);
+    process.exit(1);
+  }
+}
+
+assertStartupConfig();
+
+const supabase = createClient(supabaseUrl, supabaseKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
+  },
+});
 
 // Gemini response schema — mirrors the telemetry_data JSONB structure
 const GEMINI_SCHEMA = {
@@ -206,13 +228,14 @@ async function analyzeSwing(swingId, storagePath, equipmentContext, slope) {
 
   const isPutting = equipmentContext?.club_type === 'Putter';
 
-  console.log(`[AI Engine] Downloading from storage: ${storagePath}`);
+  console.log(`[AI Engine] Downloading swing video from storage for swing: ${swingId}`);
   const { data: videoBlob, error: downloadError } = await supabase.storage
     .from('swing-videos')
     .download(storagePath);
 
   if (downloadError || !videoBlob) {
-    throw new Error(`Storage download failed: ${downloadError?.message ?? 'empty blob'}`);
+    logSafe('storage_download_failed', { swingId });
+    throw new Error('Storage download failed');
   }
 
   console.log(`[AI Engine] Downloaded ${videoBlob.size} bytes. Uploading to Gemini...`);
@@ -291,8 +314,8 @@ async function analyzeSwing(swingId, storagePath, equipmentContext, slope) {
     aiAnalysis.estimated_metrics.shoulderTurn = calculatedShoulder;
 
     console.log(`[AI Engine] Math Applied. Spine: ${calculatedSpine}°, Hip: ${calculatedHip}°, Shoulder: ${calculatedShoulder}°`);
-  } catch (mathErr) {
-    console.log(`[AI Engine] Warning: Could not calculate angles from pose data.`, mathErr.message);
+  } catch {
+    logSafe('pose_math_failed', { swingId });
   }
 
   const { error: updateError } = await supabase
@@ -316,46 +339,7 @@ async function analyzeSwing(swingId, storagePath, equipmentContext, slope) {
   return aiAnalysis;
 }
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-app.post('/analyze', async (req, res) => {
-  res.status(200).json({ success: true, message: 'Analysis queued' });
-
-  // Add drillId and userId to the destructured body
-  const { swingId, storagePath, equipmentContext, slope, drillId, userId } = req.body;
-
-  // We only require swingId if it's NOT a drill verification
-  if (!drillId && (!swingId || !storagePath)) {
-    console.error('[Worker] Missing required fields: swingId or storagePath');
-    return;
-  }
-
-  try {
-    if (drillId) {
-      await verifyDrill(drillId, userId, storagePath);
-    } else {
-      await analyzeSwing(swingId, storagePath, equipmentContext, slope);
-    }
-  } catch (error) {
-    console.error(`[Worker] Analysis/Verification failed:`, error.message);
-    
-    // Exact original error handling fallback for swings
-    if (swingId) {
-      const { error: dbError } = await supabase
-        .from('swings')
-        .update({ status: 'ERROR' })
-        .eq('id', swingId);
-
-      if (dbError) {
-        console.error('[Worker] Failed to write ERROR status:', dbError.message);
-      }
-    }
-  }
-});
-
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+const app = createApp({ supabase, analyzeSwing });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () =>
