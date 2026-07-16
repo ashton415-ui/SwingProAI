@@ -10,15 +10,19 @@ import {
   validateSlope,
 } from './requestSecurity.js';
 import { logSafe } from './safeLog.js';
+import { classifySwingStatus, CLASSIFICATION } from './swingStatus.js';
+import * as defaultSwingRepository from './swingRepository.js';
 
 const JSON_BODY_LIMIT = '100kb';
 
 /**
  * Builds the Express app. Takes injected dependencies so it can be exercised
  * in tests with stubs — no real Supabase/Gemini calls, no network port opened
- * by the factory itself (callers decide how/whether to listen).
+ * by the factory itself (callers decide how/whether to listen). swingRepository
+ * defaults to the real privileged-DB-operations module but can be swapped for
+ * a stub in tests.
  */
-function createApp({ supabase, analyzeSwing }) {
+function createApp({ supabase, analyzeSwing, swingRepository = defaultSwingRepository }) {
   const app = express();
   app.use(cors());
 
@@ -43,12 +47,12 @@ function createApp({ supabase, analyzeSwing }) {
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
-  // Phase 2B1 intermediate design: this endpoint runs synchronously and
-  // awaits the full analysis before responding, on purpose — it must NOT be
-  // deployed in this form. Request-based compute (e.g. Cloud Run) may stop
-  // scheduling CPU once a response is sent, so responding early would risk
-  // silently truncating the analysis. Phase 2B2 must replace this with a
-  // queued/Cloud-Tasks-based asynchronous job before any deployment.
+  // Phase 2B2A: this endpoint still runs synchronously and awaits the full
+  // analysis before responding, on purpose — it must NOT be deployed in this
+  // form. Request-based compute (e.g. Cloud Run) may stop scheduling CPU once
+  // a response is sent, so responding early would risk silently truncating
+  // the analysis. A later queued/Cloud-Tasks-based asynchronous phase must
+  // replace this before any deployment.
   app.post('/v1/swings/:swingId/analyze', async (req, res) => {
     const requestId = crypto.randomUUID();
     let swingId;
@@ -92,17 +96,13 @@ function createApp({ supabase, analyzeSwing }) {
       }
 
       // 5. Load the swing row using the server-side client (authz fields only).
-      const { data: swing, error: fetchError } = await supabase
-        .from('swings')
-        .select('id, user_id, status')
-        .eq('id', swingId)
-        .maybeSingle();
-
-      if (fetchError) {
+      const lookupResult = await swingRepository.getSwingState(supabase, swingId);
+      if (!lookupResult.ok) {
         logSafe('swing_lookup_failed', { requestId, swingId });
         return res.status(500).json({ error: 'internal_error' });
       }
 
+      const swing = lookupResult.swing;
       if (!swing) {
         return res.status(404).json({ error: 'not_found' });
       }
@@ -112,12 +112,7 @@ function createApp({ supabase, analyzeSwing }) {
         return res.status(403).json({ error: 'forbidden' });
       }
 
-      // 7. Verify the swing is in an allowed initial state.
-      if (typeof swing.status !== 'string' || swing.status.toLowerCase() !== 'pending') {
-        return res.status(409).json({ error: 'invalid_state' });
-      }
-
-      // Full storagePath safety validation, now that ownership is confirmed.
+      // 7. Full storagePath safety validation, now that ownership is confirmed.
       if (!validateUserStoragePath(storagePath, verifiedUser.id)) {
         return res.status(400).json({ error: 'validation_error' });
       }
@@ -125,21 +120,74 @@ function createApp({ supabase, analyzeSwing }) {
       // Only known, validated fields reach the analysis/Gemini prompt.
       const sanitizedEquipmentContext = sanitizeEquipmentContext(equipmentContext);
 
-      // 8. Only now invoke the existing analysis function — awaited in full
-      // before any response is sent (see design note above).
+      // 8. Classify the exact stored status and either short-circuit
+      // idempotently or attempt the single atomic compare-and-set claim.
+      const classification = classifySwingStatus(swing.status);
+
+      if (classification === CLASSIFICATION.COMPLETE) {
+        return res.status(200).json({ swingId, status: 'complete', requestId, idempotent: true });
+      }
+
+      if (classification === CLASSIFICATION.PROCESSING) {
+        return res.status(202).json({ swingId, status: 'processing', requestId, idempotent: true });
+      }
+
+      if (classification !== CLASSIFICATION.CLAIMABLE) {
+        // Unknown/invalid stored status on the initial read — distinct from
+        // a lost-claim race, so it gets its own error code rather than
+        // claim_conflict (which is reserved for the post-claim-attempt path).
+        return res.status(409).json({ error: 'invalid_state', requestId });
+      }
+
+      const claimResult = await swingRepository.claimSwingForAnalysis(supabase, {
+        swingId,
+        userId: verifiedUser.id,
+        exactStatus: swing.status,
+      });
+
+      if (!claimResult.ok) {
+        logSafe('claim_failed', { requestId, swingId });
+        return res.status(500).json({ error: 'internal_error' });
+      }
+
+      if (!claimResult.claimed) {
+        // Lost the claim to a concurrent request. Re-read once, verify
+        // ownership again, and classify — no retry loop, no sleep.
+        const conflictResult = await swingRepository.getSwingStateAfterClaimConflict(supabase, swingId);
+        if (!conflictResult.ok) {
+          logSafe('claim_state_lookup_failed', { requestId, swingId });
+          return res.status(500).json({ error: 'internal_error' });
+        }
+
+        const conflictSwing = conflictResult.swing;
+        if (!conflictSwing) {
+          return res.status(404).json({ error: 'not_found' });
+        }
+        if (conflictSwing.user_id !== verifiedUser.id) {
+          return res.status(403).json({ error: 'forbidden' });
+        }
+
+        const conflictClassification = classifySwingStatus(conflictSwing.status);
+        if (conflictClassification === CLASSIFICATION.PROCESSING) {
+          return res.status(202).json({ swingId, status: 'processing', requestId, idempotent: true });
+        }
+        if (conflictClassification === CLASSIFICATION.COMPLETE) {
+          return res.status(200).json({ swingId, status: 'complete', requestId, idempotent: true });
+        }
+        return res.status(409).json({ error: 'claim_conflict', requestId });
+      }
+
+      // 9. This request won the claim — only it may invoke analysis, awaited
+      // in full before any response is sent (see design note above).
       try {
-        await analyzeSwing(swingId, storagePath, sanitizedEquipmentContext, slope);
+        await analyzeSwing(swingId, storagePath, sanitizedEquipmentContext, slope, verifiedUser.id);
       } catch {
         logSafe('analysis_failed', { requestId, swingId });
-        try {
-          const { error: dbError } = await supabase
-            .from('swings')
-            .update({ status: 'ERROR' })
-            .eq('id', swingId);
-          if (dbError) {
-            logSafe('status_update_failed', { requestId, swingId });
-          }
-        } catch {
+        const errorTransition = await swingRepository.markSwingErrorIfProcessing(supabase, {
+          swingId,
+          userId: verifiedUser.id,
+        });
+        if (!errorTransition.ok) {
           logSafe('status_update_failed', { requestId, swingId });
         }
         return res.status(502).json({ error: 'analysis_failed', requestId });

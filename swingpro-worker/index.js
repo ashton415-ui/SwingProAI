@@ -7,6 +7,7 @@ import { GoogleAIFileManager, FileState } from '@google/generative-ai/server';
 import { calcSpineAngle, calcHipRotation, calcShoulderRotation } from './biometrics.js';
 import { createApp } from './app.js';
 import { logSafe } from './safeLog.js';
+import { completeSwingAnalysis } from './swingRepository.js';
 
 process.on('uncaughtException', () => {
   logSafe('uncaught_exception');
@@ -215,10 +216,12 @@ async function verifyDrill(drillId, userId, storagePath) {
   return res;
 }
 
-async function analyzeSwing(swingId, storagePath, equipmentContext, slope) {
+async function analyzeSwing(swingId, storagePath, equipmentContext, slope, verifiedUserId) {
   console.log(`\n[AI Engine] Starting Gemini vision analysis for swing: ${swingId}`);
 
-  await supabase.from('swings').update({ status: 'PROCESSING' }).eq('id', swingId);
+  // Status is already PROCESSING — the caller (app.js) claimed the row with
+  // an atomic compare-and-set before invoking this function. This function
+  // must never set PROCESSING itself.
 
   const equipmentString = equipmentContext
     ? `${equipmentContext.make ?? ''} ${equipmentContext.model ?? ''} ${equipmentContext.club_type ?? ''}`.trim()
@@ -318,24 +321,29 @@ async function analyzeSwing(swingId, storagePath, equipmentContext, slope) {
     logSafe('pose_math_failed', { swingId });
   }
 
-  const { error: updateError } = await supabase
-    .from('swings')
-    .update({
-      status: 'COMPLETE',
-      telemetry_data: {
-        spatial_slope: isPutting ? slope : null,
-        coaching_assessment: aiAnalysis.coaching_assessment,
-        equipment_insight: aiAnalysis.equipment_insight,
-        estimated_metrics: aiAnalysis.estimated_metrics,
-        breakdowns: aiAnalysis.breakdowns,
-        strengths: aiAnalysis.strengths,
-        faults: aiAnalysis.faults,
-        raw_pose_data: aiAnalysis.pose_data 
-      },
-    })
-    .eq('id', swingId);
+  const finalizeResult = await completeSwingAnalysis(supabase, {
+    swingId,
+    userId: verifiedUserId,
+    telemetryData: {
+      spatial_slope: isPutting ? slope : null,
+      coaching_assessment: aiAnalysis.coaching_assessment,
+      equipment_insight: aiAnalysis.equipment_insight,
+      estimated_metrics: aiAnalysis.estimated_metrics,
+      breakdowns: aiAnalysis.breakdowns,
+      strengths: aiAnalysis.strengths,
+      faults: aiAnalysis.faults,
+      raw_pose_data: aiAnalysis.pose_data
+    },
+  });
 
-  if (updateError) throw updateError;
+  // Guarded by id, user_id, and status=PROCESSING — never overwrite a row
+  // that has moved on to another state. Any failure (db error or zero rows
+  // matched) means finalization did not happen; the caller must treat this
+  // analysis as failed rather than assume COMPLETE was written.
+  if (!finalizeResult.ok || !finalizeResult.changed) {
+    throw new Error('Swing finalization did not apply');
+  }
+
   return aiAnalysis;
 }
 
