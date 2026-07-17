@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "start:enqueue": "node publicEnqueueServer.js",
     "test": "node --test"
   },
   "keywords": [],
