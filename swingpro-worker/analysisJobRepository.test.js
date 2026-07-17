@@ -5,6 +5,7 @@ import {
   claimAnalysisJobLease,
   renewAnalysisJobLease,
   succeedAnalysisJob,
+  completeAnalysisJob,
   failAnalysisJob,
 } from './analysisJobRepository.js';
 
@@ -388,6 +389,219 @@ test('succeed rejects invalid ids/token without calling Supabase', async () => {
 
   assert.equal(result.ok, false);
   assert.equal(supabase.calls.rpcName, null);
+});
+
+// --- completeAnalysisJob ---
+
+test('complete calls the exact RPC name with the exact argument keys', async () => {
+  const row = { id: 'j1', swing_id: 's1', state: 'succeeded' };
+  const telemetryData = { angle: 12 };
+  const supabase = makeRecordingSupabase({ rpcResult: { data: [row], error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.job, row);
+  assert.equal(supabase.calls.rpcName, 'complete_swing_analysis_job');
+  assert.deepEqual(supabase.calls.rpcArgs, {
+    p_job_id: 'j1',
+    p_swing_id: 's1',
+    p_lease_token: 't1',
+    p_telemetry_data: telemetryData,
+  });
+  assert.equal(supabase.calls.rpcArgs.p_telemetry_data, telemetryData);
+});
+
+test('complete normalizes a non-array single-row response', async () => {
+  const row = { id: 'j1', swing_id: 's1', state: 'succeeded' };
+  const supabase = makeRecordingSupabase({ rpcResult: { data: row, error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.job, row);
+});
+
+test('complete maps an empty array response to changed:false, not an error', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: [], error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, false);
+  assert.equal(result.job, null);
+});
+
+test('complete maps a null response to changed:false, not an error', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, false);
+  assert.equal(result.job, null);
+});
+
+test('complete returns ok:false on database error without leaking it', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: new Error('raw db secret') } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result.ok, false);
+  assertNoRawError(result);
+});
+
+test('complete returns ok:false when the client throws', async () => {
+  const supabase = makeRecordingSupabase({
+    rpcImpl: () => {
+      throw new Error('raw client secret');
+    },
+  });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result.ok, false);
+  assertNoRawError(result);
+});
+
+test('complete rejects invalid empty ids without calling Supabase', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: null } });
+
+  const result1 = await completeAnalysisJob(supabase, {
+    jobId: '',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+  const result2 = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: '',
+    leaseToken: 't1',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result1.ok, false);
+  assert.equal(result2.ok, false);
+  assert.equal(supabase.calls.rpcName, null);
+});
+
+test('complete rejects an invalid empty lease token without calling Supabase', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: '',
+    telemetryData: { angle: 12 },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(supabase.calls.rpcName, null);
+});
+
+test('complete rejects null telemetry without calling Supabase', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: null,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(supabase.calls.rpcName, null);
+});
+
+test('complete rejects array telemetry without calling Supabase', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: [1, 2, 3],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(supabase.calls.rpcName, null);
+});
+
+test('complete rejects primitive telemetry without calling Supabase', async () => {
+  const supabase = makeRecordingSupabase({ rpcResult: { data: null, error: null } });
+
+  const stringResult = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: 'not an object',
+  });
+  const numberResult = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: 42,
+  });
+  const undefinedResult = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData: undefined,
+  });
+
+  assert.equal(stringResult.ok, false);
+  assert.equal(numberResult.ok, false);
+  assert.equal(undefinedResult.ok, false);
+  assert.equal(supabase.calls.rpcName, null);
+});
+
+test('complete passes plain object telemetry unchanged', async () => {
+  const row = { id: 'j1', swing_id: 's1', state: 'succeeded' };
+  const telemetryData = { angle: 12, nested: { ok: true }, list: [1, 2] };
+  const supabase = makeRecordingSupabase({ rpcResult: { data: [row], error: null } });
+
+  const result = await completeAnalysisJob(supabase, {
+    jobId: 'j1',
+    swingId: 's1',
+    leaseToken: 't1',
+    telemetryData,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(supabase.calls.rpcArgs.p_telemetry_data, telemetryData);
+  assertNoRawError(result);
 });
 
 // --- failAnalysisJob ---

@@ -20,6 +20,10 @@ function isValidErrorCode(value) {
   return typeof value === 'string' && ERROR_CODE_PATTERN.test(value);
 }
 
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 // RPC functions are SETOF, so a successful call may return an array (0 or 1
 // rows), depending on the client's response handling. Normalizes both shapes
 // to a single row or null.
@@ -140,6 +144,39 @@ async function succeedAnalysisJob(supabase, { jobId, swingId, leaseToken }) {
 }
 
 /**
+ * Attempts the guarded atomic terminal success transition, via
+ * public.complete_swing_analysis_job. Requires the exact lease token and a
+ * non-null plain-object telemetryData payload. Returns { ok: true, changed:
+ * boolean, job: rowOrNull }; { ok: false } on database failure or invalid
+ * input (in which case Supabase is never called).
+ */
+async function completeAnalysisJob(supabase, { jobId, swingId, leaseToken, telemetryData }) {
+  if (
+    !isNonEmptyString(jobId) ||
+    !isNonEmptyString(swingId) ||
+    !isNonEmptyString(leaseToken) ||
+    !isPlainObject(telemetryData)
+  ) {
+    return { ok: false };
+  }
+
+  try {
+    const { data, error } = await supabase.rpc('complete_swing_analysis_job', {
+      p_job_id: jobId,
+      p_swing_id: swingId,
+      p_lease_token: leaseToken,
+      p_telemetry_data: telemetryData,
+    });
+
+    if (error) return { ok: false };
+    const job = firstRowOrNull(data);
+    return { ok: true, changed: Boolean(job), job };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
  * Attempts the guarded terminal failure transition, via
  * public.fail_swing_analysis_job. Returns { ok: true, changed: boolean,
  * job: rowOrNull }; { ok: false } on database failure.
@@ -175,5 +212,6 @@ export {
   claimAnalysisJobLease,
   renewAnalysisJobLease,
   succeedAnalysisJob,
+  completeAnalysisJob,
   failAnalysisJob,
 };
