@@ -184,13 +184,37 @@ async function createAndEnqueueAnalysisJob({
   if (!enqueueResult.ok) {
     // Leaves the job in enqueue_pending (state is untouched here) so a
     // later attempt can retry — never a terminal failure at this layer.
-    await enqueueRepository.recordAnalysisJobEnqueueFailure(supabase, {
+    // Cloud Tasks' own result was ambiguous (it may have created the task
+    // anyway, or a worker may have already claimed the job), so the result
+    // of recording the failure must be checked, not just awaited.
+    const failureResult = await enqueueRepository.recordAnalysisJobEnqueueFailure(supabase, {
       jobId: job.id,
       swingId,
       taskName,
       errorCode: 'task_enqueue_failed',
     });
-    return { ok: false, reason: 'enqueue_failed', jobId: job.id, swingId };
+
+    if (failureResult.ok && failureResult.changed && failureResult.job) {
+      return { ok: false, reason: 'enqueue_failed', jobId: job.id, swingId };
+    }
+
+    // The failure record didn't confirm the job was still enqueue_pending
+    // — reread once (no loop, no Cloud Tasks retry) to distinguish a
+    // healthy outcome (task/worker progressed the job anyway) from one
+    // that still needs reconciliation.
+    const reread = await analysisJobRepository.getAnalysisJob(supabase, { jobId: job.id, swingId });
+    if (!reread.ok) {
+      return { ok: false, reason: 'database_state_error', jobId: job.id, swingId };
+    }
+
+    const rereadJob = reread.job;
+    if (rereadJob && IDEMPOTENT_STATES.has(rereadJob.state)) {
+      return idempotentSuccess(rereadJob);
+    }
+    if (rereadJob && rereadJob.state === 'enqueue_pending' && failureResult.ok) {
+      return { ok: false, reason: 'enqueue_failed', jobId: job.id, swingId };
+    }
+    return { ok: false, reason: 'database_state_error', jobId: job.id, swingId };
   }
 
   const markResult = await enqueueRepository.markAnalysisJobQueued(supabase, {
@@ -199,10 +223,23 @@ async function createAndEnqueueAnalysisJob({
     taskName: enqueueResult.taskName,
   });
 
-  if (!markResult.ok || !markResult.changed || !markResult.job) {
-    // Cloud Tasks already has the task (created or ALREADY_EXISTS) — never
-    // delete it here. A later retry will see ALREADY_EXISTS and can finish
-    // marking the row queued.
+  if (markResult.ok && markResult.changed && markResult.job) {
+    return {
+      ok: true,
+      jobId: markResult.job.id,
+      swingId: markResult.job.swing_id,
+      state: markResult.job.state,
+      idempotent: enqueueResult.alreadyExists,
+      taskName: markResult.job.task_name,
+    };
+  }
+
+  // mark-queued didn't confirm the transition — Cloud Tasks already has the
+  // task (created or ALREADY_EXISTS) so it must never be retried or
+  // deleted here. Reread once (no loop): the private worker may have
+  // already claimed this job before mark-queued could land.
+  const reread = await analysisJobRepository.getAnalysisJob(supabase, { jobId: job.id, swingId });
+  if (!reread.ok) {
     return {
       ok: false,
       reason: 'database_state_error',
@@ -212,13 +249,19 @@ async function createAndEnqueueAnalysisJob({
     };
   }
 
+  const rereadJob = reread.job;
+  if (rereadJob && IDEMPOTENT_STATES.has(rereadJob.state)) {
+    return idempotentSuccess(rereadJob);
+  }
+
+  // Reread remains enqueue_pending, or shows failed/superseded/missing —
+  // the task exists but queued state was never reconciled.
   return {
-    ok: true,
-    jobId: markResult.job.id,
-    swingId: markResult.job.swing_id,
-    state: markResult.job.state,
-    idempotent: enqueueResult.alreadyExists,
-    taskName: markResult.job.task_name,
+    ok: false,
+    reason: 'database_state_error',
+    jobId: job.id,
+    swingId,
+    taskName: enqueueResult.taskName,
   };
 }
 

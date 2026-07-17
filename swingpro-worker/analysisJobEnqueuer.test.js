@@ -252,9 +252,9 @@ test('no retry loop: reread is called exactly once even when it still reports en
   assert.equal(analysisJobRepository.calls.getCallCount, 1);
 });
 
-// --- Cloud Tasks failure ---
+// --- Cloud Tasks failure (RACE 2: ambiguous Cloud Tasks error vs. worker claim) ---
 
-test('Cloud Tasks failure records task_enqueue_failed and never marks the job queued or terminally failed', async () => {
+test('Cloud Tasks failure + failure record changed:true => enqueue_failed, no reread', async () => {
   const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
 
   const enqueueRepository = makeEnqueueRepositoryStub({
@@ -276,12 +276,170 @@ test('Cloud Tasks failure records task_enqueue_failed and never marks the job qu
   assert.equal(enqueueRepository.calls.failureArgs.jobId, JOB_ID);
   assert.equal(enqueueRepository.calls.failureArgs.taskName, expectedTaskName());
   assert.equal(enqueueRepository.calls.markArgs, null);
+  assert.equal(analysisJobRepository.calls.getCallCount, 0);
 });
 
-// --- mark-queued failure after Cloud Tasks success ---
+for (const state of ['queued', 'running', 'succeeded']) {
+  test(`Cloud Tasks failure + failure record changed:false + reread ${state} => idempotent success`, async () => {
+    const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+    const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state, task_name: 'winner-task' };
 
-test('mark-queued database failure after Cloud Tasks success is a recoverable database-state error, task not deleted', async () => {
+    const enqueueRepository = makeEnqueueRepositoryStub({
+      createResult: { ok: true, job },
+      beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+      failureResult: { ok: true, changed: false, job: null },
+    });
+    const cloudTasksQueue = makeCloudTasksQueueStub({
+      enqueueResult: { ok: false, errorCode: 'task_create_failed' },
+    });
+    const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
+
+    const result = await createAndEnqueueAnalysisJob(
+      baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+    );
+
+    assert.deepEqual(result, {
+      ok: true,
+      jobId: JOB_ID,
+      swingId: SWING_ID,
+      state,
+      idempotent: true,
+      taskName: 'winner-task',
+    });
+    assert.equal(analysisJobRepository.calls.getCallCount, 1);
+  });
+}
+
+test('Cloud Tasks failure + failure-record DB error + reread succeeded => idempotent success', async () => {
   const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+  const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded', task_name: 'winner-task' };
+
+  const enqueueRepository = makeEnqueueRepositoryStub({
+    createResult: { ok: true, job },
+    beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+    failureResult: { ok: false },
+  });
+  const cloudTasksQueue = makeCloudTasksQueueStub({
+    enqueueResult: { ok: false, errorCode: 'task_create_failed' },
+  });
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
+
+  const result = await createAndEnqueueAnalysisJob(
+    baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    jobId: JOB_ID,
+    swingId: SWING_ID,
+    state: 'succeeded',
+    idempotent: true,
+    taskName: 'winner-task',
+  });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
+});
+
+test('Cloud Tasks failure + failure record changed:false + reread enqueue_pending => enqueue_failed', async () => {
+  const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+  const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: expectedTaskName() };
+
+  const enqueueRepository = makeEnqueueRepositoryStub({
+    createResult: { ok: true, job },
+    beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+    failureResult: { ok: true, changed: false, job: null },
+  });
+  const cloudTasksQueue = makeCloudTasksQueueStub({
+    enqueueResult: { ok: false, errorCode: 'task_create_failed' },
+  });
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
+
+  const result = await createAndEnqueueAnalysisJob(
+    baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+  );
+
+  assert.deepEqual(result, { ok: false, reason: 'enqueue_failed', jobId: JOB_ID, swingId: SWING_ID });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
+});
+
+test('Cloud Tasks failure + failure-record DB error + reread enqueue_pending => database_state_error', async () => {
+  const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+  const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: expectedTaskName() };
+
+  const enqueueRepository = makeEnqueueRepositoryStub({
+    createResult: { ok: true, job },
+    beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+    failureResult: { ok: false },
+  });
+  const cloudTasksQueue = makeCloudTasksQueueStub({
+    enqueueResult: { ok: false, errorCode: 'task_create_failed' },
+  });
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
+
+  const result = await createAndEnqueueAnalysisJob(
+    baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+  );
+
+  assert.deepEqual(result, { ok: false, reason: 'database_state_error', jobId: JOB_ID, swingId: SWING_ID });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
+});
+
+test('Cloud Tasks failure + reread failure => database_state_error, no loop', async () => {
+  const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+
+  const enqueueRepository = makeEnqueueRepositoryStub({
+    createResult: { ok: true, job },
+    beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+    failureResult: { ok: true, changed: false, job: null },
+  });
+  const cloudTasksQueue = makeCloudTasksQueueStub({
+    enqueueResult: { ok: false, errorCode: 'task_create_failed' },
+  });
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: false } });
+
+  const result = await createAndEnqueueAnalysisJob(
+    baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+  );
+
+  assert.deepEqual(result, { ok: false, reason: 'database_state_error', jobId: JOB_ID, swingId: SWING_ID });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
+});
+
+// --- mark-queued race after Cloud Tasks success (RACE 1: task exists but worker claimed first) ---
+
+for (const state of ['running', 'succeeded']) {
+  test(`mark queued changed:false + reread ${state} => idempotent success`, async () => {
+    const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+    const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state, task_name: expectedTaskName() };
+
+    const enqueueRepository = makeEnqueueRepositoryStub({
+      createResult: { ok: true, job },
+      beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+      markResult: { ok: true, changed: false, job: null },
+    });
+    const cloudTasksQueue = makeCloudTasksQueueStub({
+      enqueueResult: { ok: true, created: true, alreadyExists: false, taskName: expectedTaskName() },
+    });
+    const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
+
+    const result = await createAndEnqueueAnalysisJob(
+      baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+    );
+
+    assert.deepEqual(result, {
+      ok: true,
+      jobId: JOB_ID,
+      swingId: SWING_ID,
+      state,
+      idempotent: true,
+      taskName: expectedTaskName(),
+    });
+    assert.equal(analysisJobRepository.calls.getCallCount, 1);
+  });
+}
+
+test('mark queued database error + reread queued => idempotent success', async () => {
+  const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+  const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state: 'queued', task_name: expectedTaskName() };
 
   const enqueueRepository = makeEnqueueRepositoryStub({
     createResult: { ok: true, job },
@@ -291,7 +449,36 @@ test('mark-queued database failure after Cloud Tasks success is a recoverable da
   const cloudTasksQueue = makeCloudTasksQueueStub({
     enqueueResult: { ok: true, created: true, alreadyExists: false, taskName: expectedTaskName() },
   });
-  const analysisJobRepository = makeAnalysisJobRepositoryStub({});
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
+
+  const result = await createAndEnqueueAnalysisJob(
+    baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    jobId: JOB_ID,
+    swingId: SWING_ID,
+    state: 'queued',
+    idempotent: true,
+    taskName: expectedTaskName(),
+  });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
+});
+
+test('mark queued changed:false + reread enqueue_pending => database_state_error, task not deleted', async () => {
+  const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
+  const rereadJob = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: expectedTaskName() };
+
+  const enqueueRepository = makeEnqueueRepositoryStub({
+    createResult: { ok: true, job },
+    beginResult: { ok: true, begun: true, job: { ...job, task_name: expectedTaskName() } },
+    markResult: { ok: true, changed: false, job: null },
+  });
+  const cloudTasksQueue = makeCloudTasksQueueStub({
+    enqueueResult: { ok: true, created: true, alreadyExists: false, taskName: expectedTaskName() },
+  });
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: true, job: rereadJob } });
 
   const result = await createAndEnqueueAnalysisJob(
     baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
@@ -304,9 +491,10 @@ test('mark-queued database failure after Cloud Tasks success is a recoverable da
     swingId: SWING_ID,
     taskName: expectedTaskName(),
   });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
 });
 
-test('mark-queued reporting changed:false is also treated as a recoverable database-state error', async () => {
+test('mark queued changed:false + reread failure => database_state_error, no loop', async () => {
   const job = { id: JOB_ID, swing_id: SWING_ID, state: 'enqueue_pending', task_name: null };
 
   const enqueueRepository = makeEnqueueRepositoryStub({
@@ -317,14 +505,20 @@ test('mark-queued reporting changed:false is also treated as a recoverable datab
   const cloudTasksQueue = makeCloudTasksQueueStub({
     enqueueResult: { ok: true, created: true, alreadyExists: false, taskName: expectedTaskName() },
   });
-  const analysisJobRepository = makeAnalysisJobRepositoryStub({});
+  const analysisJobRepository = makeAnalysisJobRepositoryStub({ getResult: { ok: false } });
 
   const result = await createAndEnqueueAnalysisJob(
     baseInput({ enqueueRepository, cloudTasksQueue, analysisJobRepository })
   );
 
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, 'database_state_error');
+  assert.deepEqual(result, {
+    ok: false,
+    reason: 'database_state_error',
+    jobId: JOB_ID,
+    swingId: SWING_ID,
+    taskName: expectedTaskName(),
+  });
+  assert.equal(analysisJobRepository.calls.getCallCount, 1);
 });
 
 // --- database failures ---
