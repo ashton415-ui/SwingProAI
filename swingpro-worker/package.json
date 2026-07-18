@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "start:enqueue": "node publicEnqueueServer.js",
+    "start:private": "node privateTaskServer.js",
     "test": "node --test"
   },
   "keywords": [],
