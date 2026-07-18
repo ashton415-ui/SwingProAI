@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { processAnalysisTask } from './analysisTaskProcessor.js';
 
 const JOB_ID = '11111111-1111-1111-1111-111111111111';
@@ -26,10 +28,11 @@ function makeRepository({
   claimImpl,
   getImpl,
   succeedImpl,
+  completeImpl,
   failImpl,
   renewImpl,
 } = {}) {
-  const calls = { claim: [], get: [], succeed: [], fail: [], renew: [] };
+  const calls = { claim: [], get: [], succeed: [], complete: [], fail: [], renew: [] };
   return {
     calls,
     async claimAnalysisJobLease(supabase, args) {
@@ -43,6 +46,10 @@ function makeRepository({
     async succeedAnalysisJob(supabase, args) {
       calls.succeed.push(args);
       return succeedImpl ? succeedImpl(args) : { ok: true, changed: false, job: null };
+    },
+    async completeAnalysisJob(supabase, args) {
+      calls.complete.push(args);
+      return completeImpl ? completeImpl(args) : { ok: true, changed: false, job: null };
     },
     async failAnalysisJob(supabase, args) {
       calls.fail.push(args);
@@ -80,7 +87,7 @@ function baseArgs(overrides = {}) {
     jobId: JOB_ID,
     swingId: SWING_ID,
     leaseSeconds: LEASE_SECONDS,
-    analyzeSwing: async () => {},
+    analyzeSwing: async () => ({ coaching_assessment: { score: 80 } }),
     startLeaseHeartbeat: makeHeartbeatStub(),
     ...overrides,
   };
@@ -265,7 +272,7 @@ test('a claimed row with null equipment_context and null slope is valid', async 
   const job = validClaimedJob({ equipment_context: null, slope: null });
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
   const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
   assert.equal(result.ok, true);
@@ -278,7 +285,7 @@ test('analyzeSwing receives claimed job data, not task input', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
 
   let analyzerArgs;
@@ -308,7 +315,7 @@ test('analyzeSwing receives an AbortSignal from the heartbeat', async () => {
   const controller = new AbortController();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
 
   let receivedSignal;
@@ -329,7 +336,7 @@ test('heartbeat is started with the claimed lease token, not any client input', 
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
   const heartbeatStub = makeHeartbeatStub();
 
@@ -344,24 +351,71 @@ test('heartbeat is started with the claimed lease token, not any client input', 
   assert.equal(heartbeatStub.calls[0].leaseSeconds, LEASE_SECONDS);
 });
 
-// --- analyzer success ---
+// --- analyzer success / telemetry completion ---
 
-test('analyzer success followed by successful succeed transition', async () => {
+test('analyzer success followed by successful complete transition', async () => {
   const job = validClaimedJob();
+  const telemetryData = { coaching_assessment: { score: 80 } };
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: (args) => {
-      assert.deepEqual(args, { jobId: JOB_ID, swingId: SWING_ID, leaseToken: LEASE_TOKEN });
+    completeImpl: (args) => {
+      assert.deepEqual(args, { jobId: JOB_ID, swingId: SWING_ID, leaseToken: LEASE_TOKEN, telemetryData });
       return { ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } };
     },
   });
-  const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+  const result = await processAnalysisTask(
+    baseArgs({ analysisJobRepository: repository, analyzeSwing: async () => telemetryData })
+  );
   assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: false });
-  assert.equal(repository.calls.succeed.length, 1);
+  assert.equal(repository.calls.complete.length, 1);
+  assert.equal(repository.calls.succeed.length, 0);
   assert.equal(repository.calls.get.length, 0);
 });
 
-test('analyzer success but heartbeat reports lease loss skips succeed and rereads', async () => {
+test('analyzer telemetry is passed to completeAnalysisJob unchanged, including nested objects and arrays', async () => {
+  const job = validClaimedJob();
+  const telemetryData = { coaching_assessment: { score: 80, tags: ['slice', 'over-the-top'] }, frames: [1, 2, 3] };
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+  });
+  await processAnalysisTask(
+    baseArgs({ analysisJobRepository: repository, analyzeSwing: async () => telemetryData })
+  );
+  assert.equal(repository.calls.complete.length, 1);
+  assert.equal(repository.calls.complete[0].telemetryData, telemetryData);
+});
+
+test('an empty top-level telemetry object is accepted', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+  });
+  const result = await processAnalysisTask(
+    baseArgs({ analysisJobRepository: repository, analyzeSwing: async () => ({}) })
+  );
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: false });
+  assert.equal(repository.calls.complete.length, 1);
+  assert.deepEqual(repository.calls.complete[0].telemetryData, {});
+});
+
+test('processor success result never contains telemetry data', async () => {
+  const job = validClaimedJob();
+  const telemetryData = { coaching_assessment: { score: 80 }, secret: 'do-not-leak' };
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+  });
+  const result = await processAnalysisTask(
+    baseArgs({ analysisJobRepository: repository, analyzeSwing: async () => telemetryData })
+  );
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: false });
+  assert.equal(JSON.stringify(result).includes('do-not-leak'), false);
+  assert.equal('telemetryData' in result, false);
+});
+
+test('analyzer success but heartbeat reports lease loss skips complete and rereads', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
@@ -374,15 +428,17 @@ test('analyzer success but heartbeat reports lease loss skips succeed and reread
     })
   );
   assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: true });
+  assert.equal(repository.calls.complete.length, 0);
   assert.equal(repository.calls.succeed.length, 0);
+  assert.equal(repository.calls.fail.length, 0);
   assert.equal(repository.calls.get.length, 1);
 });
 
-test('analyzer success but succeed transition changed:false rereads and reports succeeded', async () => {
+test('analyzer success but complete transition changed:false rereads and reports succeeded', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: false, job: null }),
+    completeImpl: () => ({ ok: true, changed: false, job: null }),
     getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
   });
   const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
@@ -390,11 +446,11 @@ test('analyzer success but succeed transition changed:false rereads and reports 
   assert.equal(repository.calls.get.length, 1);
 });
 
-test('analyzer success but succeed transition database failure rereads and reports job_busy conflict for running', async () => {
+test('analyzer success but complete transition ok:false rereads and reports job_busy conflict for running', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: false }),
+    completeImpl: () => ({ ok: false }),
     getImpl: () => ({ ok: true, job: { state: 'running' } }),
   });
   const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
@@ -402,17 +458,274 @@ test('analyzer success but succeed transition database failure rereads and repor
   assert.equal(repository.calls.get.length, 1);
 });
 
-test('analyzer success but succeed transition throws rereads', async () => {
+test('analyzer success but complete transition throws rereads', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => {
+    completeImpl: () => {
       throw new Error('raw db secret');
     },
     getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
   });
   const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
   assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true });
+});
+
+test('complete transition changed:true with a malformed job rereads instead of trusting it', async () => {
+  const job = validClaimedJob();
+  const malformedJobs = [
+    {},
+    { id: 'wrong-id', swing_id: SWING_ID, state: 'succeeded' },
+    { id: JOB_ID, swing_id: 'wrong-swing', state: 'succeeded' },
+    { id: JOB_ID, swing_id: SWING_ID, state: 'running' },
+  ];
+
+  for (const malformedJob of malformedJobs) {
+    const repository = makeRepository({
+      claimImpl: () => ({ ok: true, acquired: true, job }),
+      completeImpl: () => ({ ok: true, changed: true, job: malformedJob }),
+      getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
+    });
+    const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+    assert.deepEqual(
+      result,
+      { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true },
+      `job=${JSON.stringify(malformedJob)}`
+    );
+    assert.equal(repository.calls.get.length, 1, `job=${JSON.stringify(malformedJob)}`);
+  }
+});
+
+test('wrong job ID in a changed:true complete result rereads instead of trusting it', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({
+      ok: true,
+      changed: true,
+      job: { id: 'other-job-id', swing_id: SWING_ID, state: 'succeeded' },
+    }),
+    getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
+  });
+  const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true });
+  assert.equal(repository.calls.get.length, 1);
+});
+
+test('wrong swing ID in a changed:true complete result rereads instead of trusting it', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({
+      ok: true,
+      changed: true,
+      job: { id: JOB_ID, swing_id: 'other-swing-id', state: 'succeeded' },
+    }),
+    getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
+  });
+  const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true });
+  assert.equal(repository.calls.get.length, 1);
+});
+
+test('wrong terminal state in a changed:true complete result rereads instead of trusting it', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({
+      ok: true,
+      changed: true,
+      job: { id: JOB_ID, swing_id: SWING_ID, state: 'failed' },
+    }),
+    getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
+  });
+  const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true });
+  assert.equal(repository.calls.get.length, 1);
+});
+
+test('getAnalysisJob is called no more than once per completion reconciliation', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({ ok: false }),
+    getImpl: () => ({ ok: true, job: { state: 'running' } }),
+  });
+  await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+  assert.equal(repository.calls.get.length, 1);
+});
+
+// --- hostile completeAnalysisJob results are contained, never trusted ---
+
+function makeRevocable(target) {
+  const { proxy, revoke } = Proxy.revocable(target, {});
+  revoke();
+  return proxy;
+}
+
+const HOSTILE_COMPLETE_RESULTS = [
+  [
+    'ok getter throws',
+    () => ({
+      get ok() {
+        throw new Error('raw ok getter secret that must never leak');
+      },
+      changed: true,
+      job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' },
+    }),
+  ],
+  [
+    'job getter throws',
+    () => ({
+      ok: true,
+      changed: true,
+      get job() {
+        throw new Error('raw job getter secret that must never leak');
+      },
+    }),
+  ],
+  [
+    'nested job.id getter throws',
+    () => ({
+      ok: true,
+      changed: true,
+      job: {
+        get id() {
+          throw new Error('raw job.id getter secret that must never leak');
+        },
+        swing_id: SWING_ID,
+        state: 'succeeded',
+      },
+    }),
+  ],
+  ['revoked Proxy as the outer result', () => makeRevocable({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } })],
+  [
+    'revoked Proxy as result.job',
+    () => ({
+      ok: true,
+      changed: true,
+      job: makeRevocable({ id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' }),
+    }),
+  ],
+];
+
+for (const [label, buildHostileResult] of HOSTILE_COMPLETE_RESULTS) {
+  test(`hostile completeAnalysisJob result (${label}) is contained and rereads instead of trusting it`, async () => {
+    const job = validClaimedJob();
+    const repository = makeRepository({
+      claimImpl: () => ({ ok: true, acquired: true, job }),
+      completeImpl: () => buildHostileResult(),
+      getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
+    });
+    const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+    assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true });
+    assert.equal(repository.calls.get.length, 1);
+    assert.equal(repository.calls.succeed.length, 0);
+    assert.equal(repository.calls.fail.length, 0);
+    assert.equal(JSON.stringify(result).includes('secret'), false);
+    assert.equal(JSON.stringify(result).includes('revoked'), false);
+  });
+}
+
+// A hostile result.job getter that returns a different object on each
+// access could let a naive multi-read implementation combine an id from one
+// object, a swing_id from another, and a state from a third into a falsely
+// confirmed transition — none of which individually is a real matching job
+// row. Reading result.job into a local exactly once closes that gap.
+test('a changing result.job getter on completeAnalysisJob is read exactly once and never falsely confirmed', async () => {
+  const job = validClaimedJob();
+  const jobGetterSequence = [{}, { id: JOB_ID }, { swing_id: SWING_ID }, { state: 'succeeded' }];
+  let jobGetterAccessCount = 0;
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    completeImpl: () => ({
+      ok: true,
+      changed: true,
+      get job() {
+        const value = jobGetterSequence[jobGetterAccessCount] ?? jobGetterSequence[jobGetterSequence.length - 1];
+        jobGetterAccessCount += 1;
+        return value;
+      },
+    }),
+    getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
+  });
+  const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true });
+  assert.equal(jobGetterAccessCount, 1);
+  assert.equal(repository.calls.get.length, 1);
+  assert.equal(repository.calls.succeed.length, 0);
+  assert.equal(repository.calls.fail.length, 0);
+  assert.equal(JSON.stringify(result).includes(JOB_ID), true);
+  assert.equal(JSON.stringify(result).includes(SWING_ID), true);
+});
+
+// --- invalid analyzer telemetry ---
+
+test('invalid analyzer telemetry results in a failed transition with invalid_analysis_result, never complete or succeed', async () => {
+  const invalidResults = [undefined, null, [], 'not-an-object', 42, true, false, () => {}];
+
+  for (const invalidResult of invalidResults) {
+    const job = validClaimedJob();
+    const repository = makeRepository({
+      claimImpl: () => ({ ok: true, acquired: true, job }),
+      failImpl: (args) => {
+        assert.deepEqual(args, {
+          jobId: JOB_ID,
+          swingId: SWING_ID,
+          leaseToken: LEASE_TOKEN,
+          errorCode: 'invalid_analysis_result',
+        });
+        return { ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'failed' } };
+      },
+    });
+    const result = await processAnalysisTask(
+      baseArgs({ analysisJobRepository: repository, analyzeSwing: async () => invalidResult })
+    );
+    assert.deepEqual(
+      result,
+      { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: false },
+      `invalidResult=${JSON.stringify(invalidResult)}`
+    );
+    assert.equal(repository.calls.complete.length, 0);
+    assert.equal(repository.calls.succeed.length, 0);
+    assert.equal(repository.calls.fail.length, 1);
+    assert.equal(JSON.stringify(result).includes('not-an-object'), false);
+  }
+});
+
+// A revoked Proxy can never be observed as a *fulfilled* awaited value: the
+// engine's own thenable check (`Get(value, "then")`, performed by every
+// `await`/promise-resolution step, independent of whether analyzeSwing is
+// sync or async) throws on any property access against a revoked Proxy, so
+// `await analyzeSwing(...)` itself always rejects first. That means this
+// hostile value is necessarily caught by the pre-existing analyzer-throw
+// branch (errorCode 'analysis_failed'), not by the isPlainObject telemetry
+// check (which never sees it) — but containment holds either way: the
+// processor never throws, never leaks proxy error text, and never calls
+// completeAnalysisJob or succeedAnalysisJob.
+test('a revoked Proxy returned by analyzeSwing is safely contained as an analyzer failure', async () => {
+  const job = validClaimedJob();
+  const revokedProxy = makeRevocable({ coaching_assessment: { score: 80 } });
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    failImpl: (args) => {
+      assert.deepEqual(args, {
+        jobId: JOB_ID,
+        swingId: SWING_ID,
+        leaseToken: LEASE_TOKEN,
+        errorCode: 'analysis_failed',
+      });
+      return { ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'failed' } };
+    },
+  });
+  const result = await processAnalysisTask(
+    baseArgs({ analysisJobRepository: repository, analyzeSwing: async () => revokedProxy })
+  );
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: false });
+  assert.equal(repository.calls.complete.length, 0);
+  assert.equal(repository.calls.succeed.length, 0);
+  assert.equal(repository.calls.fail.length, 1);
+  assert.equal(JSON.stringify(result).includes('revoked'), false);
 });
 
 // --- analyzer failure ---
@@ -440,7 +753,10 @@ test('analyzer throw followed by successful fail transition', async () => {
     })
   );
   assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: false });
+  assert.equal(repository.calls.complete.length, 0);
+  assert.equal(repository.calls.succeed.length, 0);
   assert.equal(repository.calls.fail.length, 1);
+  assert.equal(repository.calls.fail[0].errorCode, 'analysis_failed');
 });
 
 test('analyzer throw never leaks the raw error in the result', async () => {
@@ -460,7 +776,7 @@ test('analyzer throw never leaks the raw error in the result', async () => {
   assert.equal(JSON.stringify(result).includes('super-secret-analyzer-detail'), false);
 });
 
-test('analyzer throw after lease loss does not call failAnalysisJob', async () => {
+test('analyzer throw after lease loss does not call failAnalysisJob, completeAnalysisJob, or succeedAnalysisJob', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
@@ -477,6 +793,29 @@ test('analyzer throw after lease loss does not call failAnalysisJob', async () =
   );
   assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: true });
   assert.equal(repository.calls.fail.length, 0);
+  assert.equal(repository.calls.complete.length, 0);
+  assert.equal(repository.calls.succeed.length, 0);
+  assert.equal(repository.calls.get.length, 1);
+});
+
+test('invalid analyzer telemetry plus lease loss does not call failAnalysisJob, completeAnalysisJob, or succeedAnalysisJob', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    getImpl: () => ({ ok: true, job: { state: 'failed' } }),
+  });
+  const result = await processAnalysisTask(
+    baseArgs({
+      analysisJobRepository: repository,
+      startLeaseHeartbeat: makeHeartbeatStub({ hasLostLease: true }),
+      analyzeSwing: async () => 'not-an-object',
+    })
+  );
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: true });
+  assert.equal(repository.calls.fail.length, 0);
+  assert.equal(repository.calls.complete.length, 0);
+  assert.equal(repository.calls.succeed.length, 0);
+  assert.equal(repository.calls.get.length, 1);
 });
 
 test('fail transition changed:false rereads and reports failed', async () => {
@@ -513,6 +852,133 @@ test('fail transition database error rereads and reports lease_or_state_conflict
     })
   );
   assert.deepEqual(result, { ok: false, reason: 'lease_or_state_conflict' });
+});
+
+test('fail transition throws rereads and reports failed', async () => {
+  const job = validClaimedJob();
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    failImpl: () => {
+      throw new Error('raw db secret');
+    },
+    getImpl: () => ({ ok: true, job: { state: 'failed' } }),
+  });
+  const result = await processAnalysisTask(
+    baseArgs({
+      analysisJobRepository: repository,
+      analyzeSwing: async () => {
+        throw new Error('analyzer error');
+      },
+    })
+  );
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: true });
+});
+
+// --- hostile failAnalysisJob results are contained, never trusted ---
+
+const HOSTILE_FAIL_RESULTS = [
+  [
+    'ok getter throws',
+    () => ({
+      get ok() {
+        throw new Error('raw ok getter secret that must never leak');
+      },
+      changed: true,
+      job: { id: JOB_ID, swing_id: SWING_ID, state: 'failed' },
+    }),
+  ],
+  [
+    'job getter throws',
+    () => ({
+      ok: true,
+      changed: true,
+      get job() {
+        throw new Error('raw job getter secret that must never leak');
+      },
+    }),
+  ],
+  [
+    'nested job.state getter throws',
+    () => ({
+      ok: true,
+      changed: true,
+      job: {
+        id: JOB_ID,
+        swing_id: SWING_ID,
+        get state() {
+          throw new Error('raw job.state getter secret that must never leak');
+        },
+      },
+    }),
+  ],
+  ['revoked Proxy as the outer result', () => makeRevocable({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'failed' } })],
+  [
+    'revoked Proxy as result.job',
+    () => ({
+      ok: true,
+      changed: true,
+      job: makeRevocable({ id: JOB_ID, swing_id: SWING_ID, state: 'failed' }),
+    }),
+  ],
+];
+
+for (const [label, buildHostileResult] of HOSTILE_FAIL_RESULTS) {
+  test(`hostile failAnalysisJob result (${label}) is contained and rereads instead of trusting it`, async () => {
+    const job = validClaimedJob();
+    const repository = makeRepository({
+      claimImpl: () => ({ ok: true, acquired: true, job }),
+      failImpl: () => buildHostileResult(),
+      getImpl: () => ({ ok: true, job: { state: 'failed' } }),
+    });
+    const result = await processAnalysisTask(
+      baseArgs({
+        analysisJobRepository: repository,
+        analyzeSwing: async () => {
+          throw new Error('analyzer error');
+        },
+      })
+    );
+    assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: true });
+    assert.equal(repository.calls.get.length, 1);
+    assert.equal(repository.calls.complete.length, 0);
+    assert.equal(repository.calls.succeed.length, 0);
+    assert.equal(JSON.stringify(result).includes('secret'), false);
+    assert.equal(JSON.stringify(result).includes('revoked'), false);
+  });
+}
+
+// Same combined-fields exploit as the completion case, but against
+// failAnalysisJob's result after an analyzer exception.
+test('a changing result.job getter on failAnalysisJob is read exactly once and never falsely confirmed', async () => {
+  const job = validClaimedJob();
+  const jobGetterSequence = [{}, { id: JOB_ID }, { swing_id: SWING_ID }, { state: 'failed' }];
+  let jobGetterAccessCount = 0;
+  const repository = makeRepository({
+    claimImpl: () => ({ ok: true, acquired: true, job }),
+    failImpl: () => ({
+      ok: true,
+      changed: true,
+      get job() {
+        const value = jobGetterSequence[jobGetterAccessCount] ?? jobGetterSequence[jobGetterSequence.length - 1];
+        jobGetterAccessCount += 1;
+        return value;
+      },
+    }),
+    getImpl: () => ({ ok: true, job: { state: 'failed' } }),
+  });
+  const result = await processAnalysisTask(
+    baseArgs({
+      analysisJobRepository: repository,
+      analyzeSwing: async () => {
+        throw new Error('analyzer error');
+      },
+    })
+  );
+  assert.deepEqual(result, { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'failed', idempotent: true });
+  assert.equal(jobGetterAccessCount, 1);
+  assert.equal(repository.calls.get.length, 1);
+  assert.equal(repository.calls.complete.length, 0);
+  assert.equal(repository.calls.succeed.length, 0);
 });
 
 // --- heartbeat setup, malformed shape, stop, and getter failures are contained ---
@@ -736,31 +1202,6 @@ test('analyzer throw with signal.aborted true (hasLostLease false) skips fail an
 
 // --- terminal RPC results are strictly validated before being trusted ---
 
-test('succeed transition changed:true with a malformed job rereads instead of trusting it', async () => {
-  const job = validClaimedJob();
-  const malformedJobs = [
-    {},
-    { id: 'wrong-id', swing_id: SWING_ID, state: 'succeeded' },
-    { id: JOB_ID, swing_id: 'wrong-swing', state: 'succeeded' },
-    { id: JOB_ID, swing_id: SWING_ID, state: 'running' },
-  ];
-
-  for (const malformedJob of malformedJobs) {
-    const repository = makeRepository({
-      claimImpl: () => ({ ok: true, acquired: true, job }),
-      succeedImpl: () => ({ ok: true, changed: true, job: malformedJob }),
-      getImpl: () => ({ ok: true, job: { state: 'succeeded' } }),
-    });
-    const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
-    assert.deepEqual(
-      result,
-      { ok: true, jobId: JOB_ID, swingId: SWING_ID, state: 'succeeded', idempotent: true },
-      `job=${JSON.stringify(malformedJob)}`
-    );
-    assert.equal(repository.calls.get.length, 1, `job=${JSON.stringify(malformedJob)}`);
-  }
-});
-
 test('fail transition changed:true with a malformed job rereads instead of trusting it', async () => {
   const job = validClaimedJob();
   const malformedJobs = [
@@ -799,7 +1240,7 @@ test('heartbeat stop is awaited before the processor returns', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
 
   let stopAwaited = false;
@@ -820,7 +1261,7 @@ test('analyzeSwing is called at most once', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
   let callCount = 0;
   await processAnalysisTask(
@@ -840,7 +1281,7 @@ test('safe result fields never include sensitive job data', async () => {
   const job = validClaimedJob();
   const repository = makeRepository({
     claimImpl: () => ({ ok: true, acquired: true, job }),
-    succeedImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
+    completeImpl: () => ({ ok: true, changed: true, job: { id: JOB_ID, swing_id: SWING_ID, state: 'succeeded' } }),
   });
   const result = await processAnalysisTask(baseArgs({ analysisJobRepository: repository }));
 
@@ -854,4 +1295,12 @@ test('safe result fields never include sensitive job data', async () => {
   }
   assert.equal(JSON.stringify(result).includes(LEASE_TOKEN), false);
   assert.equal(JSON.stringify(result).includes(job.storage_path), false);
+});
+
+// --- static protection: the legacy success RPC is never invoked from here ---
+
+test('analysisTaskProcessor.js source does not call succeedAnalysisJob(', () => {
+  const sourcePath = fileURLToPath(new URL('./analysisTaskProcessor.js', import.meta.url));
+  const source = readFileSync(sourcePath, 'utf8');
+  assert.equal(source.includes('.succeedAnalysisJob('), false);
 });

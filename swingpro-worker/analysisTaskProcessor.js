@@ -1,8 +1,10 @@
 // Lease-aware processor for the private Cloud Tasks analysis handler
-// (Phase 2B2B3B2). Claims a job's lease, runs the injected analyzer with
-// only database-derived fields, and reconciles the terminal transition.
-// Every branch returns one of the documented safe shapes below — never a
-// raw database or analyzer error, and never a sensitive job field.
+// (Phase 2B2B3B3B). Claims a job's lease, runs the injected analyzer with
+// only database-derived fields, and atomically finalizes the job together
+// with the analyzer's returned telemetry via completeAnalysisJob — never the
+// legacy succeedAnalysisJob transition. Every branch returns one of the
+// documented safe shapes below — never a raw database or analyzer error,
+// never analyzer telemetry, and never a sensitive job field.
 import { isValidUuid } from './requestSecurity.js';
 import * as defaultAnalysisJobRepository from './analysisJobRepository.js';
 import { startAnalysisLeaseHeartbeat as defaultStartLeaseHeartbeat } from './analysisLeaseHeartbeat.js';
@@ -12,6 +14,7 @@ const LEASE_SECONDS_MAX = 3600;
 const TERMINAL_STATES = new Set(['succeeded', 'failed', 'superseded']);
 const BUSY_STATES = new Set(['enqueue_pending', 'queued', 'running']);
 const ANALYSIS_FAILED_ERROR_CODE = 'analysis_failed';
+const INVALID_ANALYSIS_RESULT_ERROR_CODE = 'invalid_analysis_result';
 
 function isValidLeaseSeconds(value) {
   return Number.isInteger(value) && value >= LEASE_SECONDS_MIN && value <= LEASE_SECONDS_MAX;
@@ -94,23 +97,37 @@ function isValidHeartbeat(heartbeat) {
   );
 }
 
-// Shared strict-shape check for both succeed/fail RPC results: only a
+// Shared strict-shape check for both complete/fail RPC results: only a
 // changed:true result whose returned job unambiguously matches this exact
 // job/swing pair and lands in the expected terminal state counts as a
 // confirmed non-idempotent transition. Anything else — including a truthy
 // but malformed job, or one that reports a different id/state — falls
 // through to the existing single-reread reconciliation instead of being
-// trusted at face value.
+// trusted at face value. Every property read is contained: a hostile result
+// (throwing getters, a revoked Proxy) is treated the same as a malformed
+// result rather than being allowed to propagate and crash the processor.
+// result.job is read into a local exactly once — a hostile getter that
+// returns a different object on each access must never let fields from
+// multiple objects be combined into a falsely confirmed transition.
 function isConfirmedTerminalTransition(result, { jobId, swingId, expectedState }) {
-  return (
-    isPlainObject(result) &&
-    result.ok === true &&
-    result.changed === true &&
-    isPlainObject(result.job) &&
-    result.job.id === jobId &&
-    result.job.swing_id === swingId &&
-    result.job.state === expectedState
-  );
+  try {
+    if (!isPlainObject(result)) return false;
+
+    const ok = result.ok;
+    const changed = result.changed;
+    const job = result.job;
+
+    return (
+      ok === true &&
+      changed === true &&
+      isPlainObject(job) &&
+      job.id === jobId &&
+      job.swing_id === swingId &&
+      job.state === expectedState
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -179,9 +196,10 @@ async function processAnalysisTask({
     return databaseError();
   }
 
-  let analyzerThrew = false;
+  let analyzerResult;
+  let analyzerFailureCode = null;
   try {
-    await analyzeSwing({
+    analyzerResult = await analyzeSwing({
       swingId,
       storagePath: claimedJob.storage_path,
       equipmentContext: claimedJob.equipment_context ?? null,
@@ -190,7 +208,19 @@ async function processAnalysisTask({
       signal: heartbeat.signal,
     });
   } catch {
-    analyzerThrew = true;
+    analyzerFailureCode = ANALYSIS_FAILED_ERROR_CODE;
+  }
+
+  if (analyzerFailureCode === null) {
+    let telemetryIsValid = false;
+    try {
+      telemetryIsValid = isPlainObject(analyzerResult);
+    } catch {
+      telemetryIsValid = false;
+    }
+    if (!telemetryIsValid) {
+      analyzerFailureCode = INVALID_ANALYSIS_RESULT_ERROR_CODE;
+    }
   }
 
   try {
@@ -210,29 +240,34 @@ async function processAnalysisTask({
     return rereadAndClassify({ supabase, jobId, swingId, analysisJobRepository, busyReason: 'lease_or_state_conflict' });
   }
 
-  if (!analyzerThrew) {
-    let succeedResult;
+  if (analyzerFailureCode === null) {
+    let completeResult;
     try {
-      succeedResult = await analysisJobRepository.succeedAnalysisJob(supabase, { jobId, swingId, leaseToken });
+      completeResult = await analysisJobRepository.completeAnalysisJob(supabase, {
+        jobId,
+        swingId,
+        leaseToken,
+        telemetryData: analyzerResult,
+      });
     } catch {
-      succeedResult = null;
+      completeResult = null;
     }
 
-    if (isConfirmedTerminalTransition(succeedResult, { jobId, swingId, expectedState: 'succeeded' })) {
+    if (isConfirmedTerminalTransition(completeResult, { jobId, swingId, expectedState: 'succeeded' })) {
       return { ok: true, jobId, swingId, state: 'succeeded', idempotent: false };
     }
 
     return rereadAndClassify({ supabase, jobId, swingId, analysisJobRepository, busyReason: 'lease_or_state_conflict' });
   }
 
-  // Analyzer threw.
+  // Analyzer threw or returned invalid telemetry.
   let failResult;
   try {
     failResult = await analysisJobRepository.failAnalysisJob(supabase, {
       jobId,
       swingId,
       leaseToken,
-      errorCode: ANALYSIS_FAILED_ERROR_CODE,
+      errorCode: analyzerFailureCode,
     });
   } catch {
     failResult = null;
