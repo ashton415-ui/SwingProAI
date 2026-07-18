@@ -1,0 +1,21 @@
+# Restrictive Docker build context for the private analysis worker image.
+# Only runtime JavaScript and package metadata should reach the image.
+
+node_modules
+.git
+.gitignore
+.github
+.env
+.env.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+coverage
+test-results
+*.test.js
+*.diff
+*.patch
+PRIVATE_WORKER_DEPLOYMENT.md
+Dockerfile
+.dockerignore
+.DS_Store
