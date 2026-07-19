@@ -19,6 +19,7 @@ const preflightScript = readWorkerFile(path.join('scripts', 'private-worker-pref
 const preflightDoc = readWorkerFile('PRIVATE_WORKER_PREFLIGHT.md');
 const deploymentDoc = readWorkerFile('PRIVATE_WORKER_DEPLOYMENT.md');
 const packageJson = readWorkerFile('package.json');
+const runtimeHarnessScript = readWorkerFile('privateWorkerPreflight.runtime.test.ps1');
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -4679,5 +4680,181 @@ describe('Cloud Tasks queues empty-array pipeline-unrolling fix (Defect 4)', () 
   test('only one production call site normalizes taskQueuesResult.data with ConvertTo-DataArray, and it is this one', () => {
     const occurrences = (preflightScript.match(/ConvertTo-DataArray \$taskQueuesResult\.data/g) || []).length;
     assert.equal(occurrences, 1, 'expected exactly one ConvertTo-DataArray call against taskQueuesResult.data');
+  });
+});
+
+describe('Runtime harness gcloud-resolution gate correction (blocking safety finding: Application-only probe filter)', () => {
+  function getSelectionHelperBody() {
+    const start = runtimeHarnessScript.indexOf('function Get-ChildGcloudSelection');
+    const end = runtimeHarnessScript.indexOf('function Test-ChildResolvesToSyntheticGcloud');
+    assert.ok(start >= 0 && end > start, 'expected to locate Get-ChildGcloudSelection');
+    return runtimeHarnessScript.slice(start, end);
+  }
+
+  function getGateHelperBody() {
+    const start = runtimeHarnessScript.indexOf('function Test-ChildResolvesToSyntheticGcloud');
+    const end = runtimeHarnessScript.indexOf('# ----------------------------------------------------------------------\n# Fixture helpers', start);
+    assert.ok(start >= 0 && end > start, 'expected to locate Test-ChildResolvesToSyntheticGcloud');
+    return runtimeHarnessScript.slice(start, end);
+  }
+
+  test('1. the child probe uses Get-Command -Name gcloud -All -ErrorAction SilentlyContinue', () => {
+    const body = getSelectionHelperBody();
+    assert.match(body, /Get-Command -Name gcloud -All -ErrorAction SilentlyContinue/);
+  });
+
+  test('2. the selection filter accepts both Application and ExternalScript', () => {
+    const body = getSelectionHelperBody();
+    assert.match(body, /\$_\.CommandType -ceq ''Application'' -or \$_\.CommandType -ceq ''ExternalScript''/);
+  });
+
+  test('3. the candidate order returned by Get-Command is preserved (no Sort-Object or re-ordering of $candidates before filtering)', () => {
+    const body = getSelectionHelperBody();
+    assert.match(body, /\$accepted = @\(\$candidates \| Where-Object/);
+    assert.doesNotMatch(body, /Sort-Object/);
+  });
+
+  test('4. the first accepted candidate is selected ($accepted[0]), only after confirming at least one candidate was accepted', () => {
+    const body = getSelectionHelperBody();
+    assert.match(body, /if \(\$accepted\.Count -gt 0\)/);
+    assert.match(body, /\$selected = \$accepted\[0\]/);
+  });
+
+  test('5. the gate compares the selected candidate canonical Source to the expected synthetic path using [System.IO.Path]::GetFullPath on both sides', () => {
+    const body = getGateHelperBody();
+    assert.match(body, /\$canonicalSelected = \[System\.IO\.Path\]::GetFullPath\(\$selection\.Source\)/);
+    assert.match(body, /\$canonicalExpected = \[System\.IO\.Path\]::GetFullPath\(\$ExpectedGcloudCmdPath\)/);
+    assert.match(body, /\$canonicalSelected\.Equals\(\$canonicalExpected, \[System\.StringComparison\]::OrdinalIgnoreCase\)/);
+  });
+
+  test('6. the gate requires the normal selected candidate CommandType to be exactly Application', () => {
+    const body = getGateHelperBody();
+    assert.match(body, /if \(\$selection\.CommandType -cne 'Application'\) \{ return \$false \}/);
+  });
+
+  test('7. the probe never invokes the selected candidate — only Get-Command is used, never an invocation operator against the selected/accepted candidate', () => {
+    const selectionBody = getSelectionHelperBody();
+    const gateBody = getGateHelperBody();
+    assert.doesNotMatch(selectionBody, /&\s*\$selected/);
+    assert.doesNotMatch(selectionBody, /\$selected\.Invoke/);
+    assert.doesNotMatch(selectionBody, /Invoke-Expression/);
+    assert.doesNotMatch(gateBody, /&\s*\$selection/);
+    assert.doesNotMatch(gateBody, /\$selection\.Invoke/);
+    // The only external process the probe itself launches is the isolated
+    // child `powershell.exe` used to run Get-Command in a clean process —
+    // never the gcloud candidate under inspection.
+    assert.match(selectionBody, /& 'powershell\.exe' @probeArgs/);
+  });
+
+  test('9. no Application-only selection filter remains anywhere in the harness (the narrow, pre-correction pattern is fully absent)', () => {
+    assert.doesNotMatch(runtimeHarnessScript, /Where-Object \{ \$_\.CommandType -ceq ''Application'' \}/);
+    assert.doesNotMatch(runtimeHarnessScript, /\$m = @\(\$c \| Where-Object \{ \$_\.CommandType -ceq ''Application'' \}\)/);
+  });
+
+  test('10. the production preflight script Resolve-GcloudCommand is unchanged by this follow-up (whitespace-normalized full-body check)', () => {
+    const start = preflightScript.indexOf('function Resolve-GcloudCommand');
+    const end = preflightScript.indexOf('\n}', start) + 2;
+    assert.ok(start >= 0 && end > start);
+    const body = preflightScript.slice(start, end);
+    const normalized = body.replace(/\s+/g, ' ').trim();
+    assert.equal(
+      normalized,
+      "function Resolve-GcloudCommand { # Only an external Application or ExternalScript may be executed as # \"gcloud\" — never an alias, function, filter, or cmdlet of that name, # which could resolve to something other than the real Google Cloud CLI. # Contained: if resolution itself throws for any reason, gcloud is # treated as unavailable rather than letting the exception escape. try { $candidates = @(Get-Command -Name 'gcloud' -All -ErrorAction SilentlyContinue) $matched = @($candidates | Where-Object { $_.CommandType -eq 'Application' -or $_.CommandType -eq 'ExternalScript' }) if ($matched.Count -eq 0) { return $null } return $matched[0] } catch { return $null } }"
+    );
+  });
+});
+
+describe('Rogue ExternalScript gate regression (proves the gate examines the exact first candidate, not mere presence in the list)', () => {
+  function getRogueRegressionBody() {
+    const start = runtimeHarnessScript.indexOf("Write-ScenarioHeader -Name 'RogueExternalScript-GateRegression'");
+    const end = runtimeHarnessScript.indexOf('# ----------------------------------------------------------------------\n# Summary', start);
+    assert.ok(start >= 0 && end > start, 'expected to locate the RogueExternalScript-GateRegression scenario');
+    return runtimeHarnessScript.slice(start, end);
+  }
+
+  test('8a. creates a rogue gcloud.ps1 ExternalScript in a unique temporary directory outside the repository (with the same absolute-safety check New-Sandbox performs)', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /\$rogueRoot = Join-Path -Path \(\[System\.IO\.Path\]::GetTempPath\(\)\) -ChildPath \("swingproai-rogue-gcloud-" \+ \[guid\]::NewGuid\(\)\.ToString\('N'\)\)/);
+    assert.match(body, /Refusing to create the rogue directory inside the repository root/);
+    assert.match(body, /\$roguePs1Path = Join-Path -Path \$rogueRoot -ChildPath 'gcloud\.ps1'/);
+  });
+
+  test('8b. the rogue script body creates a marker file only if actually executed, and never invokes real gcloud', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /\$markerPath = Join-Path -Path \$rogueRoot -ChildPath 'executed\.marker'/);
+    assert.match(body, /New-Item -ItemType File -Path '\$markerPath' -Force/);
+    assert.doesNotMatch(body, /gcloud\.exe/);
+  });
+
+  test('8c. PATH is set so the rogue directory precedes the synthetic sandbox directory, with both remaining discoverable', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /\$env:PATH = "\$rogueRoot;\$\(\$script:Sandbox\.BinDir\);\$\(\$script:OriginalPath\)"/);
+  });
+
+  test('8d. confirms via Get-Command -All (Get-ChildGcloudSelection) that the rogue ExternalScript is the first accepted candidate before asserting the gate fails', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /\$rogueSelection = Get-ChildGcloudSelection/);
+    assert.match(body, /ROGUE-F:/);
+  });
+
+  test('8e. requires the gate to fail (return false) while the rogue candidate is first', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /\$gateResultWithRogueFirst = Test-ChildResolvesToSyntheticGcloud -ExpectedGcloudCmdPath \$script:Sandbox\.GcloudCmd/);
+    assert.match(body, /Assert-That -Condition \(-not \$gateResultWithRogueFirst\) -Name 'ROGUE-G:/);
+  });
+
+  test('8f. proves the rogue candidate was inspected but never executed by asserting the marker file does not exist, both immediately after the gate check and again after PATH restoration', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /Assert-That -Condition \(-not \$markerExistsAfterGateCheck\) -Name 'ROGUE-H:/);
+    assert.match(body, /Assert-That -Condition \(-not \$markerExistsAfterRestore\) -Name 'ROGUE-H2:/);
+  });
+
+  test('8g. restoring normal PATH ordering makes the gate pass again', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /\$env:PATH = "\$\(\$script:Sandbox\.BinDir\);\$\(\$script:OriginalPath\)"/);
+    assert.match(body, /Assert-That -Condition \$gateResultAfterRestore -Name 'ROGUE-I:/);
+  });
+
+  test('8h. PATH and the rogue directory are cleaned up unconditionally in a finally block, regardless of pass or fail', () => {
+    const start = runtimeHarnessScript.indexOf("Write-ScenarioHeader -Name 'RogueExternalScript-GateRegression'");
+    const finallyIndex = runtimeHarnessScript.indexOf('finally {', start);
+    assert.ok(finallyIndex > start);
+    const finallyBody = runtimeHarnessScript.slice(finallyIndex, finallyIndex + 400);
+    assert.match(finallyBody, /\$env:PATH = "\$\(\$script:Sandbox\.BinDir\);\$\(\$script:OriginalPath\)"/);
+    assert.match(finallyBody, /Remove-Item -LiteralPath \$rogueRoot -Recurse -Force -ErrorAction SilentlyContinue/);
+  });
+
+  test('8i. a full Invoke-Scenario call (not merely the isolated gate function) is proven to abort before launching the production script, with zero invocations and no report file', () => {
+    const body = getRogueRegressionBody();
+    assert.match(body, /-PathPrefix \$rogueRoot -ExpectResolutionFailure/);
+    assert.match(body, /Assert-That -Condition \(\$null -eq \$rogueScenarioResult\) -Name 'ROGUE-K:/);
+    assert.match(body, /Assert-That -Condition \(\$rogueScenarioLogLines\.Count -eq 0\) -Name 'ROGUE-L:/);
+    assert.match(body, /Assert-That -Condition \(-not \(Test-Path -LiteralPath \$rogueScenarioReportPath -PathType Leaf\)\) -Name 'ROGUE-M:/);
+  });
+
+  test('the ExpectResolutionFailure switch inverts Invoke-Scenario\'s own resolution assertion (a correctly-detected failure is itself a passing assertion) without changing behavior for any existing caller', () => {
+    const start = runtimeHarnessScript.indexOf('function Invoke-Scenario');
+    const paramEnd = runtimeHarnessScript.indexOf('Write-ScenarioHeader -Name $Name', start);
+    const paramBlock = runtimeHarnessScript.slice(start, paramEnd);
+    assert.match(paramBlock, /\[switch\] \$ExpectResolutionFailure/);
+
+    const bodyStart = runtimeHarnessScript.indexOf('if (-not $SkipGcloudResolutionCheck)', start);
+    const bodySlice = runtimeHarnessScript.slice(bodyStart, bodyStart + 700);
+    assert.match(bodySlice, /if \(\$ExpectResolutionFailure\) \{/);
+    assert.match(bodySlice, /Assert-That -Condition \(-not \$resolvesCorrectly\)/);
+    assert.match(bodySlice, /else \{/);
+    assert.match(bodySlice, /Assert-That -Condition \$resolvesCorrectly -Name "\$Name : child process resolves gcloud to the synthetic sandbox executable"/);
+  });
+
+  test('the PathPrefix parameter defaults to empty, leaving PATH construction for every existing scenario call byte-for-byte identical to before this parameter existed', () => {
+    const start = runtimeHarnessScript.indexOf('function Invoke-Scenario');
+    const paramEnd = runtimeHarnessScript.indexOf('Write-ScenarioHeader -Name $Name', start);
+    const paramBlock = runtimeHarnessScript.slice(start, paramEnd);
+    assert.match(paramBlock, /\[string\] \$PathPrefix = ''/);
+    const pathAssignIndex = runtimeHarnessScript.indexOf('$pathPrefixSegment = if ($PathPrefix)', start);
+    assert.ok(pathAssignIndex > start);
+    const pathAssignSlice = runtimeHarnessScript.slice(pathAssignIndex, pathAssignIndex + 200);
+    assert.match(pathAssignSlice, /\$pathPrefixSegment = if \(\$PathPrefix\) \{ "\$PathPrefix;" \} else \{ '' \}/);
+    assert.match(pathAssignSlice, /\$env:PATH = "\$pathPrefixSegment\$\(\$script:Sandbox\.BinDir\);\$\(\$script:OriginalPath\)"/);
   });
 });

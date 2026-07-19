@@ -265,15 +265,31 @@ function Remove-Sandbox {
 # Positive pre-execution resolution verification (run inside a CHILD
 # process, using exactly the environment the real preflight child will
 # receive) — the harness must never invoke the real preflight unless
-# this check proves gcloud resolves only to our synthetic executable.
+# this check proves the exact first Application-or-ExternalScript candidate
+# production would select is our synthetic executable.
 # ----------------------------------------------------------------------
 
-function Test-ChildResolvesToSyntheticGcloud {
-    param([string] $ExpectedGcloudCmdPath)
-
+# Mirrors production's Resolve-GcloudCommand exactly: Get-Command -All,
+# filtered to CommandType Application-or-ExternalScript with the returned
+# order preserved, first accepted candidate selected. This is deliberately
+# NOT "is the synthetic Application present somewhere in the candidate
+# list" — an ExternalScript (e.g. a real Google Cloud SDK's own gcloud.ps1,
+# or a rogue script) earlier on PATH than the synthetic gcloud.cmd would be
+# silently skipped by an Application-only filter, even though production's
+# own resolver would select — and execute — that earlier candidate instead
+# of ever reaching the synthetic one. The probe never invokes the selected
+# candidate; it only inspects Get-Command metadata (Source, CommandType).
+function Get-ChildGcloudSelection {
     $probeArgs = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
-        '$c = @(Get-Command -Name gcloud -All -ErrorAction SilentlyContinue); $m = @($c | Where-Object { $_.CommandType -ceq ''Application'' }); if ($m.Count -gt 0) { $m[0].Source } else { ''NONE'' }'
+        '$candidates = @(Get-Command -Name gcloud -All -ErrorAction SilentlyContinue); ' +
+        '$accepted = @($candidates | Where-Object { $_.CommandType -ceq ''Application'' -or $_.CommandType -ceq ''ExternalScript'' }); ' +
+        'if ($accepted.Count -gt 0) { ' +
+        '$selected = $accepted[0]; ' +
+        '[pscustomobject]@{ Selected = $true; Source = $selected.Source; CommandType = $selected.CommandType.ToString() } | ConvertTo-Json -Compress ' +
+        '} else { ' +
+        '[pscustomobject]@{ Selected = $false; Source = $null; CommandType = $null } | ConvertTo-Json -Compress ' +
+        '}'
     )
     # Native-command stderr redirection under $ErrorActionPreference = 'Stop'
     # raises a terminating NativeCommandError in Windows PowerShell for any
@@ -282,18 +298,51 @@ function Test-ChildResolvesToSyntheticGcloud {
     # around exactly this kind of call.
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $resolved = $null
+    $probeOutput = ''
     try {
         $stdoutLines = & 'powershell.exe' @probeArgs 2>$null
-        $resolved = ($stdoutLines -join '').Trim()
+        $probeOutput = ($stdoutLines -join '').Trim()
     }
     catch {
-        $resolved = $null
+        $probeOutput = ''
     }
     finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
-    return ($resolved -and ($resolved -ieq $ExpectedGcloudCmdPath))
+
+    try {
+        return ($probeOutput | ConvertFrom-Json)
+    }
+    catch {
+        return [pscustomobject]@{ Selected = $false; Source = $null; CommandType = $null }
+    }
+}
+
+function Test-ChildResolvesToSyntheticGcloud {
+    param([string] $ExpectedGcloudCmdPath)
+
+    $selection = Get-ChildGcloudSelection
+    if (-not $selection.Selected) { return $false }
+    if ([string]::IsNullOrEmpty($selection.Source)) { return $false }
+
+    # Canonicalize both sides before comparing — GetFullPath normalizes
+    # relative segments and separators the same way for both the candidate
+    # Get-Command reported and the expected synthetic path, so this is
+    # never a brittle raw-string comparison.
+    $canonicalSelected = [System.IO.Path]::GetFullPath($selection.Source)
+    $canonicalExpected = [System.IO.Path]::GetFullPath($ExpectedGcloudCmdPath)
+    if (-not $canonicalSelected.Equals($canonicalExpected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    # The synthetic sandbox executable is gcloud.cmd — an Application, never
+    # an ExternalScript. Requiring this exact CommandType (in addition to
+    # the Source match) means a same-path coincidence of a different
+    # command type could never be mistaken for the verified synthetic
+    # candidate.
+    if ($selection.CommandType -cne 'Application') { return $false }
+
+    return $true
 }
 
 # ----------------------------------------------------------------------
@@ -370,7 +419,23 @@ function Invoke-Scenario {
         [Parameter(Mandatory)] [hashtable] $Fixtures,
         [Parameter(Mandatory)] [hashtable] $CliParams,
         [hashtable] $ExtraEnv = @{},
-        [switch] $SkipGcloudResolutionCheck
+        [switch] $SkipGcloudResolutionCheck,
+        # Prepended before the synthetic sandbox bin directory when set —
+        # used only by the rogue-candidate regression to prove a full
+        # scenario aborts correctly when something else on PATH would
+        # resolve ahead of the synthetic executable. Every existing caller
+        # omits this, leaving PATH construction byte-for-byte identical to
+        # before this parameter existed.
+        [string] $PathPrefix = '',
+        # When set, this scenario is deliberately expected to fail gcloud
+        # resolution (a rogue-candidate regression) — the resolution
+        # assertion below is inverted so a correctly-detected failure is
+        # itself recorded as a PASSING assertion, rather than an aborted
+        # scenario dragging down the overall harness pass count for
+        # behavior it was specifically constructed to exercise. Every
+        # existing caller omits this, leaving normal-scenario assertion
+        # behavior byte-for-byte identical to before this parameter existed.
+        [switch] $ExpectResolutionFailure
     )
 
     Write-ScenarioHeader -Name $Name
@@ -400,7 +465,8 @@ function Invoke-Scenario {
         Remove-Item -Path "Env:$($_.Name)" -ErrorAction SilentlyContinue
     }
 
-    $env:PATH = "$($script:Sandbox.BinDir);$($script:OriginalPath)"
+    $pathPrefixSegment = if ($PathPrefix) { "$PathPrefix;" } else { '' }
+    $env:PATH = "$pathPrefixSegment$($script:Sandbox.BinDir);$($script:OriginalPath)"
     $env:RUNTIME_HARNESS_FIXTURE_DIR = $scenarioDir
     foreach ($key in $ExtraEnv.Keys) {
         Set-Item -Path "Env:$key" -Value $ExtraEnv[$key]
@@ -409,7 +475,12 @@ function Invoke-Scenario {
     try {
         if (-not $SkipGcloudResolutionCheck) {
             $resolvesCorrectly = Test-ChildResolvesToSyntheticGcloud -ExpectedGcloudCmdPath $script:Sandbox.GcloudCmd
-            Assert-That -Condition $resolvesCorrectly -Name "$Name : child process resolves gcloud to the synthetic sandbox executable"
+            if ($ExpectResolutionFailure) {
+                Assert-That -Condition (-not $resolvesCorrectly) -Name "$Name : child process resolution correctly fails (expected - a rogue candidate precedes the synthetic executable)"
+            }
+            else {
+                Assert-That -Condition $resolvesCorrectly -Name "$Name : child process resolves gcloud to the synthetic sandbox executable"
+            }
             if (-not $resolvesCorrectly) {
                 Write-Host "  ABORT: refusing to invoke the real preflight script for scenario '$Name' because gcloud resolution could not be positively verified."
                 return $null
@@ -1762,6 +1833,119 @@ $results | ConvertTo-Json -Compress
     Assert-That -Condition ($gspArrayProbeRanCleanly -and $gspArrayResults.IAM2_MembersIsArray -eq $true -and $gspArrayResults.IAM2_MembersCount -eq 1 -and $gspArrayResults.IAM2_Member0 -ceq 'serviceAccount:one@example.invalid') -Name 'GSP-ARRAY-IAM-2: the normalized members property remains an array with Count 1 for a single-member binding'
     Assert-That -Condition ($gspArrayProbeRanCleanly -and $gspArrayResults.IAM3_Status -eq 'success' -and $gspArrayResults.IAM3_MembersCount -eq 2) -Name 'GSP-ARRAY-IAM-3: a valid binding with multiple members still succeeds and preserves all members'
     Assert-That -Condition ($gspArrayProbeRanCleanly -and $gspArrayResults.IAM4_Status -eq 'failed') -Name 'GSP-ARRAY-IAM-4: a malformed scalar members value still fails closed'
+
+    # ====================================================================
+    # Rogue ExternalScript gate regression: proves the corrected
+    # Test-ChildResolvesToSyntheticGcloud gate examines the exact first
+    # Application-or-ExternalScript candidate production would select —
+    # not merely whether the synthetic Application appears anywhere in the
+    # candidate list. An ExternalScript (e.g. a real Google Cloud SDK's own
+    # gcloud.ps1, or a hostile script) placed earlier on PATH than the
+    # synthetic sandbox executable must make the gate fail, and must never
+    # be invoked merely by being inspected.
+    # ====================================================================
+    Write-ScenarioHeader -Name 'RogueExternalScript-GateRegression'
+
+    $rogueRoot = $null
+    try {
+        # A. Confirm the normal sandbox arrangement passes first, as a
+        # baseline, before introducing the rogue candidate.
+        $env:PATH = "$($script:Sandbox.BinDir);$($script:OriginalPath)"
+        $normalBaselinePasses = Test-ChildResolvesToSyntheticGcloud -ExpectedGcloudCmdPath $script:Sandbox.GcloudCmd
+        Assert-That -Condition $normalBaselinePasses -Name 'ROGUE-A: the normal sandbox arrangement (synthetic gcloud.cmd first) passes the gate before any rogue candidate is introduced'
+
+        # B. A unique rogue directory, entirely outside the repository —
+        # the same absolute-safety check New-Sandbox itself performs.
+        $rogueRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ("swingproai-rogue-gcloud-" + [guid]::NewGuid().ToString('N'))
+        $canonicalRogueRoot = [System.IO.Path]::GetFullPath($rogueRoot)
+        $canonicalRepoRootForRogue = [System.IO.Path]::GetFullPath($script:RepositoryRoot)
+        $repoRootWithSeparatorForRogue = $canonicalRepoRootForRogue.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if ($canonicalRogueRoot.StartsWith($repoRootWithSeparatorForRogue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Refusing to create the rogue directory inside the repository root.'
+        }
+        New-Item -ItemType Directory -Path $rogueRoot -Force | Out-Null
+
+        # C/D. A test-only ExternalScript that, if ever actually executed,
+        # creates a marker file — never a real gcloud invocation.
+        $roguePs1Path = Join-Path -Path $rogueRoot -ChildPath 'gcloud.ps1'
+        $markerPath = Join-Path -Path $rogueRoot -ChildPath 'executed.marker'
+        $utf8NoBomRogue = New-Object System.Text.UTF8Encoding($false)
+        $rogueScriptBody = "New-Item -ItemType File -Path '$markerPath' -Force | Out-Null`r`nexit 0`r`n"
+        [System.IO.File]::WriteAllText($roguePs1Path, $rogueScriptBody, $utf8NoBomRogue)
+
+        # E. The rogue directory precedes the synthetic sandbox directory;
+        # both remain discoverable on PATH.
+        $env:PATH = "$rogueRoot;$($script:Sandbox.BinDir);$($script:OriginalPath)"
+
+        # F. Confirm, via the same Get-Command -All selection logic
+        # production uses, that the rogue ExternalScript really is the
+        # first accepted candidate with this PATH ordering — the
+        # precondition the rest of this regression depends on.
+        $rogueSelection = Get-ChildGcloudSelection
+        $rogueSourceMatches = $false
+        if ($rogueSelection.Selected -and -not [string]::IsNullOrEmpty($rogueSelection.Source)) {
+            $rogueSourceMatches = ([System.IO.Path]::GetFullPath($rogueSelection.Source)).Equals([System.IO.Path]::GetFullPath($roguePs1Path), [System.StringComparison]::OrdinalIgnoreCase)
+        }
+        $rogueIsFirstCandidate = ($rogueSelection.Selected -eq $true) -and $rogueSourceMatches -and ($rogueSelection.CommandType -ceq 'ExternalScript')
+        Assert-That -Condition $rogueIsFirstCandidate -Name 'ROGUE-F: with the rogue directory prepended, the rogue gcloud.ps1 ExternalScript is confirmed (via Get-Command -All) to be the first Application-or-ExternalScript candidate'
+
+        # G. The corrected gate must fail — it examines the actual first
+        # candidate, not merely whether the synthetic Application exists
+        # somewhere in the list.
+        $gateResultWithRogueFirst = Test-ChildResolvesToSyntheticGcloud -ExpectedGcloudCmdPath $script:Sandbox.GcloudCmd
+        Assert-That -Condition (-not $gateResultWithRogueFirst) -Name 'ROGUE-G: Test-ChildResolvesToSyntheticGcloud fails when a rogue ExternalScript precedes the synthetic executable on PATH'
+
+        # H. The gate only ever calls Get-Command — it must never invoke
+        # the candidate it inspects. The marker file absence is direct
+        # proof the rogue script was never executed.
+        $markerExistsAfterGateCheck = Test-Path -LiteralPath $markerPath -PathType Leaf
+        Assert-That -Condition (-not $markerExistsAfterGateCheck) -Name 'ROGUE-H: the rogue ExternalScript execution marker does not exist after the gate check — the rogue candidate was inspected via Get-Command but never invoked'
+
+        # I. Restoring normal PATH ordering (rogue directory removed) must
+        # make the gate pass again.
+        $env:PATH = "$($script:Sandbox.BinDir);$($script:OriginalPath)"
+        $gateResultAfterRestore = Test-ChildResolvesToSyntheticGcloud -ExpectedGcloudCmdPath $script:Sandbox.GcloudCmd
+        Assert-That -Condition $gateResultAfterRestore -Name 'ROGUE-I: after restoring normal PATH ordering (rogue directory removed), the gate passes again'
+
+        # A second, final marker check: even after re-running the gate
+        # post-restore, the rogue script (no longer discoverable) was still
+        # never executed at any point during this regression.
+        $markerExistsAfterRestore = Test-Path -LiteralPath $markerPath -PathType Leaf
+        Assert-That -Condition (-not $markerExistsAfterRestore) -Name 'ROGUE-H2: the rogue ExternalScript execution marker still does not exist after PATH restoration and the second gate check'
+
+        # K/L. Full-harness ordering guarantee, strengthened: a genuine
+        # Invoke-Scenario call — not just the isolated gate function —
+        # must abort the ENTIRE scenario before the production script is
+        # ever launched when the rogue candidate precedes the synthetic
+        # executable, producing zero synthetic-gcloud invocations and no
+        # report file. This proves the gate failure never falls through to
+        # invoking the production script against another gcloud candidate.
+        $rogueScenarioName = 'Rogue-FullScenario-Abort'
+        $rogueScenarioResult = Invoke-Scenario -Name $rogueScenarioName -Fixtures $aFixtures -CliParams @{
+            ProjectId     = $aProjectId
+            Region        = $aRegion
+            TasksLocation = $aTasksLocation
+        } -PathPrefix $rogueRoot -ExpectResolutionFailure
+        Assert-That -Condition ($null -eq $rogueScenarioResult) -Name 'ROGUE-K: a full Invoke-Scenario call aborts (returns no result) when the rogue candidate precedes the synthetic executable on PATH'
+
+        $rogueScenarioDir = Join-Path -Path $script:Sandbox.ScenariosDir -ChildPath ($rogueScenarioName -replace '[^A-Za-z0-9\-]', '_')
+        $rogueScenarioLogPath = Join-Path -Path $rogueScenarioDir -ChildPath 'invocation-log.jsonl'
+        $rogueScenarioReportPath = Join-Path -Path $rogueScenarioDir -ChildPath 'report.json'
+        $rogueScenarioLogLines = @()
+        if (Test-Path -LiteralPath $rogueScenarioLogPath -PathType Leaf) {
+            $rogueScenarioLogLines = @(Get-Content -LiteralPath $rogueScenarioLogPath | Where-Object { $_.Trim().Length -gt 0 })
+        }
+        Assert-That -Condition ($rogueScenarioLogLines.Count -eq 0) -Name 'ROGUE-L: the aborted full scenario produced zero synthetic-gcloud invocations — the production script was never launched, and resolution never fell through to another gcloud candidate'
+        Assert-That -Condition (-not (Test-Path -LiteralPath $rogueScenarioReportPath -PathType Leaf)) -Name 'ROGUE-M: the aborted full scenario produced no report file'
+    }
+    finally {
+        # J. PATH and rogue-directory cleanup happen unconditionally,
+        # regardless of pass/fail above.
+        $env:PATH = "$($script:Sandbox.BinDir);$($script:OriginalPath)"
+        if ($rogueRoot -and (Test-Path -LiteralPath $rogueRoot)) {
+            Remove-Item -LiteralPath $rogueRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 finally {
     $env:PATH = $script:OriginalPath

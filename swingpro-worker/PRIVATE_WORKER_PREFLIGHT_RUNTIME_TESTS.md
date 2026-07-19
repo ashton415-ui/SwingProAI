@@ -23,13 +23,22 @@ This harness closes that gap by:
 1. Building a temporary, synthetic `gcloud` executable (a `.cmd` launcher
    plus a PowerShell fixture dispatcher) entirely inside the OS temp
    directory, never inside this repository.
-2. Prepending only that temporary directory to `PATH` for the duration of
-   each scenario.
+2. Prepending that temporary synthetic directory to `PATH` for the
+   duration of each normal scenario. One scenario,
+   `RogueExternalScript-GateRegression`, is the deliberate exception: it
+   temporarily prepends a second, test-only directory *ahead of* the
+   synthetic directory — both directories live under the OS temporary
+   directory, never inside this repository — solely to prove the
+   resolution gate correctly fails closed when something else on `PATH`
+   would resolve ahead of the synthetic executable. See "Gate correction"
+   below.
 3. Positively verifying — from a **child process**, using exactly the
-   environment the real preflight child will receive — that `gcloud`
-   resolves only to the synthetic executable, before ever invoking the real
-   script. If that verification ever fails, the harness aborts (exit 2)
-   rather than risk invoking a real `gcloud` on the developer's machine.
+   environment the real preflight child will receive — that the exact
+   first `Application`-or-`ExternalScript` candidate the production
+   resolver would select is the synthetic executable, before ever invoking
+   the real script. If that verification ever fails, the harness aborts
+   (exit 2) rather than risk invoking a real `gcloud` on the developer's
+   machine.
 4. Actually executing the real `scripts/private-worker-preflight.ps1` as a
    child process (via `powershell.exe -File`), against synthetic JSON
    fixtures served by the dispatcher — never against Google Cloud, Supabase,
@@ -43,11 +52,22 @@ This harness closes that gap by:
 - **No network access, ever.** The synthetic `gcloud` dispatcher only reads
   local JSON fixture files written by this harness; it never makes an HTTP
   request.
-- **No real `gcloud`.** `Resolve-GcloudCommand` in the production script only
-  accepts `Application`/`ExternalScript` command types resolved via
-  `Get-Command`; the harness positively verifies (from a child process) that
-  this resolves solely to the synthetic sandbox executable before every
-  scenario, and aborts if it does not.
+- **No real `gcloud`.** `Resolve-GcloudCommand` in the production script
+  runs `Get-Command -Name 'gcloud' -All`, preserves the returned candidate
+  order, accepts only `Application`/`ExternalScript` command types, and
+  selects the first accepted candidate. The harness verifies that **exact**
+  guarantee — not merely that a synthetic `Application` appears somewhere in
+  the candidate list: **the harness verifies that the exact first
+  Application-or-ExternalScript candidate selected by the production
+  resolver is the synthetic gcloud.cmd.** Other, later candidates (a real
+  Google Cloud SDK installation's own `gcloud.ps1`/`gcloud.cmd`, for
+  example) may still exist further down `PATH`, but production can never
+  reach them while the verified synthetic candidate is first. This
+  verification runs before every scenario, from a child process, using
+  exactly the environment the real preflight child will receive, and the
+  harness aborts if it does not hold. See "Rogue ExternalScript gate
+  regression" below for the defect this replaced and how it is now
+  regression-covered.
 - **No Docker, no deployment, no migration, no credential access.** Nothing
   in this harness invokes Docker, `gcloud` mutating verbs, database
   migrations, or reads real credential files.
@@ -147,6 +167,7 @@ its own `try`/`catch` around an identical call shape.
 | **GetPropertyReadOutcome-NotePropertyOnly-regression** | A standalone, gcloud-independent probe proving the NoteProperty-only fail-closed correction (defect 3, see below): ordinary present/missing/explicit-null NoteProperty reads, a throwing ScriptProperty getter and a throwing compiled CLR property getter (both rejected by MemberType with a proven-zero invocation count), `ConvertTo-SafeGcloudConfigListResult` accepting pristine config data, and `Test-IsUnconditionalBinding`'s full absent/null/present/throwing-getter matrix. |
 | **CloudTasksQueues-EmptyArrayPipelineUnrolling-regression** | A standalone, gcloud-independent probe proving the `@(...)`-wrapped correction (defect 4, see below): null input, an empty-JSON-array-after-`ConvertFrom-Json`, one queue object, and two queue objects all produce the correct `Count`, plus a direct side-by-side proof that the old bare assignment still collapses to `$null` while the new wrapped one never does. |
 | **GetSafeProperty-ArrayIdentity-regression** | A standalone, gcloud-independent probe proving the `Write-Output -NoEnumerate` correction (defect 5, see below): scalar, null, empty-array, one-element, two-element, and one-object-array properties all preserve their correct type/Count/contents; a nested path ending in a one-element array is preserved; a missing property still returns `$null`; and `ConvertTo-SafeIamPolicyResult` correctly accepts one-member and multi-member bindings while still failing closed on a genuinely malformed scalar `members` value. |
+| **RogueExternalScript-GateRegression** | Proves the corrected `Test-ChildResolvesToSyntheticGcloud` gate (see "Gate correction" below): the normal sandbox arrangement passes; a rogue `gcloud.ps1` `ExternalScript` placed earlier on `PATH` than the synthetic executable is confirmed (via `Get-Command -All`) to be the actual first candidate; the gate correctly fails in that arrangement; the rogue script's execution marker never appears, proving it was inspected but never invoked; the gate passes again once normal `PATH` ordering is restored; and a genuine full `Invoke-Scenario` call aborts before ever launching the production script, with zero synthetic-gcloud invocations and no report file. |
 
 Every scenario asserts report-safety (no sentinel value ever appears in the
 report JSON, stdout, or stderr) where a sentinel is used, and
@@ -154,6 +175,114 @@ command-containment (every invocation matched a known read-only family, no
 forbidden token or auth-override flag was ever sent, and every
 `--project`/`--region`/`--location` value exactly matched the scenario's
 configured value).
+
+## Gate correction (blocking safety finding, corrected and regression-covered): the resolution probe checked the wrong thing
+
+An independent review of this harness identified a blocking safety finding
+in the harness's own gcloud-resolution safety gate — not in the production
+script. This is documented separately from the numbered defects above
+because it is a harness-verification gap, not a production runtime defect.
+
+**Root cause:** production's `Resolve-GcloudCommand` runs `Get-Command -Name
+'gcloud' -All`, preserves the returned candidate order, accepts candidates
+whose `CommandType` is `Application` or `ExternalScript`, and selects the
+**first** accepted candidate — whichever of those two types it happens to
+be. The harness's own `Test-ChildResolvesToSyntheticGcloud` probe, however,
+filtered the candidate list to `CommandType -ceq 'Application'` only:
+
+```powershell
+$m = @($c | Where-Object { $_.CommandType -ceq 'Application' })
+if ($m.Count -gt 0) { $m[0].Source } else { 'NONE' }
+```
+
+This does not precisely mirror production. If an `ExternalScript` candidate
+(for example, a real Google Cloud SDK installation's own `gcloud.ps1` —
+confirmed present on this development machine's own `PATH` — or a hostile
+script) appeared **earlier** on `PATH` than the synthetic `gcloud.cmd`
+`Application`, the old probe would silently skip over it, keep searching,
+find the synthetic `Application` further down the candidate list, and
+report success — even though production's own resolver would have selected,
+and executed, that earlier `ExternalScript` candidate instead of ever
+reaching the synthetic one. The gate was verifying "does the synthetic
+`Application` appear somewhere in the list", not the actual safety property
+the harness depends on: "is the exact candidate production would select the
+synthetic executable."
+
+**Correction applied:** the probe now mirrors `Resolve-GcloudCommand`
+exactly. `Get-ChildGcloudSelection` runs `Get-Command -Name gcloud -All
+-ErrorAction SilentlyContinue` in an isolated child process, filters to
+`CommandType -ceq 'Application' -or CommandType -ceq 'ExternalScript'` with
+the returned order preserved (no `Sort-Object` or other re-ordering), and
+selects `$accepted[0]` — the first accepted candidate, exactly as
+production does. It returns only safe structured metadata (whether a
+candidate was selected, its `Source`, and its `CommandType`) and never
+invokes the candidate it inspects. `Test-ChildResolvesToSyntheticGcloud`
+then canonicalizes both the selected `Source` and the expected synthetic
+`gcloud.cmd` path with `[System.IO.Path]::GetFullPath()` before comparing
+them with an ordinal, case-insensitive `Equals`, and additionally requires
+the selected candidate's `CommandType` to be exactly `Application` (the
+synthetic executable is a `.cmd` launcher, never a script). The gate passes
+only when all three hold: a candidate was selected, its canonical `Source`
+matches the expected synthetic path, and its `CommandType` is `Application`.
+
+**The precise guarantee this harness verifies:**
+
+> The harness verifies that the exact first Application-or-ExternalScript
+> candidate selected by the production resolver is the synthetic
+> `gcloud.cmd`.
+
+It does **not** prove that no other, later gcloud candidate exists anywhere
+on `PATH` — other candidates (a real Google Cloud SDK installation, for
+example) may well be present further down. It proves the narrower, actually
+load-bearing property: production cannot reach any of those later
+candidates while the verified synthetic candidate is first, because
+`Resolve-GcloudCommand` always stops at the first accepted candidate.
+
+**Regression coverage:** the harness's `RogueExternalScript-GateRegression`
+scenario:
+
+1. Confirms the normal sandbox arrangement (synthetic `gcloud.cmd` first)
+   passes the gate.
+2. Creates a unique temporary rogue directory outside the repository (the
+   same absolute-safety check `New-Sandbox` itself performs), containing a
+   test-only `gcloud.ps1` `ExternalScript` whose body creates an
+   `executed.marker` file if — and only if — it is ever actually executed.
+   It never invokes a real `gcloud`.
+3. Prepends the rogue directory to `PATH` (ahead of the synthetic sandbox
+   directory; both remain discoverable) and confirms, via
+   `Get-ChildGcloudSelection` (the same selection logic production uses),
+   that the rogue `ExternalScript` really is the first accepted candidate
+   with this ordering.
+4. Confirms the gate now **fails**.
+5. Confirms `executed.marker` does not exist — proving the rogue candidate
+   was inspected via `Get-Command` but never invoked — both immediately
+   after the failed gate check and again later.
+6. Restores normal `PATH` ordering and confirms the gate **passes** again.
+7. Goes further than the isolated gate function: a genuine
+   `Invoke-Scenario` call (using a new, additive `-PathPrefix` parameter
+   that defaults to empty and leaves every existing scenario's `PATH`
+   construction byte-for-byte unchanged, plus an `-ExpectResolutionFailure`
+   switch that inverts `Invoke-Scenario`'s own internal resolution
+   assertion so a correctly-detected failure is recorded as a passing
+   assertion rather than dragging down the harness's pass count) is proven
+   to **abort before ever launching the production script** when the rogue
+   candidate is first — zero synthetic-gcloud invocations were recorded,
+   and no report file was written. Resolution failure never falls through
+   to invoking the production script against another gcloud candidate.
+8. Restores `PATH` and removes the rogue directory and marker in a
+   `finally` block, unconditionally, regardless of pass or fail.
+
+`privateWorkerPreflight.test.js` additionally proves statically that the
+probe uses `Get-Command -All`, accepts both `Application` and
+`ExternalScript`, preserves candidate order (no `Sort-Object`), selects
+`$accepted[0]`, canonicalizes both sides of the `Source` comparison,
+requires `CommandType` to be `Application`, never invokes the selected
+candidate, that no `Application`-only selection filter remains anywhere in
+the harness, that the rogue regression contains every required element
+listed above, and that the production script's `Resolve-GcloudCommand` is
+byte-for-byte unchanged by this correction (this correction touches only
+the harness and its tests — `scripts/private-worker-preflight.ps1` was not
+modified).
 
 ## Defect 1 (found, corrected, and regression-covered): empty-collection parameter binding
 
@@ -792,7 +921,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File privateWorkerPreflight.r
 
 Output ends with a `TOTAL` / `PASSED` / `FAILED` summary. Exit codes:
 
-- `0` — every assertion passed (this is the current result: 127/127 pass).
+- `0` — every assertion passed (this is the current result: 137/137 pass).
 - `1` — the harness ran to completion but one or more assertions failed.
 - `2` — the harness could not safely establish or verify the synthetic
   `gcloud` sandbox, and aborted before invoking the real script at all.
@@ -803,13 +932,15 @@ read, commit, or push.
 
 ## Current status summary
 
-- **Static suite** (`privateWorkerPreflight.test.js`): 782/782 pass, 0
-  skipped, 0 todo. Full repository `npm test`: 1471/1471 pass, 0 failed, 0
+- **Static suite** (`privateWorkerPreflight.test.js`): 802/802 pass, 0
+  skipped, 0 todo. Full repository `npm test`: 1491/1491 pass, 0 failed, 0
   skipped, 0 todo.
-- **Runtime harness**: 127/127 assertions pass, exit code 0. Every scenario
-  (A through Q), every defect 1–5 regression, and every leakage and
-  command-containment assertion passes.
-- Defects 1, 2, 3, 4, and 5 are all corrected and regression-covered.
+- **Runtime harness**: 137/137 assertions pass, exit code 0. Every scenario
+  (A through Q, plus the rogue-candidate gate regression), every defect 1–5
+  regression, and every leakage and command-containment assertion passes.
+- Defects 1, 2, 3, 4, and 5 are all corrected and regression-covered. The
+  gcloud-resolution gate blocking safety finding is corrected and
+  regression-covered.
 - A synthetic runtime harness pass still does not establish real Google
   Cloud readiness: it proves behavior against an offline, synthetic
   `gcloud` only, and is never a substitute for
