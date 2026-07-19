@@ -862,16 +862,187 @@ describe('Fail-closed supplied targets', () => {
   });
 });
 
+describe('AllowEmptyCollection on $Blockers (empty-collection parameter-binding correction)', () => {
+  // $blockers starts as a freshly-created, genuinely empty
+  // System.Collections.Generic.List[string] in
+  // Invoke-PrivateWorkerPreflightMain, and Add-GenericDiscoveryBlocker is
+  // called with it immediately — before any blocker could possibly exist
+  // yet. Windows PowerShell's mandatory-parameter binding rejects an empty
+  // (non-null) collection passed to a Mandatory collection-typed parameter
+  // unless AllowEmptyCollection is present, so both helpers must declare it
+  // on $Blockers while remaining Mandatory, List[string]-typed, and never
+  // AllowNull.
+  const genericHelperStart = preflightScript.indexOf('function Add-GenericDiscoveryBlocker');
+  const genericHelperEnd = preflightScript.indexOf('function Add-TargetVerificationBlockers');
+  const genericHelperBody = preflightScript.slice(genericHelperStart, genericHelperEnd);
+
+  const targetHelperStart = preflightScript.indexOf('function Add-TargetVerificationBlockers');
+  const targetHelperEnd = preflightScript.indexOf('function Invoke-PrivateWorkerPreflightMain');
+  const targetHelperBody = preflightScript.slice(targetHelperStart, targetHelperEnd);
+
+  test('Add-GenericDiscoveryBlocker declares $Blockers as [Parameter(Mandatory)] [AllowEmptyCollection()] [System.Collections.Generic.List[string]]', () => {
+    assert.match(
+      genericHelperBody,
+      /\[Parameter\(Mandatory\)\]\s*\r?\n\s*\[AllowEmptyCollection\(\)\]\s*\r?\n\s*\[System\.Collections\.Generic\.List\[string\]\]\s+\$Blockers/
+    );
+  });
+
+  test('Add-TargetVerificationBlockers declares $Blockers as [Parameter(Mandatory)] [AllowEmptyCollection()] [System.Collections.Generic.List[string]]', () => {
+    assert.match(
+      targetHelperBody,
+      /\[Parameter\(Mandatory\)\]\s*\r?\n\s*\[AllowEmptyCollection\(\)\]\s*\r?\n\s*\[System\.Collections\.Generic\.List\[string\]\]\s+\$Blockers/
+    );
+  });
+
+  test('neither $Blockers parameter is also marked AllowNull', () => {
+    assert.doesNotMatch(genericHelperBody, /AllowNull\(\)\][\s\S]{0,80}\$Blockers/);
+    assert.doesNotMatch(targetHelperBody, /AllowNull\(\)\][\s\S]{0,80}\$Blockers/);
+  });
+
+  test('exactly two AllowEmptyCollection attributes precede $Blockers in the whole script (one pre-existing AllowEmptyCollection on $Arguments elsewhere is untouched), and no other production parameter was changed', () => {
+    const blockersMatches = preflightScript.match(/\[AllowEmptyCollection\(\)\]\s*\r?\n?\s*\[System\.Collections\.Generic\.List\[string\]\]\s+\$Blockers/g) || [];
+    assert.equal(blockersMatches.length, 2);
+    const allMatches = preflightScript.match(/\[AllowEmptyCollection\(\)\]/g) || [];
+    assert.equal(allMatches.length, 3, 'expected the two new $Blockers attributes plus the one pre-existing AllowEmptyCollection on $Arguments in Invoke-ReadOnlyGcloudCommand');
+  });
+
+  test('Add-GenericDiscoveryBlocker blocker text is unchanged: "generic discovery incomplete: $Label (status: $($Result.status))"', () => {
+    assert.match(
+      genericHelperBody,
+      /\$Blockers\.Add\("generic discovery incomplete: \$Label \(status: \$\(\$Result\.status\)\)"\)\s*\|\s*Out-Null/
+    );
+    assert.match(genericHelperBody, /if\s*\(\$Result\.status\s+-ne\s+'success'\)/);
+  });
+
+  test('Add-TargetVerificationBlockers blocker text is unchanged: "missing supplied target resource" and "supplied target could not be fully verified"', () => {
+    assert.match(targetHelperBody, /\$Blockers\.Add\("missing supplied target resource: \$Label"\)\s*\|\s*Out-Null/);
+    assert.match(
+      targetHelperBody,
+      /\$Blockers\.Add\("supplied target could not be fully verified: \$Label \(\$commandId status=\$\(\$result\.status\)\)"\)\s*\|\s*Out-Null/
+    );
+  });
+
+  test('both helpers remain Mandatory on every other parameter (Result, Label, Results) — only $Blockers gained AllowEmptyCollection', () => {
+    assert.match(genericHelperBody, /\[Parameter\(Mandatory\)\]\s+\$Result/);
+    assert.match(genericHelperBody, /\[Parameter\(Mandatory\)\]\s+\[string\]\s+\$Label/);
+    assert.match(targetHelperBody, /\[Parameter\(Mandatory\)\]\s+\[string\]\s+\$Label/);
+    assert.match(
+      targetHelperBody,
+      /\[Parameter\(Mandatory\)\]\s+\[System\.Collections\.Specialized\.OrderedDictionary\]\s+\$Results/
+    );
+  });
+});
+
 describe('Safe property access under Set-StrictMode', () => {
+  const getSafePropertyStart = preflightScript.indexOf('function Get-SafeProperty');
+  const getSafePropertyEnd = preflightScript.indexOf('function ConvertTo-DataArray');
+  const getSafePropertyBody = preflightScript.slice(getSafePropertyStart, getSafePropertyEnd);
+
   test('defines a reusable safe property accessor', () => {
     assert.match(preflightScript, /function Get-SafeProperty/);
-    assert.match(preflightScript, /AsPSObject/);
   });
 
   test('the accessor returns null on a missing property instead of throwing', () => {
-    const helperStart = preflightScript.indexOf('function Get-SafeProperty');
-    const helperBody = preflightScript.slice(helperStart, preflightScript.indexOf('function ConvertTo-DataArray'));
-    assert.match(helperBody, /if\s*\(\$null\s+-eq\s+\$member\)\s*\{\s*return\s+\$null\s*\}/);
+    assert.match(getSafePropertyBody, /if\s*\(\$null\s+-eq\s+\$member\)\s*\{\s*return\s+\$null\s*\}/);
+  });
+
+  // On Windows PowerShell 5.1 Desktop, [PSObject]::AsPSObject($current) can
+  // return the same object reference rather than a distinct PSObject whose
+  // .Properties collection is directly indexable, and under
+  // Set-StrictMode -Version Latest a bare $wrapped.Properties[...] access
+  // throws "The property 'Properties' cannot be found on this object." for
+  // virtually any parsed ConvertFrom-Json value. Every object's intrinsic
+  // .PSObject member is always safe to read regardless of underlying type,
+  // so the property collection must be read through it directly instead.
+  test('REGRESSION 1: Get-SafeProperty accesses the property collection through the intrinsic .PSObject.Properties view', () => {
+    assert.match(getSafePropertyBody, /\$current\.PSObject\.Properties\[\$propertyName\]/);
+  });
+
+  test('REGRESSION 2: direct (non-intrinsic) $wrapped.Properties[...] access is absent from Get-SafeProperty', () => {
+    assert.doesNotMatch(getSafePropertyBody, /\$wrapped\s*=/);
+    assert.doesNotMatch(getSafePropertyBody, /\$wrapped\.Properties/);
+    assert.doesNotMatch(getSafePropertyBody, /\[System\.Management\.Automation\.PSObject\]::AsPSObject\(/);
+  });
+
+  test('REGRESSION 3: dynamic $current.$propertyName access is absent from Get-SafeProperty', () => {
+    assert.doesNotMatch(getSafePropertyBody, /\$current\.\$propertyName/);
+  });
+
+  test('REGRESSION 4: the null-current guard remains (null current object returns null before any property lookup)', () => {
+    assert.match(getSafePropertyBody, /if\s*\(\$null\s+-eq\s+\$current\)\s*\{\s*return\s+\$null\s*\}/);
+  });
+
+  test('REGRESSION 5: the missing-member null return remains (already covered above; explicit duplicate assertion for the exact required text)', () => {
+    assert.match(getSafePropertyBody, /\$member\s*=\s*\$current\.PSObject\.Properties\[\$propertyName\][\s\S]{0,80}if\s*\(\$null\s+-eq\s+\$member\)\s*\{\s*return\s+\$null\s*\}/);
+  });
+
+  test('REGRESSION 6: the function still assigns $current = $member.Value, advancing traversal for nested paths', () => {
+    assert.match(getSafePropertyBody, /\$current\s*=\s*\$member\.Value/);
+  });
+
+  // A bare `return $current` writes $current to the success output stream,
+  // and PowerShell enumerates array values placed on the pipeline by
+  // default — when $current is an array with exactly one element, a caller
+  // capturing this function's return value into a plain scalar variable
+  // receives that single element itself, not a one-element array, silently
+  // losing the array's identity. Write-Output -NoEnumerate places $current
+  // on the pipeline as a single, unenumerated object regardless of length,
+  // preserving both scalar and array identity alike.
+  test('DEFECT 5 REGRESSION 1: Get-SafeProperty terminates with Write-Output -NoEnumerate $current followed by a bare return', () => {
+    assert.match(getSafePropertyBody, /Write-Output -NoEnumerate \$current\s*\r?\n\s*return\s*\r?\n\}/);
+  });
+
+  test('DEFECT 5 REGRESSION 2: the old terminal `return $current` is absent from Get-SafeProperty', () => {
+    assert.doesNotMatch(getSafePropertyBody, /\n\s*return \$current\s*\r?\n\}/);
+  });
+
+  test('DEFECT 5 REGRESSION 3: the Write-Output -NoEnumerate call is the last statement before the traversal loop\'s closing brace and the function\'s own closing brace — it is not inside the foreach loop', () => {
+    const loopEndIndex = getSafePropertyBody.indexOf('$current = $member.Value');
+    const noEnumerateIndex = getSafePropertyBody.indexOf('Write-Output -NoEnumerate $current');
+    assert.ok(loopEndIndex >= 0 && noEnumerateIndex >= 0);
+    assert.ok(loopEndIndex < noEnumerateIndex, 'Write-Output -NoEnumerate must come after the traversal loop, not inside it');
+    // Exactly one closing brace (the foreach loop's) appears between the
+    // last traversal assignment and the Write-Output call.
+    const between = getSafePropertyBody.slice(loopEndIndex, noEnumerateIndex);
+    const braceCount = (between.match(/\}/g) || []).length;
+    assert.equal(braceCount, 1, 'expected exactly the foreach loop\'s closing brace between traversal and the terminal Write-Output');
+  });
+
+  test('DEFECT 5 REGRESSION 4: no comma-array workaround, JSON re-conversion, reflection, Invoke-Expression, or caller-specific branching was introduced', () => {
+    assert.doesNotMatch(getSafePropertyBody, /,\s*\$current\s*\r?\n/);
+    assert.doesNotMatch(getSafePropertyBody, /ConvertTo-Json/);
+    assert.doesNotMatch(getSafePropertyBody, /ConvertFrom-Json/);
+    assert.doesNotMatch(getSafePropertyBody, /Invoke-Expression/);
+    assert.doesNotMatch(getSafePropertyBody, /InvokeMember/);
+    assert.doesNotMatch(getSafePropertyBody, /GetType\(\)\.GetProperty/);
+  });
+
+  test('DEFECT 5 REGRESSION 5: Get-PropertyReadOutcome is unchanged by this round\'s correction (whitespace-normalized full-body check)', () => {
+    const start = preflightScript.indexOf('function Get-PropertyReadOutcome');
+    const end = preflightScript.indexOf('\n}', start) + 2;
+    assert.ok(start >= 0 && end > start);
+    const body = preflightScript.slice(start, end);
+    const normalized = body.replace(/\s+/g, ' ').trim();
+    assert.equal(
+      normalized,
+      "function Get-PropertyReadOutcome { param( $Object, [Parameter(Mandatory)] [string] $PropertyName ) if ($null -eq $Object) { return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $false } } try { $member = $Object.PSObject.Properties[$PropertyName] if ($null -eq $member) { return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $false } } # Only a NoteProperty — a plain stored value with no getter code — # is ever read. Every other member type is rejected here, before # any invocation, so a hostile or misbehaving getter is never run. if ($member.MemberType -ne [System.Management.Automation.PSMemberTypes]::NoteProperty) { return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $true } } $value = $member.Value return [pscustomobject]@{ Found = $true; Value = $value; AccessFailed = $false } } catch { return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $true } } }"
+    );
+  });
+
+  test('DEFECT 5 REGRESSION 6: ConvertTo-DataArray is unchanged by this round\'s correction', () => {
+    const start = preflightScript.indexOf('function ConvertTo-DataArray');
+    const end = preflightScript.indexOf('\n}', start) + 2;
+    const body = preflightScript.slice(start, end);
+    assert.match(body, /function ConvertTo-DataArray \{\s*\n\s*param\(\$Data\)\s*\n\s*if \(\$null -eq \$Data\) \{ return @\(\) \}\s*\n\s*return @\(\$Data\)\s*\n\}/);
+  });
+
+  test('REGRESSION 7: the Get-SafeProperty correction did not touch any other production helper\'s signature or body — Get-PropertyReadOutcome was independently corrected later (NoteProperty-only round; see its dedicated regression tests) and no longer uses AsPSObject or $wrapped.Properties either', () => {
+    const outcomeStart = preflightScript.indexOf('function Get-PropertyReadOutcome');
+    const outcomeEnd = preflightScript.indexOf('# An IAM allow-policy binding with a `condition`');
+    assert.ok(outcomeStart >= 0, 'expected Get-PropertyReadOutcome to still be defined');
+    const outcomeBody = preflightScript.slice(outcomeStart, outcomeEnd);
+    assert.doesNotMatch(outcomeBody, /\[System\.Management\.Automation\.PSObject\]::AsPSObject\(/);
+    assert.doesNotMatch(outcomeBody, /\$wrapped\.Properties\[/);
   });
 
   const safeAccessSites = [
@@ -2946,6 +3117,60 @@ describe('Unconditional IAM binding requirement (Test-IsUnconditionalBinding hel
     assert.match(body, /if \(\$null -eq \$Object\) \{\s*\n\s*return \[pscustomobject\]@\{ Found = \$false; Value = \$null; AccessFailed = \$false \}/);
   });
 
+  test('NOTEPROPERTY-ONLY 1: member lookup uses the intrinsic $Object.PSObject.Properties[$PropertyName] view — never AsPSObject or a wrapped .Properties access', () => {
+    const body = getOutcomeHelperBody();
+    assert.match(body, /\$member = \$Object\.PSObject\.Properties\[\$PropertyName\]/);
+    assert.doesNotMatch(body, /\[System\.Management\.Automation\.PSObject\]::AsPSObject\(/);
+    assert.doesNotMatch(body, /\$wrapped/);
+  });
+
+  test('NOTEPROPERTY-ONLY 2: only a NoteProperty member is ever read — the MemberType check happens before $member.Value is ever touched', () => {
+    const body = getOutcomeHelperBody();
+    assert.match(body, /if \(\$member\.MemberType -ne \[System\.Management\.Automation\.PSMemberTypes\]::NoteProperty\) \{/);
+    const memberTypeCheckIndex = body.indexOf('$member.MemberType -ne');
+    const valueReadIndex = body.indexOf('$value = $member.Value');
+    assert.ok(memberTypeCheckIndex >= 0 && valueReadIndex >= 0, 'expected both the MemberType check and the $member.Value read to be present');
+    assert.ok(memberTypeCheckIndex < valueReadIndex, 'the MemberType rejection must happen before $member.Value is ever read, so a non-NoteProperty getter is never invoked');
+  });
+
+  test('NOTEPROPERTY-ONLY 3: a non-NoteProperty member (ScriptProperty, CodeProperty, AliasProperty, adapted CLR Property, ParameterizedProperty, or any other/dynamic member type) is rejected as Found=false, Value=null, AccessFailed=true without invoking it', () => {
+    const body = getOutcomeHelperBody();
+    const memberTypeCheckIndex = body.indexOf('if ($member.MemberType -ne');
+    assert.ok(memberTypeCheckIndex >= 0);
+    const rejectionBody = body.slice(memberTypeCheckIndex, memberTypeCheckIndex + 200);
+    assert.match(rejectionBody, /return \[pscustomobject\]@\{ Found = \$false; Value = \$null; AccessFailed = \$true \}/);
+  });
+
+  test('NOTEPROPERTY-ONLY 4: dynamic $Object.$PropertyName access, reflection (InvokeMember / GetType().GetProperty), and Invoke-Expression are all absent from Get-PropertyReadOutcome', () => {
+    const body = getOutcomeHelperBody();
+    assert.doesNotMatch(body, /\$Object\.\$PropertyName/);
+    assert.doesNotMatch(body, /Invoke-Expression/);
+    assert.doesNotMatch(body, /InvokeMember/);
+    assert.doesNotMatch(body, /GetType\(\)\.GetProperty/);
+  });
+
+  test('NOTEPROPERTY-ONLY 5: the helper doc comment documents the NoteProperty-only fail-closed contract, not a claim that arbitrary getter exceptions must propagate', () => {
+    const start = preflightScript.indexOf('# Reads a single property and returns an explicit three-way outcome');
+    const fnStart = preflightScript.indexOf('function Get-PropertyReadOutcome');
+    assert.ok(start >= 0 && fnStart > start);
+    const docBody = preflightScript.slice(start, fnStart);
+    assert.match(docBody, /NoteProperty/);
+    assert.match(docBody, /never invokes[\s\S]{0,10}any getter it has not first classified as safe/);
+    assert.doesNotMatch(docBody, /reading the property itself threw/);
+  });
+
+  test('Test-IsUnconditionalBinding function body is unchanged by the Get-PropertyReadOutcome NoteProperty-only correction (whitespace-normalized full-body check)', () => {
+    const start = preflightScript.indexOf('function Test-IsUnconditionalBinding');
+    const closingMarker = preflightScript.indexOf('# Projects a successful', start);
+    assert.ok(start >= 0 && closingMarker > start);
+    const fnBody = preflightScript.slice(start, closingMarker);
+    const normalized = fnBody.replace(/\s+/g, ' ').trim();
+    assert.equal(
+      normalized,
+      "function Test-IsUnconditionalBinding { param($Binding) if ($null -eq $Binding -or (Test-IsScalarValue -Value $Binding)) { return $false } $outcome = Get-PropertyReadOutcome -Object $Binding -PropertyName 'condition' if ($outcome.AccessFailed) { return $false } if (-not $outcome.Found) { return $true } return $null -eq $outcome.Value }"
+    );
+  });
+
   test('access failure cannot be converted into a null/absent success path: AccessFailed is a distinct field the caller must check separately from Found', () => {
     const body = getOutcomeHelperBody();
     // The catch branch's returned object has Found=$false (same as a
@@ -4384,5 +4609,75 @@ describe('Scalar pipeline-result concatenation fix (task-caller invocation and t
     const body = preflightScript.slice(start, end);
     assert.doesNotMatch(body, /surfaces persisted[\s\S]{0,120}api_endpoint_overrides/);
     assert.match(body, /deliberately excludes and never evaluates api_endpoint_overrides/);
+  });
+});
+
+describe('Cloud Tasks queues empty-array pipeline-unrolling fix (Defect 4)', () => {
+  function getQueuesCheckBody() {
+    const start = preflightScript.indexOf('# ---- Cloud Tasks queues ----');
+    const end = preflightScript.indexOf('# ---- Targeted resource blockers/warnings', start);
+    assert.ok(start >= 0 && end > start, 'expected to locate the Cloud Tasks queues check');
+    return preflightScript.slice(start, end);
+  }
+
+  test('the queues assignment is normalized with the outer @(...): $queues = @(ConvertTo-DataArray $taskQueuesResult.data)', () => {
+    const body = getQueuesCheckBody();
+    assert.match(body, /\$queues = @\(ConvertTo-DataArray \$taskQueuesResult\.data\)/);
+  });
+
+  test('the old bare (unwrapped) assignment is absent', () => {
+    const body = getQueuesCheckBody();
+    assert.doesNotMatch(body, /\$queues = ConvertTo-DataArray \$taskQueuesResult\.data(?!\))/);
+    // Also assert no line reads exactly "$queues = ConvertTo-DataArray ..." without a
+    // leading "@(" immediately after the "=".
+    assert.doesNotMatch(body, /\$queues\s*=\s*ConvertTo-DataArray/);
+  });
+
+  test('the existing status guard remains exactly: if ($taskQueuesResult.status -eq \'success\')', () => {
+    const body = getQueuesCheckBody();
+    assert.match(body, /if \(\$taskQueuesResult\.status -eq 'success'\) \{/);
+  });
+
+  test('the Count condition remains exactly: if ($queues.Count -gt 1)', () => {
+    const body = getQueuesCheckBody();
+    assert.match(body, /if \(\$queues\.Count -gt 1\) \{/);
+  });
+
+  test('the warning text is byte-for-byte unchanged: multiple candidate queues', () => {
+    const body = getQueuesCheckBody();
+    assert.match(body, /\$warnings\.Add\('multiple candidate queues'\) \| Out-Null/);
+  });
+
+  test('zero queues can never be converted into a blocker — no $blockers.Add call exists anywhere inside this check', () => {
+    const body = getQueuesCheckBody();
+    assert.doesNotMatch(body, /\$blockers\.Add/);
+  });
+
+  test('the Count check is the only conditional in this block — no separate zero-queues branch was introduced', () => {
+    const body = getQueuesCheckBody();
+    const ifOccurrences = (body.match(/\bif\s*\(/g) || []).length;
+    assert.equal(ifOccurrences, 2, 'expected exactly the status guard and the Count -gt 1 check, no additional branch');
+  });
+
+  test('ConvertTo-DataArray itself is unchanged', () => {
+    const start = preflightScript.indexOf('function ConvertTo-DataArray');
+    const end = preflightScript.indexOf('\n}', start) + 2;
+    const body = preflightScript.slice(start, end);
+    assert.match(body, /function ConvertTo-DataArray \{\s*\n\s*param\(\$Data\)\s*\n\s*if \(\$null -eq \$Data\) \{ return @\(\) \}\s*\n\s*return @\(\$Data\)\s*\n\}/);
+  });
+
+  test('no other production helper or evaluation block changed — the targeted QueueName verification block immediately follows and is untouched', () => {
+    const body = getQueuesCheckBody();
+    // The queues check body itself must contain nothing beyond the status
+    // guard, the normalized assignment, and the Count-based warning — no
+    // targeted-resource, IAM, or command-schema logic was pulled in here.
+    assert.doesNotMatch(body, /QueueName/);
+    assert.doesNotMatch(body, /Get-PropertyReadOutcome/);
+    assert.doesNotMatch(body, /Test-IsUnconditionalBinding/);
+  });
+
+  test('only one production call site normalizes taskQueuesResult.data with ConvertTo-DataArray, and it is this one', () => {
+    const occurrences = (preflightScript.match(/ConvertTo-DataArray \$taskQueuesResult\.data/g) || []).length;
+    assert.equal(occurrences, 1, 'expected exactly one ConvertTo-DataArray call against taskQueuesResult.data');
   });
 });

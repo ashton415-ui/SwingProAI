@@ -382,12 +382,30 @@ function Get-SafeProperty {
     $current = $Object
     foreach ($propertyName in $PropertyPath) {
         if ($null -eq $current) { return $null }
-        $wrapped = [System.Management.Automation.PSObject]::AsPSObject($current)
-        $member = $wrapped.Properties[$propertyName]
+        # AsPSObject($PSCustomObject) on Windows PowerShell 5.1 Desktop can
+        # return the same PSCustomObject reference rather than a distinct
+        # PSObject whose .Properties collection is directly accessible —
+        # under Set-StrictMode that bare .Properties access then throws.
+        # Every object's intrinsic .PSObject member is always safe to read
+        # regardless of the underlying type (PSCustomObject, string, scalar,
+        # etc.), so the property collection is read through it directly.
+        $member = $current.PSObject.Properties[$propertyName]
         if ($null -eq $member) { return $null }
         $current = $member.Value
     }
-    return $current
+    # A bare `return $current` writes $current to the success output
+    # stream, and PowerShell enumerates array values placed on the
+    # pipeline by default — when $current is an array with exactly one
+    # element, a caller capturing this function's output into a plain
+    # scalar variable receives that single element itself, not a
+    # one-element array, silently losing the array's identity (the same
+    # underlying pipeline behavior that made ConvertTo-DataArray necessary
+    # elsewhere in this script). Write-Output -NoEnumerate places $current
+    # on the pipeline as a single, unenumerated object regardless of
+    # whether it is $null, a scalar, or an array of any length, so the
+    # caller always receives back exactly what was stored.
+    Write-Output -NoEnumerate $current
+    return
 }
 
 function ConvertTo-DataArray {
@@ -1034,9 +1052,29 @@ function Test-IsScalarValue {
 # - Found=$false, Value=$null, AccessFailed=$false  => the property is absent
 # - Found=$true,  Value=$null, AccessFailed=$false  => the property is present and explicitly null
 # - Found=$true,  Value=<x>,   AccessFailed=$false  => the property is present with a non-null value
-# - Found=$false, Value=$null, AccessFailed=$true   => reading the property itself threw
+# - Found=$false, Value=$null, AccessFailed=$true   => the member exists but was rejected without being read
 # $Object being $null is treated as the property being absent (there is
 # nothing to fail to read), never as an access failure.
+#
+# This helper's real production inputs are reviewed plain data: parsed JSON
+# (ConvertFrom-Json PSCustomObject) and internally-built [pscustomobject]
+# literals. Both forms expose their fields exclusively as NoteProperty
+# members — plain stored values with no getter code to run. On Windows
+# PowerShell 5.1, neither `$Object.$PropertyName` dotted access nor a
+# `.Properties[...].Value` read reliably surfaces a getter's exception as a
+# catchable, terminating error: a hostile or misbehaving ScriptProperty or
+# adapted CLR property can throw and still have that failure silently
+# demoted to a non-terminating error, leaving the caller with an
+# indistinguishable-from-legitimate $null. So this function never invokes
+# any getter it has not first classified as safe: it inspects the member's
+# MemberType via the intrinsic `.PSObject.Properties` collection (a lookup
+# that never invokes the getter) and reads `.Value` only when that member is
+# a NoteProperty. Any other member type — ScriptProperty, CodeProperty,
+# AliasProperty, an adapted CLR Property, a ParameterizedProperty, or any
+# dynamic member — is rejected as AccessFailed=$true without ever being
+# invoked. This is deterministic fail-closed handling: it does not depend on
+# whether a given getter's exception happens to be catchable, and it never
+# executes untrusted computed/executable member code.
 function Get-PropertyReadOutcome {
     param(
         $Object,
@@ -1046,15 +1084,16 @@ function Get-PropertyReadOutcome {
         return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $false }
     }
     try {
-        $wrapped = [System.Management.Automation.PSObject]::AsPSObject($Object)
-        $member = $wrapped.Properties[$PropertyName]
+        $member = $Object.PSObject.Properties[$PropertyName]
         if ($null -eq $member) {
             return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $false }
         }
-        # The member's Value getter is the operation that can actually throw
-        # for a hostile/misbehaving property — it is read inside this same
-        # try so such a failure is captured as AccessFailed, not silently
-        # turned into "absent".
+        # Only a NoteProperty — a plain stored value with no getter code —
+        # is ever read. Every other member type is rejected here, before
+        # any invocation, so a hostile or misbehaving getter is never run.
+        if ($member.MemberType -ne [System.Management.Automation.PSMemberTypes]::NoteProperty) {
+            return [pscustomobject]@{ Found = $false; Value = $null; AccessFailed = $true }
+        }
         $value = $member.Value
         return [pscustomobject]@{ Found = $true; Value = $value; AccessFailed = $false }
     }
@@ -1494,7 +1533,9 @@ function Add-GenericDiscoveryBlocker {
     param(
         [Parameter(Mandatory)] $Result,
         [Parameter(Mandatory)] [string] $Label,
-        [Parameter(Mandatory)] [System.Collections.Generic.List[string]] $Blockers
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]] $Blockers
     )
     if ($Result.status -ne 'success') {
         $Blockers.Add("generic discovery incomplete: $Label (status: $($Result.status))") | Out-Null
@@ -1504,7 +1545,9 @@ function Add-GenericDiscoveryBlocker {
 function Add-TargetVerificationBlockers {
     param(
         [Parameter(Mandatory)] [string] $Label,
-        [Parameter(Mandatory)] [System.Collections.Generic.List[string]] $Blockers,
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]] $Blockers,
         [Parameter(Mandatory)] [System.Collections.Specialized.OrderedDictionary] $Results
     )
     foreach ($commandId in $Results.Keys) {
@@ -1944,7 +1987,12 @@ function Invoke-PrivateWorkerPreflightMain {
 
         # ---- Cloud Tasks queues ----
         if ($taskQueuesResult.status -eq 'success') {
-            $queues = ConvertTo-DataArray $taskQueuesResult.data
+            # ConvertTo-DataArray's `return @()` branch, captured directly
+            # into a scalar variable, unrolls to $null on the pipeline (a
+            # PowerShell pipeline-unrolling quirk for empty arrays) — the
+            # outer @(...) here forces a real (possibly empty) array so
+            # .Count below is always safe under Set-StrictMode.
+            $queues = @(ConvertTo-DataArray $taskQueuesResult.data)
             if ($queues.Count -gt 1) {
                 $warnings.Add('multiple candidate queues') | Out-Null
             }
