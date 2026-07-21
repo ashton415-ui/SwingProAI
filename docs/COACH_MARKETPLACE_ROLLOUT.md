@@ -490,3 +490,251 @@ candidate for applying, the same live-schema reconciliation discipline as
 `v6` (see "Mandatory live-schema reconciliation before applying v6" above)
 applies here too — the preflight is a safety net for that moment, not a
 substitute for deliberately deciding to apply it.
+
+## CM2R — Live Production Reconciliation (Source Only)
+
+A separately authorized, read-only production metadata inspection (no
+application-row data was queried) found that `v7`'s own preflight
+assumption — a `coach_profiles` table with zero pre-existing RLS policies
+and zero pre-existing broad grants — **does not hold in production**.
+`coach_profiles` predates this repository's tracked history entirely (see
+"Production schema-drift risk" above) and already carries:
+
+- Two named RLS policies: `"Anyone can view active coach profiles"`
+  (`SELECT`, `USING (is_active = true)`) and `"Coaches can manage their own
+  profile"` (`ALL`, `USING (auth.uid() = user_id)`, no `WITH CHECK`).
+- Broad `DELETE`/`INSERT`/`REFERENCES`/`SELECT`/`TRIGGER`/`TRUNCATE`/`UPDATE`
+  table grants to `anon`, `authenticated`, **and** `service_role`.
+
+Because `v7`'s preflight explicitly `raise exception`s the moment it finds
+any pre-existing policy on `coach_profiles`, **`v7` would correctly refuse
+to apply against this real production state** — this is the preflight
+design working exactly as intended, not a defect to patch around.
+
+A parallel, read-only inventory of this repository's application code found
+**zero executable consumers of `coach_profiles` anywhere** — no
+`.from("coach_profiles")`, no RPC call, no route, page, or component
+references it at all. `v6.sql`/`v7.sql` remain unapplied, so nothing in
+this application currently depends on the two legacy policies or the broad
+grants continuing to work. (This does not rule out an *external*, non-repo
+consumer — see "Unresolved questions" below.)
+
+### v6 and v7 remain unchanged, historical, source-only artifacts
+
+Both files already went through independent, multi-round security review
+against their exact committed text. Rewriting either in place after the
+fact would invalidate that review trail for no technical benefit, since
+neither has ever been applied to any database. `supabase-schema-v8.sql`
+supersedes their intended production effect entirely — it performs every
+schema change `v6` was meant to make, creates every object `v7` was meant
+to create, and additionally performs the production-specific reconciliation
+neither anticipated, all atomically in one transaction.
+
+### Migration authority: BYPASSRLS is not DDL authority
+
+`v8`'s preflight verifies the role applying the migration is either the
+owner of `public.coach_profiles` or a PostgreSQL superuser — **BYPASSRLS
+alone is explicitly not accepted**. BYPASSRLS only changes whether row-level
+security *policies* are evaluated for that role's data reads/writes; it
+confers no ownership privilege and no ability to `ALTER TABLE`,
+`DROP POLICY`, or `GRANT`/`REVOKE` on an object the role does not own. A
+role with BYPASSRLS but lacking ownership or superuser status would have
+failed partway through this transaction anyway (at `DROP POLICY` or
+`ALTER TABLE ADD CONSTRAINT`) with an opaque Postgres permission error —
+checking for it explicitly up front turns that into a clear, named,
+early-failing exception instead.
+
+### Preflight and postflight: checking both ends of the transaction
+
+`v8` verifies the security posture twice: the **baseline preflight**
+(before any structural statement runs) confirms the verified production
+starting state still holds, and a new **final effective-access postflight**
+(after every column, table, function, and view has been created and every
+`REVOKE`/`GRANT`/`DROP POLICY` has been issued, but *before* `COMMIT`)
+independently re-derives the resulting security posture from the catalogs
+and confirms it matches what this migration intends. Every postflight check
+uses `has_table_privilege()`/`has_function_privilege()` (or the equivalent
+`information_schema` lookups for `PUBLIC`-grantee rows), so privilege
+inherited through role membership or a `PUBLIC` grant is included, not just
+what a plain grant-table row count would show. If any postflight invariant
+fails — a forgotten `REVOKE`, a typo'd role name, an accidental extra
+`GRANT` earlier in this same file — the whole transaction is rolled back
+before it ever commits; nothing this migration changed is left in place
+partially. The postflight is defense-in-depth against this migration's own
+mistakes, not a substitute for the baseline preflight, which instead
+guards against production having drifted from what was verified.
+
+### The two legacy policies being removed
+
+By exact quoted name only, after `v8`'s own preflight independently
+re-confirms both exist with the exact expected definition:
+
+- `"Anyone can view active coach profiles"`
+- `"Coaches can manage their own profile"`
+
+No replacement direct-table policy is created. `coach_profiles`'s final
+state is RLS enabled with **zero** policies — matching every other
+marketplace table's default-deny convention. All coach and directory access
+goes exclusively through five narrow `SECURITY DEFINER` functions and the
+reconciled, `service_role`-only `coach_directory_listing` view.
+
+### The direct-grant problem
+
+The existing `ALL`-command, own-row policy has **no `WITH CHECK`** — under
+Postgres RLS semantics, `USING` governs both read-visibility and
+write-validity when `WITH CHECK` is omitted, so a coach can currently write
+*any* value to *any* column of their own row. Applying `v6`'s new columns
+(`verification_status`, `marketplace_visibility_status`, etc.) on top of
+this policy — without also replacing it — would immediately let a coach
+self-verify or otherwise bypass every admin-only-field protection CM2A's
+functions were built to enforce. `v8` closes this by revoking `anon`,
+`authenticated`, and `PUBLIC` down to zero direct privilege on
+`coach_profiles` entirely, and normalizing `service_role` to `SELECT` only.
+
+### Why the SECURITY INVOKER rating view needs service_role SELECT on coach_reviews
+
+`public.coach_rating_summary` is declared `WITH (security_invoker = true)` —
+deliberately preserved, unchanged, from the audited CM1 design. A
+`security_invoker` view evaluates the *underlying base table's* grants and
+row-level security **as the invoking role**, not as the view's owner. Since
+only `service_role` is ever meant to query this view (or
+`coach_directory_listing`), `service_role` must hold a real, explicit
+`SELECT` grant on the view's base table, `public.coach_reviews` — without
+it, every query against the view would return nothing (or fail outright),
+regardless of the `GRANT SELECT` on the view itself. This privilege is
+**read-only** (`SELECT` only — never `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/
+`REFERENCES`/`TRIGGER`) and exists solely so the server-only, approved-
+review-only rating aggregate can actually be read; the other five
+marketplace tables (`coach_services`, `coach_locations`,
+`coach_availability_rules`, `coach_availability_exceptions`,
+`coach_bookings`) remain entirely inaccessible to `service_role` in this
+slice, since no audited server-side operation touches them yet.
+
+### service_role BYPASSRLS is a required, verified assumption
+
+`coach_reviews` (like every other marketplace table) has RLS enabled with
+**zero** policies — default-deny for any role whose row-level security is
+actually evaluated. For `service_role`'s explicit `SELECT` grant above to
+mean anything in practice, `service_role` must have the `BYPASSRLS` role
+attribute, so its row-level security is never evaluated at all and the
+table-level `GRANT` is what actually governs its access. `v8` verifies this
+twice: a baseline preflight (before any structural statement runs) confirms
+`service_role` exists and already has `BYPASSRLS`, and a final postflight
+(immediately before `COMMIT`) re-confirms `BYPASSRLS` is still set after
+every grant/revoke in this migration has been applied.
+
+### Exact function lookups fail into stable, named exceptions
+
+Postflight D resolves each of the five coach-owned functions via
+`pg_catalog.to_regprocedure(...)` rather than a direct `::regprocedure`
+cast. A cast throws its own generic "function does not exist" error and
+aborts the transaction before this migration's own postflight logic gets a
+chance to run — `to_regprocedure` instead returns `NULL` for a missing or
+mistyped signature, which is recorded as an ordinary postflight-D problem
+(alongside every other check) and reported through the same stable,
+`postflight D:`-prefixed exception as any other failure. A missing
+function, a signature that drifted, or an unexpected additional overload
+are therefore always reported the same way, never as an opaque low-level
+Postgres error.
+
+### Function ownership is positively tied to the trusted migration role
+
+Postflight D no longer relies solely on excluding `anon`/`authenticated`/
+`service_role` by name as proof a function's owner is trustworthy — that
+blacklist doesn't rule out some *other* untrusted role. Each function's
+owner (`pg_proc.proowner`, resolved through `pg_roles`) must equal
+`current_user` — the exact same role Preflight D already proved is either
+the owner of `public.coach_profiles` or a PostgreSQL superuser. The
+role-name blacklist is retained as an additional, non-exclusive check.
+
+### `marketplace_display_name` — the public identity contract
+
+A new, dedicated, nullable `text` column, distinct from the legacy
+`business_name` field. `business_name` predates the marketplace, was never
+designed with public display in mind, and is not copied or backfilled into
+`marketplace_display_name` by this migration (no data rewrite of any kind).
+`marketplace_display_name` is nullable while `hidden`/`draft`, must be
+non-blank (after `btrim`) when non-null (`coach_profiles_marketplace_
+display_name_valid`, capped at 100 characters), and is required, non-null,
+and non-blank to transition to `published`. `public.users.full_name` and
+`email` are never exposed by any marketplace function or view — no existing
+part of this application currently shows either name to an anonymous
+visitor, so introducing that would be a genuinely new privacy boundary, not
+a continuation of an existing public contract.
+
+### `hourly_rate` remains deprecated/read-only
+
+No function in `v8` accepts or writes `hourly_rate` — marketplace pricing
+remains exclusively on `coach_services.price_amount_minor`.
+
+### `is_active` — a dedicated function, not a routine profile edit
+
+`fn_set_own_coach_active(p_is_active boolean)` is deliberately separate from
+both profile-editing functions: `is_active` is an account-level switch that
+takes precedence over `marketplace_visibility_status` in the directory
+eligibility predicate, so it deserves its own narrow, single-purpose,
+auditable boundary rather than being folded into routine content edits.
+
+### The coach get-or-create function
+
+No application code path, and no inspected database trigger, currently
+creates a `coach_profiles` row (the `auth.users` creation trigger inserts
+into `public.users` only). `fn_get_or_create_own_coach_profile()` is the
+safe, idempotent, concurrency-safe replacement — `INSERT ... ON CONFLICT
+(user_id) DO NOTHING` against the existing `coach_profiles_user_id_key`
+uniqueness contract, never accepting an `id` or `user_id` parameter.
+
+### Directory reads remain server-only through `service_role`
+
+`coach_directory_listing` is revoked from `PUBLIC`, `anon`, and
+`authenticated` — reachable only via a service-role Supabase client from
+server-side application code. Both the future public-directory route and
+its data-access helper must call `lib/coach-marketplace-access.ts`'s
+`requireCoachMarketplaceEnabled()` before constructing that client or
+issuing any query at all — Postgres cannot see `COACH_MARKETPLACE_ENABLED`,
+so this check lives entirely in application code, exactly as CM2A
+established.
+
+### `v8` remains unapplied
+
+Merging this source file does not authorize running it against staging or
+production. The feature flag remains disabled regardless. No page, route,
+component, or navigation entry is added by this slice.
+
+### Expected deployment sequence
+
+1. Resolve the unresolved questions below with whoever has production/
+   backend visibility outside this repository.
+2. Apply `v8.sql` to a **staging** Supabase project first — never
+   production directly.
+3. Verify in staging that the two legacy policies are gone, grants are
+   tightened, and the five functions/directory view behave as designed.
+4. Apply `v8.sql` to production during a low-traffic window (it briefly
+   holds an `ACCESS EXCLUSIVE` lock on `coach_profiles`).
+5. Only after the database change is live and verified should any future
+   CM2B/CM2C application code (coach editor UI, public directory UI) be
+   built against these functions/view — database and application changes
+   are independently revertible and should not ship in the same release.
+
+### Rollback / forward-fix posture
+
+Unchanged from CM1/CM2A: database rollback is forward-fix, not a
+destructive down-migration. If `v8` needs to be undone after application,
+the correct approach is a new, later, forward-only migration — never a
+`DROP`/`TRUNCATE` of anything `v8` created, which would destroy any data a
+later phase had already accumulated.
+
+### Unresolved questions requiring product or security sign-off
+
+- Where does a production `coach_profiles` row actually get created today,
+  if not from any code path in this repository?
+- Does any consumer *outside* this git repository (a partner integration, a
+  manual script, an already-deployed build, direct dashboard usage) rely on
+  the current two RLS policies or broad grants continuing to work?
+- Confirm the origin of the broad `anon`/`authenticated`/`service_role`
+  grants (Supabase default-privilege bootstrap vs. a manual action) —
+  unprovable from this repository alone.
+- Confirm whether `business_name`/`bio`/`specialties`/`certification`
+  should keep a dedicated write path indefinitely (as `v8` provides via
+  `fn_update_own_coach_profile_legacy`) or are meant to be fully superseded
+  by the marketplace column set in a later phase.
