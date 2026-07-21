@@ -10,7 +10,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // validates the migration's *source text* structure the same way the rest
 // of this repository's static tests validate script/route source text.
 const migrationPath = path.join(__dirname, "..", "supabase-schema-v6.sql");
-const migration = readFileSync(migrationPath, "utf8");
+// Normalized to LF immediately after reading so every exact-newline
+// assertion below is independent of how this file happens to be checked
+// out (e.g. Windows core.autocrlf=true producing CRLF line endings) —
+// without this, identical source text can pass or fail purely based on the
+// checkout environment rather than the file's actual content.
+const migration = readFileSync(migrationPath, "utf8").replace(/\r\n/g, "\n");
 
 /**
  * Strips SQL line comments (`-- ...` to end of line) so structural
