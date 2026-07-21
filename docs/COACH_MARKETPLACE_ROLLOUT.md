@@ -345,3 +345,148 @@ always a safe no-op.
   policies, on every new table).
 - Disabling the feature flag remains the immediate application rollback.
 - Database rollback is forward-fix rather than a destructive down migration.
+
+## CM2A — Secure Data Contract (Source Only)
+
+**CM1 is merged** (`e382425a`, "Merge PR #1: Coach Marketplace CM1
+foundation", into `main`). CM2A is the first CM2 slice: a **source-only,
+unapplied database security contract**. Like `supabase-schema-v6.sql`
+before it, `supabase-schema-v7.sql` is never executed against any Supabase
+project by this slice — merging CM2A does not authorize applying v7, any
+more than merging CM1 authorized applying v6. CM2A adds no page, route,
+form, component, or navigation entry of any kind; there is nothing new for
+any user to see or click.
+
+### What v7 creates
+
+Exactly three objects, all narrowly scoped:
+
+- `public.fn_get_own_coach_marketplace_profile()` — a `SECURITY DEFINER`,
+  zero-parameter function that returns the calling coach's own marketplace
+  profile fields, via an explicit 15-column `RETURNS TABLE` contract (never
+  `RETURNS public.coach_profiles`, never a wildcard select).
+- `public.fn_update_coach_marketplace_profile(...)` — a `SECURITY DEFINER`
+  function with one explicit typed parameter per coach-editable field (never
+  a generic `jsonb` payload, never a target-ID parameter) that validates,
+  then writes, the calling coach's own row.
+- `public.coach_directory_listing` — a private, `security_invoker` view
+  projecting only public-safe columns for published, non-suspended,
+  non-rejected coach profiles.
+
+### Why SECURITY DEFINER, and why authenticated gets no direct grant
+
+Both functions are `SECURITY DEFINER` — a deliberate departure from the
+`SECURITY INVOKER` trigger function CM1 introduced (see "Completed-booking,
+verified-review rule" above). The reason is the opposite of a convenience
+shortcut: **`authenticated` receives no direct `SELECT`/`UPDATE` grant on
+`coach_profiles` at all, at either the table or column level, and no RLS
+policy is created for it either.** A `SECURITY INVOKER` function would have
+*required* such a grant to do its job, and that same standing grant would
+let any authenticated client bypass the function entirely via a direct
+Supabase REST call — completely defeating its coach-role check, its
+suspended-row lock, its field validation, and its slug-conflict handling.
+`SECURITY DEFINER` lets `authenticated` hold `EXECUTE` on the function only,
+never a table privilege it could route around. Both functions still do
+every authorization check themselves — they derive identity only from
+`auth.uid()`, reject a null caller, and re-verify `public.users.role =
+'coach'` — because a `SECURITY DEFINER` function cannot lean on RLS the way
+the CM1 trigger does.
+
+### The public directory is server-only
+
+`coach_directory_listing` is revoked from `PUBLIC`, `anon`, **and**
+`authenticated` — granted only to `service_role`. There is no client-side
+(anon-key) path to it at all. Any future route or data-access module that
+reads it must run entirely server-side, using a service-role Supabase
+client, and — before constructing that client or issuing any query — must
+call `lib/coach-marketplace-access.ts`'s `requireCoachMarketplaceEnabled()`.
+That helper is the single authoritative gate: it throws
+`CoachMarketplaceDisabledError` unless `COACH_MARKETPLACE_ENABLED` is
+exactly `"true"`, and both the future route (via `notFound()`) and the
+future data-access function must check it, as independent, redundant
+layers — so a future route can't forget the flag even if it forgets the
+other check.
+
+### profile_photo_url is read-only in CM2A
+
+`fn_update_coach_marketplace_profile` deliberately has **no**
+`p_profile_photo_url` parameter. `profile_photo_url` remains readable
+(via both functions' return contract) but cannot be written by this
+function. Profile-photo upload requires its own Supabase Storage bucket
+and storage RLS policies, which is out of scope for CM2A and deferred to a
+dedicated later slice.
+
+### Inactive, rejected, and suspended profiles are excluded from the public directory
+
+`coach_directory_listing`'s predicate is:
+
+```sql
+where marketplace_visibility_status = 'published'
+  and public_slug is not null
+  and is_active = true
+  and verification_status not in ('suspended', 'rejected')
+```
+
+Excluding `suspended` verification is the literal minimum. CM2A additionally
+excludes `rejected` verification as a conservative trust-and-safety default:
+`rejected` means an admin explicitly reviewed and denied the coach's
+verification request — visually indistinguishable to a golfer from
+`unverified`/`pending`, but a real denial rather than a neutral in-progress
+state. Continuing to publicly list a profile whose verification was
+explicitly denied would undermine the verification badge's meaning.
+`unverified` and `pending` remain listable. **This is a product/trust-and-
+safety decision that should be confirmed by whoever owns coach verification
+before v7 is ever applied** — it is not settled by CM2A alone.
+
+**`is_active = true` is also required.** `coach_profiles.is_active` is a
+pre-CM1, account-level switch (not a marketplace-specific field) and takes
+precedence over `marketplace_visibility_status`: a coach whose account has
+been deactivated must never be publicly listable, even if their
+`marketplace_visibility_status` was left at `'published'` from before
+deactivation — there is no reason to expect those two independent fields to
+be kept in sync by anything else in this schema, so the directory predicate
+enforces it directly. `is_active` is deliberately **not** projected by the
+view (it's an input to the filter, not information about the coach) and is
+not coach-writable by either function `v7` creates — it never appears as a
+parameter or as an assignment in `fn_update_coach_marketplace_profile`.
+
+### Fail-loud posture and preflight
+
+Unlike `v6`, `v7` uses **no** `IF NOT EXISTS` / `CREATE OR REPLACE` /
+skip-on-conflict idempotency for anything it creates. `v6` only ever created
+brand-new, CM1-owned tables with no prior history; `v7` instead layers new
+objects onto `coach_profiles`, a pre-existing table whose live RLS/policy/
+grant state cannot be verified from this repository. Every check in `v7`
+therefore raises an exception and aborts the whole transaction on any
+unexpected pre-existing state, rather than silently skipping it or layering
+on top of it. Nothing is ever dropped or replaced automatically.
+
+**Before creating any object, `v7` runs five preflight checks, in order:**
+
+1. Every required `public.users`/`public.coach_profiles` column exists with
+   a compatible type (19 columns checked, including `is_active boolean`; all
+   missing/incompatible ones are reported together, not just the first).
+2. The running PostgreSQL version is 15 or newer (required for
+   `security_invoker` views) — there is no pre-15 fallback branch; an older
+   server fails the whole migration outright.
+3. None of `fn_get_own_coach_marketplace_profile`,
+   `fn_update_coach_marketplace_profile` (any overload), or
+   `coach_directory_listing` already exist, and `coach_profiles` has zero
+   pre-existing RLS policies.
+4. `authenticated` and `anon` have **no effective** `SELECT`/`UPDATE` access
+   to `coach_profiles` — checked at both table and column level via
+   `has_table_privilege()`/`has_any_column_privilege()` (which already fold
+   in privilege inherited via a `PUBLIC` grant), plus an explicit,
+   separately-reported check of `information_schema.table_privileges`/
+   `column_privileges` for a `PUBLIC`-grantee row. `service_role` is
+   confirmed to already have the underlying `SELECT` privilege the
+   `security_invoker` directory view will need.
+5. Only after all of the above pass: `alter table public.coach_profiles
+   enable row level security;` (idempotent; CM2A creates no policy).
+
+**None of this preflight logic connects to Supabase or runs anywhere except
+inside the unapplied `v7.sql` text itself.** When `v7` is eventually a
+candidate for applying, the same live-schema reconciliation discipline as
+`v6` (see "Mandatory live-schema reconciliation before applying v6" above)
+applies here too — the preflight is a safety net for that moment, not a
+substitute for deliberately deciding to apply it.
