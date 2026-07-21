@@ -289,6 +289,17 @@ describe("supabase-schema-v6.sql — six new tables exist with RLS enabled and z
     expect(codeLower).not.toMatch(/\balter\s+policy\b/);
     expect(codeLower).not.toMatch(/\bdrop\s+policy\b/);
   });
+
+  it("revokes all anon/authenticated privileges on every one of the six new tables individually", () => {
+    // One assertion per exact table name, each its own REVOKE statement —
+    // deliberately not a single combined check, so removing any individual
+    // table's REVOKE line fails this test even if the other five remain.
+    for (const table of newTables) {
+      expect(codeLower, `expected REVOKE ALL on public.${table} FROM anon, authenticated`).toMatch(
+        new RegExp(`revoke\\s+all\\s+on\\s+public\\.${table}\\s+from\\s+anon\\s*,\\s*authenticated`)
+      );
+    }
+  });
 });
 
 describe("supabase-schema-v6.sql — money is always integer minor units", () => {
@@ -427,6 +438,33 @@ describe("supabase-schema-v6.sql — completed-booking review enforcement", () =
     const reviewsSection = codeLower.slice(reviewsSectionIdx, nextSectionIdx);
     expect(reviewsSection).not.toMatch(/create\s+policy/);
   });
+
+  it("locks the trigger function's search_path to empty and only ever references coach_bookings schema-qualified", () => {
+    // Bound the slice tightly to just this one function's declaration and
+    // body — from its CREATE OR REPLACE FUNCTION header through the closing
+    // $fn$ dollar-quote delimiter — so this test can't accidentally pass
+    // because SECURITY INVOKER, SET search_path, or a qualified relation
+    // reference merely appears *somewhere else* in the file (a different
+    // function, a comment, or documentation prose).
+    const fnIdx = codeLower.indexOf(
+      "create or replace function public.fn_enforce_coach_review_completed_booking"
+    );
+    expect(fnIdx).toBeGreaterThanOrEqual(0);
+    const openDelimIdx = codeLower.indexOf("$fn$", fnIdx);
+    expect(openDelimIdx).toBeGreaterThan(fnIdx);
+    const closeDelimIdx = codeLower.indexOf("$fn$", openDelimIdx + "$fn$".length);
+    expect(closeDelimIdx).toBeGreaterThan(openDelimIdx);
+    const fnBlock = codeLower.slice(fnIdx, closeDelimIdx + "$fn$".length);
+
+    // Positive: must be present, bounded to this function only.
+    expect(fnBlock).toMatch(/security\s+invoker/);
+    expect(fnBlock).toMatch(/set\s+search_path\s*=\s*''/);
+    expect(fnBlock).toMatch(/from\s+public\.coach_bookings\b/);
+
+    // Negative: must be absent from this same bounded function.
+    expect(fnBlock).not.toMatch(/security\s+definer/);
+    expect(fnBlock).not.toMatch(/from\s+coach_bookings\b/);
+  });
 });
 
 describe("supabase-schema-v6.sql — coach_rating_summary view", () => {
@@ -474,6 +512,23 @@ describe("supabase-schema-v6.sql — coach_rating_summary view", () => {
   it("is not granted to anon or authenticated in this migration", () => {
     expect(codeLower).toMatch(/revoke\s+all\s+on\s+public\.coach_rating_summary\s+from\s+anon\s*,\s*authenticated/);
     expect(codeLower).not.toMatch(/grant\s+select\s+on\s+public\.coach_rating_summary/);
+  });
+
+  it("sets security_invoker = true on the PostgreSQL 15+ view-creation branch", () => {
+    // Bound the slice to only the `if ... >= 150000 then` branch (up to the
+    // following `else`), not the whole DO block and not the `--` prose
+    // comment above it explaining security_invoker (already stripped from
+    // codeLower by stripSqlComments) — so this can't pass merely because
+    // the phrase "security_invoker" appears in documentation.
+    const branchIdx = codeLower.indexOf(
+      "if current_setting('server_version_num')::int >= 150000 then"
+    );
+    expect(branchIdx).toBeGreaterThanOrEqual(0);
+    const elseIdx = codeLower.indexOf("else", branchIdx);
+    expect(elseIdx).toBeGreaterThan(branchIdx);
+    const pg15Branch = codeLower.slice(branchIdx, elseIdx);
+    expect(pg15Branch).toMatch(/create\s+or\s+replace\s+view\s+public\.coach_rating_summary/);
+    expect(pg15Branch).toMatch(/with\s*\(\s*security_invoker\s*=\s*true\s*\)/);
   });
 
   it("has no client-writable aggregate anywhere (coach_profiles gained no rating column; see the avg_rating/review_count test above)", () => {

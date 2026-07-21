@@ -162,7 +162,11 @@ deliberately redundant:
    default, stated explicitly for clarity) — it runs with the privileges of
    whichever role performs the write, never with elevated owner privileges,
    so it can never be used as a side channel to read booking data a caller
-   couldn't otherwise see.
+   couldn't otherwise see. It also sets `SET search_path = ''`, and every
+   relation it references (`public.coach_bookings`) is explicitly
+   schema-qualified — name resolution inside the function cannot be
+   redirected by a malicious `search_path`, on top of `SECURITY INVOKER`
+   already ruling out privilege elevation.
 
 Because there is no INSERT policy on `coach_reviews` in CM1, no client can
 actually reach this trigger yet — it is a structural safeguard already in
@@ -176,18 +180,22 @@ logic at the same time.
 under the *calling role's own* RLS visibility, not the function owner's —
 that is the whole point of choosing `SECURITY INVOKER` over `SECURITY
 DEFINER` here (see "Why arbitrary transitions are denied in CM1" above for
-the same least-privilege reasoning). A consequence follows: when a later
-phase adds the operational `coach_reviews` INSERT policy, the same role it
-grants INSERT to must also receive a narrowly scoped `coach_bookings`
-SELECT policy that permits seeing the specific completed booking being
-reviewed. Without that paired SELECT policy, the trigger cannot see the
-booking row at all and fails closed — rejecting even a genuinely completed,
-valid booking's review with "referenced booking does not exist." This is a
-design step to carry out deliberately alongside that future INSERT policy,
-not a bug to work around by switching the trigger to `SECURITY DEFINER` —
-doing so would let the trigger read `coach_bookings` rows the caller isn't
-otherwise permitted to see, which is exactly the privilege escalation
-`SECURITY INVOKER` was chosen to avoid.
+the same least-privilege reasoning). The function additionally locks
+`SET search_path = ''`, and every relation it touches is written as
+`public.coach_bookings`, never a bare, unqualified table name — so this
+guarantee holds regardless of any role's or session's `search_path`
+setting. A consequence follows: when a later phase adds the operational
+`coach_reviews` INSERT policy, the same role it grants INSERT to must also
+receive a narrowly scoped `coach_bookings` SELECT policy that permits
+seeing the specific completed booking being reviewed. Without that paired
+SELECT policy, the trigger cannot see the booking row at all and fails
+closed — rejecting even a genuinely completed, valid booking's review with
+"referenced booking does not exist." This is a design step to carry out
+deliberately alongside that future INSERT policy, not a bug to work around
+by switching the trigger to `SECURITY DEFINER` — doing so would let the
+trigger read `coach_bookings` rows the caller isn't otherwise permitted to
+see, which is exactly the privilege escalation `SECURITY INVOKER` was
+chosen to avoid.
 
 ## Moderation model
 

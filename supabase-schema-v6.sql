@@ -403,10 +403,19 @@ alter table public.coach_reviews enable row level security;
 -- the privileges of whichever role performs the INSERT/UPDATE, never with
 -- elevated owner privileges, so it can never be used to read or infer
 -- coach_bookings rows a caller would not otherwise be permitted to see.
+-- SET search_path = '' additionally locks name resolution inside this
+-- function to nothing: with an empty search_path, every unqualified
+-- relation reference would fail to resolve at all, so the function is only
+-- correct because every relation it touches (public.coach_bookings) is
+-- already explicitly schema-qualified. This closes off search_path
+-- hijacking as a vector entirely, on top of SECURITY INVOKER already
+-- preventing privilege elevation — it does not elevate the caller's
+-- privileges or bypass RLS.
 create or replace function public.fn_enforce_coach_review_completed_booking()
 returns trigger
 language plpgsql
 security invoker
+set search_path = ''
 as $fn$
 declare
   v_booking_status           text;
@@ -445,7 +454,7 @@ end;
 $fn$;
 
 comment on function public.fn_enforce_coach_review_completed_booking() is
-  'BEFORE INSERT/UPDATE trigger function for coach_reviews. SECURITY INVOKER (not SECURITY DEFINER) — runs with the calling role''s own privileges. Rejects any review not linked to a completed booking, or whose coach_profile_id/golfer_id does not match that booking.';
+  'BEFORE INSERT/UPDATE trigger function for coach_reviews. SECURITY INVOKER (not SECURITY DEFINER) — runs with the calling role''s own privileges. SET search_path = '''' — every referenced relation is explicitly public.-qualified, so this cannot be hijacked by a malicious search_path and does not elevate privileges or bypass RLS. Rejects any review not linked to a completed booking, or whose coach_profile_id/golfer_id does not match that booking.';
 
 -- Idempotent trigger creation guard (no DROP TRIGGER — matches this file's
 -- no-destructive-statement posture).
