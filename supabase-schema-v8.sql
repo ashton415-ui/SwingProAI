@@ -977,6 +977,17 @@ comment on view public.coach_rating_summary is
 -- ============================================================================
 -- SECTION 5 — DEFAULT-DENY GRANTS on the six new tables + rating summary
 -- ============================================================================
+-- This migration never relies on Supabase/PostgreSQL default privileges to
+-- keep service_role narrow. Every role — including service_role — is
+-- explicitly REVOKE ALL'd on every one of these seven objects FIRST, and
+-- only then is the one approved privilege selectively re-granted. This
+-- three-step ordering (1: revoke PUBLIC/anon/authenticated, 2: revoke
+-- service_role, 3: re-grant only what's approved) guarantees the final
+-- state is exactly what this file's own text says, never a default the
+-- underlying Postgres/Supabase installation happened to already have in
+-- place before this migration ran.
+
+-- Step 1 — revoke PUBLIC, anon, authenticated on all six tables + the view.
 revoke all on public.coach_services               from public, anon, authenticated;
 revoke all on public.coach_locations               from public, anon, authenticated;
 revoke all on public.coach_availability_rules      from public, anon, authenticated;
@@ -984,11 +995,28 @@ revoke all on public.coach_availability_exceptions from public, anon, authentica
 revoke all on public.coach_bookings                from public, anon, authenticated;
 revoke all on public.coach_reviews                 from public, anon, authenticated;
 revoke all on public.coach_rating_summary          from public, anon, authenticated;
--- No TRUNCATE/REFERENCES/TRIGGER (or any other) privilege is granted to
--- service_role on coach_services, coach_locations, coach_availability_rules,
--- coach_availability_exceptions, or coach_bookings — no audited server-side
--- operation in this migration touches them yet, so nothing beyond their
--- already-enabled, zero-policy RLS default-deny is added for them.
+
+-- Step 2 — explicitly revoke service_role on every one of the same seven
+-- objects too, before any selective re-grant. Without this, service_role
+-- would retain whatever default privilege Postgres/Supabase already
+-- granted it at project bootstrap — this line makes the final state
+-- independent of that default entirely.
+revoke all on public.coach_services               from service_role;
+revoke all on public.coach_locations               from service_role;
+revoke all on public.coach_availability_rules      from service_role;
+revoke all on public.coach_availability_exceptions from service_role;
+revoke all on public.coach_bookings                from service_role;
+revoke all on public.coach_reviews                 from service_role;
+revoke all on public.coach_rating_summary          from service_role;
+
+-- Step 3 — selectively re-grant only the one approved privilege.
+--
+-- coach_services, coach_locations, coach_availability_rules,
+-- coach_availability_exceptions, coach_bookings: NO privilege of any kind
+-- is re-granted to service_role — no audited server-side operation in
+-- this migration touches them yet, so nothing beyond their already-
+-- enabled, zero-policy RLS default-deny (plus the explicit revoke above)
+-- governs them.
 --
 -- coach_reviews is the one exception: coach_rating_summary is declared
 -- WITH (security_invoker = true) (see above), and a security_invoker view
@@ -1635,7 +1663,11 @@ where cp.is_active is true
 comment on view public.coach_directory_listing is
   'Private, server-only public-directory projection (CM2R, reconciled). Requires is_active = true, marketplace_visibility_status = published, a non-blank public_slug, and a non-blank marketplace_display_name; excludes rejected- and suspended-verification profiles. Never exposes marketplace_visibility_status, is_active, user_id, hourly_rate, business_name, certification, specialties, created_at, updated_at, or anything from public.users or public.coach_locations. business_name is never used as the directory identity — marketplace_display_name is the sole public identity contract. Revoked from PUBLIC, anon, and authenticated — granted only to service_role, and must only ever be queried from server-only application code after lib/coach-marketplace-access.ts confirms COACH_MARKETPLACE_ENABLED is true.';
 
+-- Same explicit three-step ordering as SECTION 5: revoke PUBLIC/anon/
+-- authenticated, then explicitly revoke service_role too (never rely on
+-- it having received no default privilege), then re-grant only SELECT.
 revoke all on public.coach_directory_listing from public, anon, authenticated;
+revoke all on public.coach_directory_listing from service_role;
 grant select on public.coach_directory_listing to service_role;
 
 -- ============================================================================
@@ -1810,16 +1842,20 @@ begin
         end if;
       end loop;
     end loop;
-  end loop;
 
-  if not exists (
-    select 1 from pg_class c
-    join pg_namespace n on n.oid = c.relnamespace
-    where n.nspname = 'public' and c.relname = 'coach_directory_listing'
-      and 'security_invoker=true' = any(c.reloptions)
-  ) then
-    v_problems := v_problems || 'coach_directory_listing must retain security_invoker=true';
-  end if;
+    -- Both server-only views must retain security_invoker=true — checked
+    -- per-view, scoped to the exact public schema and relation name, so a
+    -- missing or false setting on EITHER view (not just
+    -- coach_directory_listing) produces a stable postflight C failure.
+    if not exists (
+      select 1 from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relname = v_view
+        and 'security_invoker=true' = any(c.reloptions)
+    ) then
+      v_problems := v_problems || (v_view || ' must retain security_invoker=true');
+    end if;
+  end loop;
 
   if array_length(v_problems, 1) > 0 then
     raise exception 'postflight C: view final effective-access verification failed: %', array_to_string(v_problems, '; ');

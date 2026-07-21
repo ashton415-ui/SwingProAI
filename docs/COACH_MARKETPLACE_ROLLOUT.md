@@ -610,6 +610,28 @@ marketplace tables (`coach_services`, `coach_locations`,
 `coach_bookings`) remain entirely inaccessible to `service_role` in this
 slice, since no audited server-side operation touches them yet.
 
+### service_role is never left to a default privilege
+
+`v8` never depends on whatever privilege Supabase/PostgreSQL happened to
+grant `service_role` by default at project bootstrap. For every one of the
+six new marketplace tables and both new views, the sequence is always the
+same three explicit steps: (1) `REVOKE ALL` from `PUBLIC`, `anon`, and
+`authenticated`; (2) `REVOKE ALL` from `service_role` too, even though no
+prior step in this file granted it anything — this is what makes the final
+state independent of any pre-existing default; (3) selectively `GRANT` back
+only the one approved privilege, where one exists. `coach_reviews` and both
+views (`coach_rating_summary`, `coach_directory_listing`) are re-granted
+`SELECT` only — never `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`REFERENCES`/
+`TRIGGER`. The other five marketplace tables (`coach_services`,
+`coach_locations`, `coach_availability_rules`,
+`coach_availability_exceptions`, `coach_bookings`) receive no re-grant at
+all — `service_role` ends this migration with zero privilege on them, by
+explicit revoke, not by omission. Postflight B and C independently re-derive
+this exact per-object matrix from the catalogs after every grant/revoke has
+run, and Postflight C additionally re-confirms both views retain
+`security_invoker = true` — checked per-view against the exact schema and
+relation name, not only `coach_directory_listing`.
+
 ### service_role BYPASSRLS is a required, verified assumption
 
 `coach_reviews` (like every other marketplace table) has RLS enabled with

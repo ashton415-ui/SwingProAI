@@ -462,6 +462,36 @@ describe("supabase-schema-v8.sql — direct privilege reconciliation", () => {
     );
   });
 
+  it("explicitly revokes ALL from service_role on every one of the six marketplace tables (never relies on Supabase/PostgreSQL default privileges)", () => {
+    for (const table of [
+      "coach_services", "coach_locations", "coach_availability_rules",
+      "coach_availability_exceptions", "coach_bookings", "coach_reviews",
+    ]) {
+      expect(codeLower, `expected an explicit REVOKE ALL on ${table} FROM service_role`).toMatch(
+        new RegExp(`revoke all on public\\.${table}\\s+from service_role\\s*;`)
+      );
+    }
+  });
+
+  it("the six per-table service_role REVOKEs occur after the PUBLIC/anon/authenticated REVOKEs and before the selective coach_reviews SELECT re-grant", () => {
+    const lastBroadRevokeMatch = codeLower.match(/revoke all on public\.coach_rating_summary\s+from public\s*,\s*anon\s*,\s*authenticated/);
+    const firstServiceRoleRevokeMatch = codeLower.match(/revoke all on public\.coach_services\s+from service_role/);
+    const lastServiceRoleRevokeMatch = codeLower.match(/revoke all on public\.coach_rating_summary\s+from service_role/);
+    const reGrantIdx = codeLower.indexOf("grant select on public.coach_reviews to service_role");
+
+    expect(lastBroadRevokeMatch, "expected the broad PUBLIC/anon/authenticated revoke on coach_rating_summary").not.toBeNull();
+    expect(firstServiceRoleRevokeMatch, "expected an explicit service_role revoke on coach_services").not.toBeNull();
+    expect(lastServiceRoleRevokeMatch, "expected an explicit service_role revoke on coach_rating_summary").not.toBeNull();
+
+    const lastBroadRevokeIdx = lastBroadRevokeMatch!.index!;
+    const firstServiceRoleRevokeIdx = firstServiceRoleRevokeMatch!.index!;
+    const lastServiceRoleRevokeIdx = lastServiceRoleRevokeMatch!.index!;
+
+    expect(firstServiceRoleRevokeIdx).toBeGreaterThan(lastBroadRevokeIdx);
+    expect(lastServiceRoleRevokeIdx).toBeGreaterThan(firstServiceRoleRevokeIdx);
+    expect(reGrantIdx).toBeGreaterThan(lastServiceRoleRevokeIdx);
+  });
+
   it("grants service_role SELECT only on coach_reviews, so the SECURITY INVOKER coach_rating_summary view is actually queryable", () => {
     expect(codeLower).toMatch(/grant select on public\.coach_reviews to service_role\s*;/);
     // Never any write privilege on coach_reviews for service_role.
@@ -479,8 +509,11 @@ describe("supabase-schema-v8.sql — direct privilege reconciliation", () => {
     }
   });
 
-  it("grants SELECT on coach_rating_summary to service_role only (not anon/authenticated)", () => {
-    expect(codeLower).toMatch(/grant select on public\.coach_rating_summary to service_role\s*;/);
+  it("grants SELECT on coach_rating_summary to service_role only (not anon/authenticated), after an explicit service_role revoke", () => {
+    const revokeIdx = codeLower.indexOf("revoke all on public.coach_rating_summary          from service_role");
+    const grantIdx = codeLower.indexOf("grant select on public.coach_rating_summary to service_role");
+    expect(revokeIdx).toBeGreaterThanOrEqual(0);
+    expect(grantIdx).toBeGreaterThan(revokeIdx);
     expect(codeLower).not.toMatch(/grant select on public\.coach_rating_summary to (anon|authenticated)\b/);
   });
 
@@ -491,10 +524,23 @@ describe("supabase-schema-v8.sql — direct privilege reconciliation", () => {
     expect(slice).toMatch(/with\s*\(\s*security_invoker\s*=\s*true\s*\)/);
   });
 
-  it("the directory view is revoked from PUBLIC/anon/authenticated and granted SELECT only to service_role", () => {
-    expect(codeLower).toMatch(/revoke all on public\.coach_directory_listing from public\s*,\s*anon\s*,\s*authenticated/);
-    expect(codeLower).toMatch(/grant select on public\.coach_directory_listing to service_role\s*;/);
+  it("the directory view is revoked from PUBLIC/anon/authenticated AND explicitly from service_role, before being granted SELECT only to service_role", () => {
+    const broadRevokeIdx = codeLower.indexOf("revoke all on public.coach_directory_listing from public, anon, authenticated");
+    const serviceRoleRevokeIdx = codeLower.indexOf("revoke all on public.coach_directory_listing from service_role");
+    const grantIdx = codeLower.indexOf("grant select on public.coach_directory_listing to service_role");
+
+    expect(broadRevokeIdx).toBeGreaterThanOrEqual(0);
+    expect(serviceRoleRevokeIdx).toBeGreaterThan(broadRevokeIdx);
+    expect(grantIdx).toBeGreaterThan(serviceRoleRevokeIdx);
     expect(codeLower).not.toMatch(/grant select on public\.coach_directory_listing to (anon|authenticated|public)\b/);
+  });
+
+  it("no service_role write privilege (INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER) is granted on either view", () => {
+    for (const view of ["coach_rating_summary", "coach_directory_listing"]) {
+      expect(codeLower, `expected no write grant on ${view} to service_role`).not.toMatch(
+        new RegExp(`grant\\s+(insert|update|delete|truncate|references|trigger)[\\s\\S]{0,80}on\\s+public\\.${view}[\\s\\S]{0,80}to\\s+service_role`)
+      );
+    }
   });
 
   it("every coach-owned function revokes EXECUTE from PUBLIC and anon and grants only to authenticated", () => {
@@ -1107,9 +1153,15 @@ describe("supabase-schema-v8.sql — postflight C: views", () => {
     expect(slice).toMatch(/not\s+has_table_privilege\('service_role',\s*'public\.'\s*\|\|\s*v_view,\s*'select'\)/);
   });
 
-  it("requires coach_directory_listing retains security_invoker=true", () => {
+  it("requires BOTH coach_rating_summary and coach_directory_listing retain security_invoker=true, checked per-view against the exact schema and relation name (not coach_directory_listing only)", () => {
     const slice = postflightBlockSlice("c");
-    expect(slice).toMatch(/'security_invoker=true'\s*=\s*any\(c\.reloptions\)/);
+    // The reloptions check must be scoped by the loop variable v_view (so
+    // it runs once per iterated view), not hardcoded to a single view name.
+    expect(slice).toMatch(/c\.relname\s*=\s*v_view[\s\S]{0,60}'security_invoker=true'\s*=\s*any\(c\.reloptions\)/);
+    expect(slice).not.toMatch(/c\.relname\s*=\s*'coach_directory_listing'/);
+    // The failure message must be per-view too, not hardcoded to naming
+    // only coach_directory_listing.
+    expect(slice).toMatch(/v_view\s*\|\|\s*'\s*must retain security_invoker=true'/);
   });
 
   it("explicitly checks the catalog for a direct PUBLIC SELECT grant on both views (distinct from, and in addition to, the effective anon/authenticated checks)", () => {
