@@ -9,6 +9,28 @@ export type FeedbackPriority = "low" | "medium" | "high" | "critical";
 export type LessonPlanStatus = "active" | "completed" | "archived";
 export type ViewAngle = "face_on" | "down_the_line";
 
+// ─── Coach Marketplace Enums (CM1 — foundation only) ──────────────────────────
+// These types back an inactive, additive schema foundation (see
+// supabase-schema-v6.sql). No route, page, or component uses them until a
+// later phase, and every marketplace query path must be gated behind
+// lib/feature-flags.ts:isCoachMarketplaceEnabled().
+
+export type LessonDeliveryMode = "in_person" | "remote" | "hybrid";
+export type MarketplaceVisibilityStatus = "hidden" | "draft" | "published" | "suspended";
+export type CoachVerificationStatus = "unverified" | "pending" | "verified" | "rejected" | "suspended";
+export type CoachBookingStatus =
+  | "requested"
+  | "accepted"
+  | "declined"
+  | "pending_payment"
+  | "confirmed"
+  | "completed"
+  | "canceled_by_golfer"
+  | "canceled_by_coach"
+  | "no_show"
+  | "refunded";
+export type CoachReviewModerationStatus = "pending" | "approved" | "rejected" | "hidden";
+
 // ─── Users ───────────────────────────────────────────────────────────────────
 
 export interface User {
@@ -36,10 +58,28 @@ export interface CoachProfile {
   bio: string | null;
   specialties: string[] | null;
   certification: string | null;
+  /**
+   * Legacy/default informational rate only. Marketplace transaction pricing
+   * lives exclusively on CoachService.price_amount_minor (integer minor
+   * units) — hourly_rate is never the source of truth for a booking's price.
+   */
   hourly_rate: number | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  // ── Coach Marketplace fields (CM1 — foundation; see supabase-schema-v6.sql) ──
+  public_slug: string | null;
+  marketplace_headline: string | null;
+  profile_photo_url: string | null;
+  years_coaching: number | null;
+  lesson_delivery_modes: LessonDeliveryMode[] | null;
+  public_city: string | null;
+  public_region: string | null;
+  timezone: string | null;
+  marketplace_visibility_status: MarketplaceVisibilityStatus;
+  verification_status: CoachVerificationStatus;
+  minimum_booking_notice_hours: number | null;
+  cancellation_policy_summary: string | null;
   // joined
   user?: User;
 }
@@ -186,4 +226,151 @@ export interface SwingTelemetryPayload {
     headDropFactor: number;
     tempoRatio: number;
   };
+}
+
+// ─── Coach Marketplace (CM1 — foundation) ──────────────────────────────────────
+//
+// Backs the additive, unapplied schema in supabase-schema-v6.sql. Every
+// table above is RLS-enabled with zero policies (default-deny) and none of
+// these types are consumed by any route, page, or component yet. Do not
+// wire these into UI or data-fetching code without first gating the call
+// site behind lib/feature-flags.ts:isCoachMarketplaceEnabled() and adding
+// the operational RLS policies a later phase introduces.
+//
+// No Stripe Connect types are defined here — deferred to CM6.
+
+export interface CoachService {
+  id: string;
+  coach_profile_id: string;
+  title: string;
+  description: string | null;
+  delivery_mode: LessonDeliveryMode;
+  duration_minutes: number;
+  /** Integer minor currency units (e.g. USD cents). Never a decimal/float dollar amount. */
+  price_amount_minor: number;
+  /** ISO 4217 alphabetic code, exactly three uppercase letters (e.g. "USD"). */
+  currency_code: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  // joined
+  coach_profile?: CoachProfile;
+}
+
+export interface CoachLocation {
+  id: string;
+  coach_profile_id: string;
+  /** Internal-only label. Must never be rendered in any public UI. */
+  private_location_name: string | null;
+  public_location_label: string | null;
+  city: string | null;
+  region: string | null;
+  /** Prefix only (e.g. "802") — never a full postal code tied to an exact address. */
+  postal_code_prefix: string | null;
+  /** Constrained to [-90, 90] at the database layer. Never rendered in public UI in CM1. */
+  latitude: number | null;
+  /** Constrained to [-180, 180] at the database layer. Never rendered in public UI in CM1. */
+  longitude: number | null;
+  service_radius_miles: number | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  // joined
+  coach_profile?: CoachProfile;
+}
+
+export interface CoachAvailabilityRule {
+  id: string;
+  coach_profile_id: string;
+  /** 0 = Sunday .. 6 = Saturday. */
+  day_of_week: number;
+  local_start_time: string;
+  local_end_time: string;
+  timezone: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  // joined
+  coach_profile?: CoachProfile;
+}
+
+export interface CoachAvailabilityException {
+  id: string;
+  coach_profile_id: string;
+  starts_at: string;
+  ends_at: string;
+  is_available_override: boolean;
+  /** Internal-only note. Must never be part of any public view or UI. */
+  internal_note: string | null;
+  created_at: string;
+  updated_at: string;
+  // joined
+  coach_profile?: CoachProfile;
+}
+
+export interface CoachBooking {
+  id: string;
+  golfer_id: string;
+  coach_profile_id: string;
+  service_id: string;
+  location_id: string | null;
+  scheduled_start_at: string;
+  scheduled_end_at: string;
+  timezone_snapshot: string;
+  service_title_snapshot: string;
+  duration_minutes_snapshot: number;
+  /** Integer minor currency units, frozen at booking time. Never a decimal/float dollar amount. */
+  gross_amount_minor_snapshot: number;
+  currency_code_snapshot: string;
+  delivery_mode_snapshot: LessonDeliveryMode;
+  meeting_instructions: string | null;
+  status: CoachBookingStatus;
+  canceled_at: string | null;
+  cancellation_reason_category: string | null;
+  created_at: string;
+  updated_at: string;
+  // joined
+  golfer?: User;
+  coach_profile?: CoachProfile;
+  service?: CoachService;
+  location?: CoachLocation;
+}
+
+export interface CoachReview {
+  id: string;
+  booking_id: string;
+  coach_profile_id: string;
+  golfer_id: string;
+  overall_rating: number;
+  communication_rating: number | null;
+  instruction_rating: number | null;
+  professionalism_rating: number | null;
+  value_rating: number | null;
+  review_body: string | null;
+  moderation_status: CoachReviewModerationStatus;
+  coach_response: string | null;
+  coach_responded_at: string | null;
+  created_at: string;
+  updated_at: string;
+  // joined
+  booking?: CoachBooking;
+  coach_profile?: CoachProfile;
+  golfer?: User;
+}
+
+/**
+ * Approved-review-only rating read model (public.coach_rating_summary view).
+ * Exposes ONLY these aggregate fields — never review_body, golfer identity,
+ * coach location, coordinates, or internal notes. There is no
+ * client-writable rating aggregate anywhere in this schema; this is always
+ * derived, never stored on CoachProfile.
+ */
+export interface CoachRatingSummary {
+  coach_profile_id: string;
+  approved_review_count: number;
+  overall_rating_average: number | null;
+  communication_rating_average: number | null;
+  instruction_rating_average: number | null;
+  professionalism_rating_average: number | null;
+  value_rating_average: number | null;
 }
