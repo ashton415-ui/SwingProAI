@@ -2,22 +2,31 @@
 
 ## Status: source-only, unapplied
 
-This document describes `supabase-security-sec1a.sql`, a source-only,
-unapplied SQL contract. **It has not been run against any Supabase project —
-staging or production.** No live policy, grant, table, bucket, row, or
-configuration has been changed by this work. Separate, explicit approval is
-required for each of the following before this contract moves any further:
+This document describes `supabase-security-sec1a.sql`, a source-only SQL
+contract. **It has not been run against any Supabase project — staging or
+production — and SEC1A remains fully unapplied.** No live policy, grant,
+table, bucket, row, or configuration has been changed by this work.
 
-1. **Commit / push** — committing this branch and pushing it to the remote.
-2. **Staging application** — running `supabase-security-sec1a.sql` against a
+Commit/push was later authorized separately and completed at commit
+`81e54fc55fea45ca5f1ce7eb2c936ff3e770b688`. Draft PR #4 was subsequently
+created for source review. **Neither action executed the SQL or changed any
+database or storage state** — both are ordinary source-control steps, not
+database steps, and neither one authorizes what follows below.
+
+The remaining gates, each requiring its own separate, explicit authorization:
+
+1. **Staging application** — running `supabase-security-sec1a.sql` against a
    staging Supabase project and executing the staging verification matrix
-   below.
-3. **Production application** — running the migration against the production
-   project (`atlmnqispyzhsahahpjy`, "SwingProAI").
+   below. Not authorized; not performed.
+2. **Production application** — running the migration against the production
+   project (`atlmnqispyzhsahahpjy`, "SwingProAI"). Not authorized; not
+   performed.
+3. **Merge / readiness actions** — marking PR #4 ready for review, merging
+   it, or any deployment action. Separately authorized when appropriate; not
+   granted by this document.
 
-None of these three approvals has been granted as part of this work. This
-document exists to make the reasoning, scope, and rollback posture reviewable
-before any of them are requested.
+This document exists to make the reasoning, scope, and rollback posture
+reviewable before any of the remaining gates are requested.
 
 ## Purpose
 
@@ -222,6 +231,8 @@ would require its own separate, explicit emergency authorization.
 
 | Gate | Status |
 |---|---|
-| Commit / push this branch | **Not authorized as part of this work** |
+| Commit / push this branch | **Completed** — commit `81e54fc55fea45ca5f1ce7eb2c936ff3e770b688` |
+| Draft PR #4 creation | **Completed** — open for source review only |
+| Mark PR #4 ready for review / merge | **Not authorized as part of this work** |
 | Apply to staging | **Not authorized as part of this work** |
 | Apply to production | **Not authorized as part of this work** |
