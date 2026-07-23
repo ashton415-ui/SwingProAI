@@ -219,11 +219,20 @@ file's `CREATE TABLE`/`CREATE POLICY`/etc. statements against production
 would fail immediately at this file's own clean-environment preflight
 (`RR1-PRE-1`), by design.
 
+## Source-control status
+
+The SEC1A-RR1 artifacts have been committed and pushed to
+`fix/sec1a-rr1-migration-replay-baseline`, and PR #5 has been opened against
+`main`. PR #5 remains open and unmerged. Creating the commit, pushing the
+branch, and opening the pull request did not apply the baseline, alter the
+production migration ledger, create a Supabase branch, or execute SEC1A.
+
 ## Remaining separately-authorized gates
 
-Each of the following requires its own separate, explicit authorization and
-none has occurred as part of SEC1A-RR1:
+Each of the following still requires its own separate, explicit
+authorization and has not occurred as part of SEC1A-RR1:
 
+- **Merge of PR #5 into `main`.**
 - **Ledger realignment** against production tracking metadata.
 - **Temporary staging branch creation** — creating a Supabase branch is a
   billed action; the branch must be deleted promptly after use to avoid
@@ -233,7 +242,6 @@ none has occurred as part of SEC1A-RR1:
   the staging verification matrix already documented in
   `docs/SECURITY_HARDENING_ROLLOUT.md`.
 - **SEC1A production application.**
-- **Commit, push, and PR creation** for the SEC1A-RR1 artifacts themselves.
 
 ## Unresolved: storage.objects policy-DDL authority
 
