@@ -272,3 +272,128 @@ describe("VirtualBag — touch-accessible row actions", () => {
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Trash2 icon on the removal button`).toContain("<Trash2 className=");
   });
 });
+
+// ============================================================================
+// AnalyzePage — responsive height and breakpoint repair (RW2-S3)
+// ============================================================================
+
+// Independently defined — not imported from the page — so a regression in
+// AnalyzePage's source is caught here rather than only self-confirmed
+// against its own layout.
+const ANALYZE_PAGE_FILE = "app/(dashboard)/analyze/page.tsx";
+
+/**
+ * Locates the three top-level layout class strings in AnalyzePage's render
+ * tree — the root split container, the LEFT video-workspace panel, and the
+ * RIGHT results-deck panel — by walking a chain of unique source markers
+ * (the "Render" section comment, then the LEFT/RIGHT panel comments) rather
+ * than searching the whole file for class tokens in isolation. This keeps
+ * every AnalyzePage layout assertion below scoped to the actual three
+ * panels under test, and immune to unrelated nested `overflow-hidden`/
+ * `<div className="...">` usages elsewhere in the file (loading overlays,
+ * modals, drill cards, etc.).
+ */
+function getAnalyzePageLayoutClasses(source: string): { root: string; left: string; right: string } {
+  const divPattern = /<div className="([^"]*)"/;
+
+  const renderMarker = "─── Render";
+  const renderIdx = source.indexOf(renderMarker);
+  expect(renderIdx, `${ANALYZE_PAGE_FILE}: could not locate the "${renderMarker}" marker`).toBeGreaterThanOrEqual(0);
+
+  const returnMarker = "return (";
+  const returnIdx = source.indexOf(returnMarker, renderIdx);
+  expect(returnIdx, `${ANALYZE_PAGE_FILE}: could not locate "${returnMarker}" after the render marker`).toBeGreaterThan(renderIdx);
+
+  const rootMatch = source.slice(returnIdx).match(divPattern);
+  expect(rootMatch, `${ANALYZE_PAGE_FILE}: could not find the root <div className="..."> after "${returnMarker}"`).not.toBeNull();
+  const rootIdx = returnIdx + rootMatch!.index!;
+
+  const leftMarker = "LEFT: Video workspace";
+  const leftMarkerIdx = source.indexOf(leftMarker, rootIdx);
+  expect(leftMarkerIdx, `${ANALYZE_PAGE_FILE}: could not locate the "${leftMarker}" marker after the root tag`).toBeGreaterThan(rootIdx);
+
+  const leftMatch = source.slice(leftMarkerIdx).match(divPattern);
+  expect(leftMatch, `${ANALYZE_PAGE_FILE}: could not find a <div className="..."> after the "${leftMarker}" marker`).not.toBeNull();
+  const leftIdx = leftMarkerIdx + leftMatch!.index!;
+
+  const rightMarker = "RIGHT: Results deck";
+  const rightMarkerIdx = source.indexOf(rightMarker, leftIdx);
+  expect(rightMarkerIdx, `${ANALYZE_PAGE_FILE}: could not locate the "${rightMarker}" marker after the left workspace tag`).toBeGreaterThan(leftIdx);
+
+  const rightMatch = source.slice(rightMarkerIdx).match(divPattern);
+  expect(rightMatch, `${ANALYZE_PAGE_FILE}: could not find a <div className="..."> after the "${rightMarker}" marker`).not.toBeNull();
+  const rightIdx = rightMarkerIdx + rightMatch!.index!;
+
+  // Order sanity — each marker/tag must appear strictly after the previous
+  // one, proving the three panels were located in true document order.
+  expect(rootIdx, `${ANALYZE_PAGE_FILE}: root tag out of expected order`).toBeLessThan(leftMarkerIdx);
+  expect(leftIdx, `${ANALYZE_PAGE_FILE}: left workspace tag out of expected order`).toBeLessThan(rightMarkerIdx);
+
+  return { root: rootMatch![1], left: leftMatch![1], right: rightMatch![1] };
+}
+
+describe("AnalyzePage — responsive height and breakpoint repair", () => {
+  it("Analyze page source file exists", () => {
+    expect(existsSync(path.join(repoRoot, ANALYZE_PAGE_FILE)), `missing file: ${ANALYZE_PAGE_FILE}`).toBe(true);
+  });
+
+  it("the layout helper uniquely locates the root, left workspace, and right results-deck class strings in source order", () => {
+    const { root, left, right } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    expect(root, `${ANALYZE_PAGE_FILE}: root class unexpectedly empty`).toBeTruthy();
+    expect(left, `${ANALYZE_PAGE_FILE}: left workspace class unexpectedly empty`).toBeTruthy();
+    expect(right, `${ANALYZE_PAGE_FILE}: right results-deck class unexpectedly empty`).toBeTruthy();
+  });
+
+  it("root retains the base stacked flex structure", () => {
+    const { root } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    const tokens = root.split(/\s+/).filter(Boolean);
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root missing "flex"`).toContain("flex");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root missing "flex-col"`).toContain("flex-col");
+  });
+
+  it("root uses the desktop row split only at lg", () => {
+    const { root } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    const tokens = root.split(/\s+/).filter(Boolean);
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root missing "lg:flex-row"`).toContain("lg:flex-row");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root unexpectedly contains "md:flex-row"`).not.toContain("md:flex-row");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root unexpectedly contains an unprefixed "flex-row"`).not.toContain("flex-row");
+  });
+
+  it("root no longer claims an unconditional full viewport height", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    const { root } = getAnalyzePageLayoutClasses(source);
+    const tokens = root.split(/\s+/).filter(Boolean);
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root missing "lg:h-screen"`).toContain("lg:h-screen");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root unexpectedly contains an unprefixed "h-screen"`).not.toContain("h-screen");
+    expect(root, `${ANALYZE_PAGE_FILE}: root unexpectedly still contains "h-[calc(100vh-0px)]"`).not.toContain("h-[calc(100vh-0px)]");
+    expect(source, `${ANALYZE_PAGE_FILE}: source unexpectedly still contains "h-[calc(100vh-0px)]" anywhere`).not.toContain("h-[calc(100vh-0px)]");
+  });
+
+  it("root clips overflow only at desktop, without rejecting legitimate nested overflow-hidden usages", () => {
+    const { root } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    const tokens = root.split(/\s+/).filter(Boolean);
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root missing "lg:overflow-hidden"`).toContain("lg:overflow-hidden");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: root unexpectedly contains an unprefixed "overflow-hidden"`).not.toContain("overflow-hidden");
+  });
+
+  it("left video workspace follows the shell's lg breakpoint for its fixed width", () => {
+    const { left } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    const tokens = left.split(/\s+/).filter(Boolean);
+    expect(tokens, `${ANALYZE_PAGE_FILE}: left workspace missing "w-full"`).toContain("w-full");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: left workspace missing exact "lg:w-[600px]"`).toContain("lg:w-[600px]");
+    expect(tokens, `${ANALYZE_PAGE_FILE}: left workspace unexpectedly contains "md:w-[600px]"`).not.toContain("md:w-[600px]");
+  });
+
+  it("left video workspace preserves its existing structural tokens", () => {
+    const { left } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    const tokens = left.split(/\s+/).filter(Boolean);
+    for (const required of ["flex", "flex-col", "border-r", "border-white/10", "bg-black", "flex-shrink-0", "relative"]) {
+      expect(tokens, `${ANALYZE_PAGE_FILE}: left workspace missing "${required}" — found "${left}"`).toContain(required);
+    }
+  });
+
+  it("right results deck remains unchanged", () => {
+    const { right } = getAnalyzePageLayoutClasses(readSource(ANALYZE_PAGE_FILE));
+    expect(right, `${ANALYZE_PAGE_FILE}: right results-deck class changed unexpectedly`).toBe("flex-1 bg-[#12140F] overflow-y-auto");
+  });
+});

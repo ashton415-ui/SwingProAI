@@ -335,10 +335,10 @@ export default function AnalyzePage() {
 
   // ─── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="h-[calc(100vh-0px)] flex flex-col md:flex-row overflow-hidden">
+    <div className="flex flex-col lg:h-screen lg:flex-row lg:overflow-hidden">
 
       {/* ── LEFT: Video workspace ── */}
-      <div className="w-full md:w-[600px] flex flex-col border-r border-white/10 bg-black flex-shrink-0 relative">
+      <div className="w-full lg:w-[600px] flex flex-col border-r border-white/10 bg-black flex-shrink-0 relative">
 
         {!previewUrl ? (
           <label className="flex-1 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors group p-8 text-center">
