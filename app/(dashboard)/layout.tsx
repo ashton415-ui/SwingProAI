@@ -1,10 +1,14 @@
 import { createClient, getServerSession } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { LogOut, CreditCard, Zap } from "lucide-react";
 import {
-  LogOut, LayoutDashboard, TrendingUp, CreditCard, Target, Zap,
-  Users, BookOpen, Video, Shield, UserCheck, Briefcase, Flag, Crosshair, ClipboardCheck,
-} from "lucide-react";
+  getSectionsForRole,
+  shouldShowUpgradeCallout,
+  UPGRADE_CALLOUT,
+  SIGN_OUT,
+} from "@/components/navigation/dashboard-navigation";
+import MobileDashboardNavigation from "@/components/navigation/MobileDashboardNavigation";
 
 export const dynamic = "force-dynamic";
 
@@ -35,11 +39,15 @@ export default async function DashboardLayout({ children }: { children: React.Re
     isActive ? "bg-golf-green/10 border-golf-green/30 text-golf-green" :
     "bg-white/5 border-white/10 text-gray-500";
 
+  const roleBadgeLabel = role === "admin" ? "Admin" : role === "coach" ? tierLabel[tier] : tierLabel[tier];
   const displayName = profile?.display_name ?? profile?.full_name ?? user.email;
+  const showUpgradeCallout = shouldShowUpgradeCallout(role, isActive);
+  const sections = getSectionsForRole(role);
 
   return (
     <div className="flex min-h-screen bg-golf-dark">
-      <aside className="w-64 bg-golf-header border-r border-white/5 flex flex-col fixed h-full overflow-y-auto">
+      {/* Desktop sidebar — visible only at lg (>=1024px) and wider */}
+      <aside className="hidden lg:flex w-64 bg-golf-header border-r border-white/5 flex-col fixed h-full overflow-y-auto">
         {/* Logo */}
         <div className="px-6 py-7 border-b border-white/5">
           <Link href="/" className="flex items-center gap-3">
@@ -56,67 +64,39 @@ export default async function DashboardLayout({ children }: { children: React.Re
               {displayName}
             </p>
             <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border shrink-0 ${roleBadgeColor}`}>
-              {role === "admin" ? "Admin" : role === "coach" ? tierLabel[tier] : tierLabel[tier]}
+              {roleBadgeLabel}
             </span>
           </div>
         </div>
 
-        {/* Nav — Golfer */}
-        {(role === "golfer" || role === "admin") && (
-          <nav className="p-4 space-y-1 border-b border-white/5">
-            {role === "admin" && (
-              <p className="text-[9px] font-black uppercase tracking-widest text-gray-700 px-3 pb-1">Golfer</p>
+        {/* Nav sections — golfer / coach / admin, shared model */}
+        {sections.map((section) => (
+          <nav key={section.id} className="p-4 space-y-1 border-b border-white/5">
+            {(section.id !== "golfer" || role === "admin") && (
+              <p className="text-[9px] font-black uppercase tracking-widest text-gray-700 px-3 pb-1">{section.title}</p>
             )}
-            <NavLink href="/dashboard" icon={<LayoutDashboard size={16} />} label="Progress Hub" />
-            <NavLink href="/telemetry" icon={<TrendingUp size={16} />} label="Telemetry Logs" />
-            <NavLink href="/analyze" icon={<Target size={16} />} label="Analyze Swing" />
-            <NavLink href="/bag" icon={<Briefcase size={16} />} label="My Bag" />
-            <NavLink href="/goals" icon={<Flag size={16} />} label="My Goals" />
-            <NavLink href="/range" icon={<Crosshair size={16} />} label="Practice Range" />
-            <NavLink href="/drills" icon={<ClipboardCheck size={16} />} label="Drill Hub" />
-            <NavLink href="/lessons" icon={<BookOpen size={16} />} label="My Lessons" />
+            {section.items.map((item) => (
+              <NavLink key={item.href} href={item.href} icon={<item.icon size={16} />} label={item.label} />
+            ))}
           </nav>
-        )}
-
-        {/* Nav — Coach */}
-        {(role === "coach" || role === "admin") && (
-          <nav className="p-4 space-y-1 border-b border-white/5">
-            <p className="text-[9px] font-black uppercase tracking-widest text-gray-700 px-3 pb-1">Coach</p>
-            <NavLink href="/coach" icon={<UserCheck size={16} />} label="Coach Hub" />
-            <NavLink href="/coach/golfers" icon={<Users size={16} />} label="My Golfers" />
-            <NavLink href="/coach/reviews" icon={<Video size={16} />} label="Swing Reviews" />
-            <NavLink href="/coach/lesson-plans" icon={<BookOpen size={16} />} label="Lesson Plans" />
-          </nav>
-        )}
-
-        {/* Nav — Admin */}
-        {role === "admin" && (
-          <nav className="p-4 space-y-1 border-b border-white/5">
-            <p className="text-[9px] font-black uppercase tracking-widest text-gray-700 px-3 pb-1">Admin</p>
-            <NavLink href="/admin" icon={<Shield size={16} />} label="Command Center" />
-            <NavLink href="/admin/users" icon={<Users size={16} />} label="All Users" />
-            <NavLink href="/admin/coaches" icon={<UserCheck size={16} />} label="Coaches" />
-            <NavLink href="/admin/swings" icon={<Video size={16} />} label="All Swings" />
-            <NavLink href="/upgrade" icon={<CreditCard size={16} />} label="View Plans" />
-          </nav>
-        )}
+        ))}
 
         {/* Upgrade — golfer only, no active sub */}
-        {role === "golfer" && !isActive && (
+        {showUpgradeCallout && (
           <div className="px-4 pt-3">
-            <Link href="/upgrade"
+            <Link href={UPGRADE_CALLOUT.href}
               className="flex items-center gap-3 px-3 py-2.5 rounded-2xl text-golf-green font-black uppercase tracking-widest text-[10px] bg-golf-green/10 border border-golf-green/20 hover:bg-golf-green/15 transition-colors">
-              <CreditCard size={14} />Upgrade Plan
+              <CreditCard size={14} />{UPGRADE_CALLOUT.label}
             </Link>
           </div>
         )}
 
         {/* Sign out */}
         <div className="p-4 border-t border-white/5 mt-auto">
-          <form action="/api/auth/signout" method="POST">
+          <form action={SIGN_OUT.href} method="POST">
             <button type="submit"
               className="flex items-center gap-3 px-3 py-2.5 w-full rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
-              <LogOut size={14} />End Session
+              <LogOut size={14} />{SIGN_OUT.label}
             </button>
           </form>
           <div className="flex items-center gap-2 px-3 mt-4">
@@ -126,7 +106,20 @@ export default async function DashboardLayout({ children }: { children: React.Re
         </div>
       </aside>
 
-      <main className="flex-1 ml-64 min-h-screen">{children}</main>
+      {/* Phone + tablet navigation — hides itself at lg (>=1024px) */}
+      <MobileDashboardNavigation
+        role={role}
+        displayName={displayName}
+        roleLabel={roleBadgeLabel}
+        roleBadgeClassName={roleBadgeColor}
+        showUpgradeCallout={showUpgradeCallout}
+      />
+
+      <main
+        className="flex-1 min-h-screen pt-[calc(3.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:ml-16 md:pb-[env(safe-area-inset-bottom)] lg:ml-64 lg:pt-0 lg:pb-0"
+      >
+        {children}
+      </main>
     </div>
   );
 }
