@@ -758,7 +758,7 @@ export default async function TelemetryPage() {
     <div className="max-w-4xl mx-auto px-6 py-10">
 
       {/* ── Portal header ──────────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between mb-8">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
         <div>
           <div className="flex items-center gap-2 mb-2">
             <Zap size={12} className="text-golf-green" fill="currentColor" />
