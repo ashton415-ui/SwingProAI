@@ -61,38 +61,40 @@ export default async function CoachGolfersPage() {
             No active golfers yet
           </div>
         ) : (
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
-                <th className="px-6 py-4">Golfer</th>
-                <th className="px-6 py-4">Handicap</th>
-                <th className="px-6 py-4">Plan</th>
-                <th className="px-6 py-4"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {active.map((r) => (
-                <tr key={r.id} className="group hover:bg-white/5 transition-colors">
-                  <td className="px-6 py-4">
-                    <p className="font-bold text-white text-sm">{r.golfer?.full_name ?? "—"}</p>
-                    <p className="text-[10px] text-gray-500">{r.golfer?.email}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className="font-mono text-white">{r.golfer?.handicap_index ?? "—"}</span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className="text-[9px] font-black uppercase text-gray-500">{r.golfer?.subscription_tier}</span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <Link href={`/coach/golfers/${r.golfer_id}`}
-                      className="text-gray-600 group-hover:text-golf-green transition-colors">
-                      <ChevronRight size={16} />
-                    </Link>
-                  </td>
+          <div className="overflow-x-auto w-full">
+            <table className="w-full text-left min-w-[640px]">
+              <thead>
+                <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
+                  <th className="px-6 py-4">Golfer</th>
+                  <th className="px-6 py-4">Handicap</th>
+                  <th className="px-6 py-4">Plan</th>
+                  <th className="px-6 py-4"></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {active.map((r) => (
+                  <tr key={r.id} className="group hover:bg-white/5 transition-colors">
+                    <td className="px-6 py-4">
+                      <p className="font-bold text-white text-sm">{r.golfer?.full_name ?? "—"}</p>
+                      <p className="text-[10px] text-gray-500">{r.golfer?.email}</p>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="font-mono text-white">{r.golfer?.handicap_index ?? "—"}</span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-[9px] font-black uppercase text-gray-500">{r.golfer?.subscription_tier}</span>
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <Link href={`/coach/golfers/${r.golfer_id}`}
+                        className="text-gray-600 group-hover:text-golf-green transition-colors">
+                        <ChevronRight size={16} />
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

@@ -26,48 +26,50 @@ export default async function AdminSwingsPage() {
         {!videos?.length ? (
           <div className="py-20 text-center text-gray-700 font-mono text-[10px] uppercase tracking-widest">No videos yet</div>
         ) : (
-          <table className="w-full text-left">
-            <thead>
-              <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
-                <th className="px-6 py-4">File</th>
-                <th className="px-6 py-4">Club</th>
-                <th className="px-6 py-4">Size</th>
-                <th className="px-6 py-4">Status</th>
-                <th className="px-6 py-4">Date</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {videos.map((v) => (
-                <tr key={v.id} className="hover:bg-white/5 transition-colors">
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-2">
-                      <Video size={14} className="text-gray-600 shrink-0" />
-                      <span className="text-sm text-gray-300 truncate max-w-[200px]">{v.original_filename ?? "—"}</span>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4"><span className="text-xs text-gray-400 capitalize">{v.club ?? "—"}</span></td>
-                  <td className="px-6 py-4">
-                    <span className="text-xs font-mono text-gray-500">
-                      {v.file_size ? `${(v.file_size / (1024 * 1024)).toFixed(1)} MB` : "—"}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full border ${
-                      v.status === "complete" ? "text-golf-green bg-golf-green/10 border-golf-green/20" :
-                      v.status === "uploaded" ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
-                      "text-gray-600 bg-white/5 border-white/10"
-                    }`}>{v.status}</span>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex items-center gap-1.5 text-xs font-mono text-gray-600">
-                      <Calendar size={11} />
-                      {new Date(v.created_at).toLocaleDateString()}
-                    </div>
-                  </td>
+          <div className="overflow-x-auto w-full">
+            <table className="w-full text-left min-w-[760px]">
+              <thead>
+                <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
+                  <th className="px-6 py-4">File</th>
+                  <th className="px-6 py-4">Club</th>
+                  <th className="px-6 py-4">Size</th>
+                  <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Date</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {videos.map((v) => (
+                  <tr key={v.id} className="hover:bg-white/5 transition-colors">
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2">
+                        <Video size={14} className="text-gray-600 shrink-0" />
+                        <span className="text-sm text-gray-300 truncate max-w-[200px]">{v.original_filename ?? "—"}</span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4"><span className="text-xs text-gray-400 capitalize">{v.club ?? "—"}</span></td>
+                    <td className="px-6 py-4">
+                      <span className="text-xs font-mono text-gray-500">
+                        {v.file_size ? `${(v.file_size / (1024 * 1024)).toFixed(1)} MB` : "—"}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                        v.status === "complete" ? "text-golf-green bg-golf-green/10 border-golf-green/20" :
+                        v.status === "uploaded" ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
+                        "text-gray-600 bg-white/5 border-white/10"
+                      }`}>{v.status}</span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-1.5 text-xs font-mono text-gray-600">
+                        <Calendar size={11} />
+                        {new Date(v.created_at).toLocaleDateString()}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
