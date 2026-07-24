@@ -627,3 +627,148 @@ describe("Goals / Add Club forms — no zoom restriction or overflow workaround 
     }
   });
 });
+
+// ============================================================================
+// VirtualBag — ClubRow action button minimum touch targets (RW2-S6)
+// ============================================================================
+
+// Reuses VIRTUAL_BAG_FILE and isolateClubRowSource, already defined above in
+// the RW2-S2 section — no duplicate file constant or isolation helper is
+// introduced for the same component.
+
+/**
+ * Within an already-isolated ClubRow source, locates the unique <button>
+ * opening tag whose onClick handler is the given callback marker (e.g.
+ * "onClick={onFitting}"), and returns the complete opening tag text (from
+ * "<button" through its closing ">"). Scoped to the actual interactive
+ * <button> element — not its parent action-container <div> — by walking
+ * backward from the unique callback marker to the nearest preceding
+ * "<button", then forward to the tag's closing ">".
+ *
+ * None of the attribute values on these buttons (title, aria-label,
+ * className) contain a literal ">" character, so the first ">" after the
+ * callback marker is guaranteed to be the opening tag's own closer.
+ */
+function extractButtonOpeningTag(clubRowSource: string, callbackMarker: string, fileLabel: string): string {
+  const markerOccurrences = clubRowSource.split(callbackMarker).length - 1;
+  expect(markerOccurrences, `${fileLabel}: expected exactly one "${callbackMarker}" marker, found ${markerOccurrences}`).toBe(1);
+
+  const markerIdx = clubRowSource.indexOf(callbackMarker);
+  const tagStart = clubRowSource.lastIndexOf("<button", markerIdx);
+  expect(tagStart, `${fileLabel}: could not find a preceding "<button" for "${callbackMarker}"`).toBeGreaterThanOrEqual(0);
+
+  const tagEnd = clubRowSource.indexOf(">", markerIdx);
+  expect(tagEnd, `${fileLabel}: could not find the closing ">" of the <button> opening tag for "${callbackMarker}"`).toBeGreaterThan(tagStart);
+
+  return clubRowSource.slice(tagStart, tagEnd + 1);
+}
+
+/** Extracts the className value from an already-isolated <button> opening tag. */
+function extractButtonClassName(buttonOpeningTag: string, fileLabel: string): string {
+  const match = buttonOpeningTag.match(/className="([^"]*)"/);
+  expect(match, `${fileLabel}: could not extract className from the <button> opening tag`).not.toBeNull();
+  return match![1];
+}
+
+describe("VirtualBag — ClubRow action button minimum touch targets", () => {
+  it("the Fit button opening tag is uniquely located via its onFitting callback", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
+    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button opening tag unexpectedly empty`).toBeTruthy();
+  });
+
+  it("the Remove button opening tag is uniquely located via its onRemove callback", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onRemove}", VIRTUAL_BAG_FILE);
+    expect(tag, `${VIRTUAL_BAG_FILE}: Remove button opening tag unexpectedly empty`).toBeTruthy();
+  });
+
+  it("the Fit button carries min-h-11 and min-w-11 directly, alongside its full existing token set", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
+    const cls = extractButtonClassName(tag, VIRTUAL_BAG_FILE);
+    const tokens = cls.split(/\s+/).filter(Boolean);
+    for (const required of [
+      "flex", "min-h-11", "min-w-11", "items-center", "justify-center",
+      "gap-1", "px-2", "py-1", "bg-indigo-600", "hover:bg-indigo-500",
+      "text-white", "text-xs", "font-medium", "rounded-lg", "transition-colors",
+    ]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: Fit button missing "${required}" — found "${cls}"`).toContain(required);
+    }
+  });
+
+  it("the Remove button carries min-h-11 and min-w-11 directly, alongside its full existing token set", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onRemove}", VIRTUAL_BAG_FILE);
+    const cls = extractButtonClassName(tag, VIRTUAL_BAG_FILE);
+    const tokens = cls.split(/\s+/).filter(Boolean);
+    for (const required of [
+      "inline-flex", "min-h-11", "min-w-11", "items-center", "justify-center",
+      "p-1.5", "text-slate-600", "hover:text-red-400", "transition-colors",
+      "rounded-lg", "hover:bg-red-400/10",
+    ]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: Remove button missing "${required}" — found "${cls}"`).toContain(required);
+    }
+  });
+
+  it("the Fit button retains its exact title, aria-label, Zap icon size, and hidden sm:inline label", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
+    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button title changed`).toContain('title="AI shaft fitting"');
+    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button aria-label changed`).toContain("aria-label={`Get AI shaft fitting for ${clubDisplayName(club)}`}");
+
+    const tagEndIdx = clubRow.indexOf(tag) + tag.length;
+    const body = clubRow.slice(tagEndIdx, tagEndIdx + 200);
+    expect(body, `${VIRTUAL_BAG_FILE}: Zap icon size changed`).toContain('<Zap className="w-3 h-3" />');
+    expect(body, `${VIRTUAL_BAG_FILE}: Fit label lost "hidden sm:inline"`).toContain('<span className="hidden sm:inline">Fit</span>');
+  });
+
+  it("the Remove button retains its exact title, aria-label, and Trash2 icon size", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onRemove}", VIRTUAL_BAG_FILE);
+    expect(tag, `${VIRTUAL_BAG_FILE}: Remove button title changed`).toContain('title="Remove from bag"');
+    expect(tag, `${VIRTUAL_BAG_FILE}: Remove button aria-label changed`).toContain("aria-label={`Remove ${clubDisplayName(club)} from bag`}");
+
+    const tagEndIdx = clubRow.indexOf(tag) + tag.length;
+    const body = clubRow.slice(tagEndIdx, tagEndIdx + 100);
+    expect(body, `${VIRTUAL_BAG_FILE}: Trash2 icon size changed`).toContain('<Trash2 className="w-3.5 h-3.5" />');
+  });
+
+  it("neither button opening tag introduces hidden, invisible, opacity-0, or hover-gated visibility", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const fitTag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
+    const removeTag = extractButtonOpeningTag(clubRow, "onClick={onRemove}", VIRTUAL_BAG_FILE);
+    for (const tag of [fitTag, removeTag]) {
+      for (const forbidden of ["hidden", "invisible", "opacity-0", "group-hover:"]) {
+        expect(tag, `${VIRTUAL_BAG_FILE}: unexpected "${forbidden}" on a button opening tag — found "${tag}"`).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it("the action wrapper retains its exact class contract and did not receive the target-size classes", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const wrapperClass = findActionContainerClassName(clubRow);
+    const tokens = wrapperClass.split(/\s+/).filter(Boolean);
+    for (const required of ["flex", "items-center", "gap-1", "shrink-0", "ml-1"]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: action wrapper missing "${required}" — found "${wrapperClass}"`).toContain(required);
+    }
+    for (const forbidden of ["min-h-11", "min-w-11"]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: minimum-target classes were incorrectly applied to the wrapper instead of the buttons`).not.toContain(forbidden);
+    }
+  });
+
+  it("both buttons remain conditionally rendered with unchanged callback wiring", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onFitting && ("`).toContain("{onFitting && (");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onFitting}"`).toContain("onClick={onFitting}");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onRemove && ("`).toContain("{onRemove && (");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onRemove}"`).toContain("onClick={onRemove}");
+  });
+
+  it("no confirmation dialog or new deletion-confirmation flow was introduced", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    for (const forbidden of ["confirm(", "window.confirm", "<Dialog", "<Modal"]) {
+      expect(clubRow, `${VIRTUAL_BAG_FILE}: unexpected "${forbidden}" — a confirmation flow must not be introduced in this slice`).not.toContain(forbidden);
+    }
+  });
+});
