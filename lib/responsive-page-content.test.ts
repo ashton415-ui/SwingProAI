@@ -482,3 +482,148 @@ describe("Telemetry page — portal header responsive stacking", () => {
     expect(source, `${TELEMETRY_PAGE_FILE}: unexpected w-screen`).not.toContain("w-screen");
   });
 });
+
+// ============================================================================
+// Goals / Add Club forms — mobile-safe input text sizing (RW2-S5)
+// ============================================================================
+
+// Independently defined — not imported from either form — so a regression
+// in the actual source is caught here rather than only self-confirmed
+// against its own layout.
+const GOALS_FORM_FILE = "app/(dashboard)/goals/GoalsForm.tsx";
+const ADD_CLUB_FORM_FILE = "app/(dashboard)/bag/add/AddClubForm.tsx";
+const GOALS_PAGE_FILE = "app/(dashboard)/goals/page.tsx";
+const ADD_CLUB_PAGE_FILE = "app/(dashboard)/bag/add/page.tsx";
+
+/** Counts occurrences of the local `const inputCls =` declaration, without
+ *  scanning the rest of the file for unrelated text-size tokens. */
+function countInputClsDeclarations(source: string): number {
+  const pattern = /const inputCls =/g;
+  let count = 0;
+  while (pattern.exec(source) !== null) count++;
+  return count;
+}
+
+/** Extracts the exact quoted class string assigned to the local `inputCls`
+ *  constant. Fails if the declaration is missing or duplicated, and never
+ *  scans beyond the declaration's own assigned string. */
+function extractInputCls(source: string, fileLabel: string): string {
+  const declCount = countInputClsDeclarations(source);
+  expect(declCount, `${fileLabel}: expected exactly one "const inputCls =" declaration, found ${declCount}`).toBe(1);
+
+  const declIndex = source.indexOf("const inputCls =");
+  expect(declIndex, `${fileLabel}: could not locate the "const inputCls =" declaration`).toBeGreaterThanOrEqual(0);
+
+  const after = source.slice(declIndex);
+  const valueMatch = after.match(/const inputCls =\s*"([^"]*)"/);
+  expect(valueMatch, `${fileLabel}: could not extract the inputCls quoted class string`).not.toBeNull();
+  return valueMatch![1];
+}
+
+describe("Goals form — mobile-safe input text sizing", () => {
+  it("Goals form source file exists", () => {
+    expect(existsSync(path.join(repoRoot, GOALS_FORM_FILE)), `missing file: ${GOALS_FORM_FILE}`).toBe(true);
+  });
+
+  it("Goals form contains exactly one inputCls declaration", () => {
+    const count = countInputClsDeclarations(readSource(GOALS_FORM_FILE));
+    expect(count, `${GOALS_FORM_FILE}: expected exactly one inputCls declaration`).toBe(1);
+  });
+
+  it("Goals inputCls contains text-base and lg:text-sm, with no unprefixed text-sm", () => {
+    const cls = extractInputCls(readSource(GOALS_FORM_FILE), GOALS_FORM_FILE);
+    const tokens = cls.split(/\s+/).filter(Boolean);
+    expect(tokens, `${GOALS_FORM_FILE}: inputCls missing "text-base" — found "${cls}"`).toContain("text-base");
+    expect(tokens, `${GOALS_FORM_FILE}: inputCls missing "lg:text-sm" — found "${cls}"`).toContain("lg:text-sm");
+    expect(tokens, `${GOALS_FORM_FILE}: inputCls unexpectedly retains an unprefixed "text-sm" — found "${cls}"`).not.toContain("text-sm");
+  });
+
+  it("Goals inputCls retains all expected non-text-size tokens", () => {
+    const cls = extractInputCls(readSource(GOALS_FORM_FILE), GOALS_FORM_FILE);
+    const tokens = cls.split(/\s+/).filter(Boolean);
+    for (const required of [
+      "w-full", "bg-slate-800", "border", "border-white/10", "rounded-xl",
+      "px-4", "py-3", "text-white", "placeholder:text-gray-600",
+      "focus:outline-none", "focus:ring-1", "focus:ring-golf-green",
+    ]) {
+      expect(tokens, `${GOALS_FORM_FILE}: inputCls missing "${required}" — found "${cls}"`).toContain(required);
+    }
+  });
+
+  it("the Goals inputCls constant remains applied to exactly the number input and the textarea", () => {
+    const source = readSource(GOALS_FORM_FILE);
+    const directUsages = (source.match(/className=\{inputCls\}/g) ?? []).length;
+    const textareaUsages = (source.match(/className=\{`\$\{inputCls\} resize-none`\}/g) ?? []).length;
+    expect(directUsages, `${GOALS_FORM_FILE}: expected exactly one direct className={inputCls} usage (the number input)`).toBe(1);
+    expect(textareaUsages, `${GOALS_FORM_FILE}: expected exactly one className={\`\${inputCls} resize-none\`} usage (the textarea)`).toBe(1);
+  });
+});
+
+describe("Add Club form — mobile-safe input text sizing", () => {
+  it("Add Club form source file exists", () => {
+    expect(existsSync(path.join(repoRoot, ADD_CLUB_FORM_FILE)), `missing file: ${ADD_CLUB_FORM_FILE}`).toBe(true);
+  });
+
+  it("Add Club form contains exactly one inputCls declaration", () => {
+    const count = countInputClsDeclarations(readSource(ADD_CLUB_FORM_FILE));
+    expect(count, `${ADD_CLUB_FORM_FILE}: expected exactly one inputCls declaration`).toBe(1);
+  });
+
+  it("Add Club inputCls contains text-base and lg:text-sm, with no unprefixed text-sm", () => {
+    const cls = extractInputCls(readSource(ADD_CLUB_FORM_FILE), ADD_CLUB_FORM_FILE);
+    const tokens = cls.split(/\s+/).filter(Boolean);
+    expect(tokens, `${ADD_CLUB_FORM_FILE}: inputCls missing "text-base" — found "${cls}"`).toContain("text-base");
+    expect(tokens, `${ADD_CLUB_FORM_FILE}: inputCls missing "lg:text-sm" — found "${cls}"`).toContain("lg:text-sm");
+    expect(tokens, `${ADD_CLUB_FORM_FILE}: inputCls unexpectedly retains an unprefixed "text-sm" — found "${cls}"`).not.toContain("text-sm");
+  });
+
+  it("Add Club inputCls retains all expected non-text-size tokens", () => {
+    const cls = extractInputCls(readSource(ADD_CLUB_FORM_FILE), ADD_CLUB_FORM_FILE);
+    const tokens = cls.split(/\s+/).filter(Boolean);
+    for (const required of [
+      "w-full", "bg-slate-800", "border", "border-white/10", "rounded-xl",
+      "px-4", "py-2.5", "text-white", "placeholder:text-gray-600",
+      "focus:outline-none", "focus:ring-1", "focus:ring-indigo-500",
+    ]) {
+      expect(tokens, `${ADD_CLUB_FORM_FILE}: inputCls missing "${required}" — found "${cls}"`).toContain(required);
+    }
+  });
+
+  it("the Add Club inputCls constant remains applied to exactly the two selects and four text/number inputs", () => {
+    const source = readSource(ADD_CLUB_FORM_FILE);
+    const directUsages = (source.match(/className=\{inputCls\}/g) ?? []).length;
+    expect(directUsages, `${ADD_CLUB_FORM_FILE}: expected exactly six className={inputCls} usages (2 selects + 4 inputs)`).toBe(6);
+  });
+
+  it("checkbox controls remain separately styled and unaffected by the inputCls change", () => {
+    const source = readSource(ADD_CLUB_FORM_FILE);
+    const checkboxClass = "w-4 h-4 rounded border-white/20 bg-slate-800 accent-indigo-500";
+    const checkboxUsages = (source.match(/type="checkbox"/g) ?? []).length;
+    expect(checkboxUsages, `${ADD_CLUB_FORM_FILE}: expected exactly two checkbox controls`).toBe(2);
+    expect(
+      source.split(checkboxClass).length - 1,
+      `${ADD_CLUB_FORM_FILE}: checkbox className unexpectedly changed — expected "${checkboxClass}" to appear exactly twice`
+    ).toBe(2);
+    expect(checkboxClass, "checkbox className must not reference inputCls").not.toContain("inputCls");
+    expect(checkboxClass, "checkbox className must not have gained text-base").not.toContain("text-base");
+  });
+});
+
+describe("Goals / Add Club forms — no zoom restriction or overflow workaround introduced", () => {
+  it("no viewport zoom restriction is introduced in either form or its page", () => {
+    for (const file of [GOALS_FORM_FILE, ADD_CLUB_FORM_FILE, GOALS_PAGE_FILE, ADD_CLUB_PAGE_FILE]) {
+      const source = readSource(file);
+      expect(source, `${file}: unexpected maximumScale`).not.toContain("maximumScale");
+      expect(source, `${file}: unexpected maximum-scale`).not.toContain("maximum-scale");
+      expect(source, `${file}: unexpected user-scalable=no`).not.toContain("user-scalable=no");
+    }
+  });
+
+  it("no overflow-x-hidden or w-screen workaround is introduced in either form", () => {
+    for (const file of [GOALS_FORM_FILE, ADD_CLUB_FORM_FILE]) {
+      const source = readSource(file);
+      expect(source, `${file}: unexpected overflow-x-hidden`).not.toContain("overflow-x-hidden");
+      expect(source, `${file}: unexpected w-screen`).not.toContain("w-screen");
+    }
+  });
+});

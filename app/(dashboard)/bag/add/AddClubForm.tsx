@@ -58,7 +58,7 @@ export default function AddClubForm({ userId }: { userId: string }) {
   }
 
   const inputCls =
-    "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2.5 text-white text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500";
+    "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2.5 text-white text-base lg:text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500";
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">

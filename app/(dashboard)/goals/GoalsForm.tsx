@@ -65,7 +65,7 @@ export default function GoalsForm() {
   }
 
   const inputCls =
-    "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-golf-green";
+    "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white text-base lg:text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-golf-green";
 
   return (
     <div className="max-w-lg mx-auto">
