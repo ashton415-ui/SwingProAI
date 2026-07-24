@@ -397,3 +397,88 @@ describe("AnalyzePage — responsive height and breakpoint repair", () => {
     expect(right, `${ANALYZE_PAGE_FILE}: right results-deck class changed unexpectedly`).toBe("flex-1 bg-[#12140F] overflow-y-auto");
   });
 });
+
+// ============================================================================
+// Telemetry page — portal header responsive stacking (RW2-S4)
+// ============================================================================
+
+// Independently defined — not imported from the page — so a regression in
+// the telemetry page's source is caught here rather than only self-confirmed
+// against its own layout.
+const TELEMETRY_PAGE_FILE = "app/(dashboard)/telemetry/page.tsx";
+
+/**
+ * Isolates the telemetry portal header block: from the unique "Portal
+ * header" comment marker through the unique "Summary stat bar" comment
+ * marker that immediately follows it in source. This keeps every assertion
+ * below scoped to the one header under test, rather than matching unrelated
+ * `<div className="...">`/`<Link>` elements found later in the file (the
+ * summary stat bar, timeline cards, empty states, etc.).
+ */
+function isolateTelemetryHeaderSource(source: string): string {
+  const startMarker = "Portal header";
+  const endMarker = "Summary stat bar";
+
+  const startIdx = source.indexOf(startMarker);
+  expect(startIdx, `${TELEMETRY_PAGE_FILE}: could not locate the "${startMarker}" marker`).toBeGreaterThanOrEqual(0);
+
+  const endIdx = source.indexOf(endMarker, startIdx);
+  expect(endIdx, `${TELEMETRY_PAGE_FILE}: could not locate the "${endMarker}" marker after the portal header`).toBeGreaterThan(startIdx);
+
+  return source.slice(startIdx, endIdx);
+}
+
+/** Within the isolated header source, extracts the header's own outer
+ *  `<div className="...">` — the first such tag in the isolated block. */
+function getTelemetryHeaderClassName(headerSource: string): string {
+  const match = headerSource.match(/<div className="([^"]*)"/);
+  expect(match, `${TELEMETRY_PAGE_FILE}: could not find the portal header's outer <div className="...">`).not.toBeNull();
+  return match![1];
+}
+
+describe("Telemetry page — portal header responsive stacking", () => {
+  it("Telemetry page source file exists", () => {
+    expect(existsSync(path.join(repoRoot, TELEMETRY_PAGE_FILE)), `missing file: ${TELEMETRY_PAGE_FILE}`).toBe(true);
+  });
+
+  it("the helper uniquely locates the portal header", () => {
+    const headerSource = isolateTelemetryHeaderSource(readSource(TELEMETRY_PAGE_FILE));
+    const headerClass = getTelemetryHeaderClassName(headerSource);
+    expect(headerClass, `${TELEMETRY_PAGE_FILE}: portal header class unexpectedly empty`).toBeTruthy();
+  });
+
+  it("the portal header contains the full required responsive-stacking token set", () => {
+    const headerSource = isolateTelemetryHeaderSource(readSource(TELEMETRY_PAGE_FILE));
+    const headerClass = getTelemetryHeaderClassName(headerSource);
+    const tokens = headerClass.split(/\s+/).filter(Boolean);
+    for (const required of ["flex", "flex-col", "md:flex-row", "md:items-center", "justify-between", "gap-4", "mb-8"]) {
+      expect(tokens, `${TELEMETRY_PAGE_FILE}: portal header missing "${required}" — found "${headerClass}"`).toContain(required);
+    }
+  });
+
+  it("the portal header does not regress to a row-only, non-stacking mobile layout", () => {
+    const headerSource = isolateTelemetryHeaderSource(readSource(TELEMETRY_PAGE_FILE));
+    const headerClass = getTelemetryHeaderClassName(headerSource);
+    const tokens = headerClass.split(/\s+/).filter(Boolean);
+    expect(tokens, `${TELEMETRY_PAGE_FILE}: portal header unexpectedly contains an unprefixed "flex-row"`).not.toContain("flex-row");
+    expect(tokens, `${TELEMETRY_PAGE_FILE}: portal header missing "flex-col" — mobile stacking contract regressed`).toContain("flex-col");
+  });
+
+  it("the Range link remains present with its exact existing href and label", () => {
+    const headerSource = isolateTelemetryHeaderSource(readSource(TELEMETRY_PAGE_FILE));
+    expect(headerSource, `${TELEMETRY_PAGE_FILE}: missing Range link with href="/range"`).toContain('href="/range"');
+    expect(headerSource, `${TELEMETRY_PAGE_FILE}: missing unchanged "Range" label`).toContain("/>Range");
+  });
+
+  it("the Analyze link remains present with its exact existing href and label", () => {
+    const headerSource = isolateTelemetryHeaderSource(readSource(TELEMETRY_PAGE_FILE));
+    expect(headerSource, `${TELEMETRY_PAGE_FILE}: missing Analyze link with href="/analyze"`).toContain('href="/analyze"');
+    expect(headerSource, `${TELEMETRY_PAGE_FILE}: missing unchanged "Analyze" label`).toContain("/>Analyze");
+  });
+
+  it("no clipping workaround was introduced on the telemetry page", () => {
+    const source = readSource(TELEMETRY_PAGE_FILE);
+    expect(source, `${TELEMETRY_PAGE_FILE}: unexpected overflow-x-hidden`).not.toContain("overflow-x-hidden");
+    expect(source, `${TELEMETRY_PAGE_FILE}: unexpected w-screen`).not.toContain("w-screen");
+  });
+});
