@@ -142,3 +142,133 @@ describe("responsive page content — coach/admin table scroll wrappers", () => 
     expect(source, `${file}: unexpected w-screen`).not.toContain("w-screen");
   });
 });
+
+// ============================================================================
+// VirtualBag — touch-accessible row actions (RW2-S2)
+// ============================================================================
+
+// Independently defined — not imported from the component — so a regression
+// in VirtualBag.tsx is caught here rather than only self-confirmed against
+// its own source.
+const VIRTUAL_BAG_FILE = "components/swing/VirtualBag.tsx";
+
+/**
+ * Isolates the `ClubRow` function body from the rest of the file: from its
+ * `function ClubRow(` declaration through the comment marker that precedes
+ * the main `VirtualBag` component. This keeps every VirtualBag assertion
+ * below scoped to the one row-level function under test, rather than
+ * matching unrelated tokens anywhere else in the file (e.g. the header's
+ * own "Add Club" button, which is unrelated to per-row actions).
+ */
+function isolateClubRowSource(source: string): string {
+  const startMarker = "function ClubRow(";
+  const endMarker = "// ── Main component";
+
+  const startIdx = source.indexOf(startMarker);
+  expect(startIdx, `${VIRTUAL_BAG_FILE}: could not locate "${startMarker}" to isolate ClubRow`).toBeGreaterThanOrEqual(0);
+
+  const endIdx = source.indexOf(endMarker, startIdx);
+  expect(endIdx, `${VIRTUAL_BAG_FILE}: could not locate the "${endMarker}" marker after ClubRow to bound the isolation`).toBeGreaterThan(startIdx);
+
+  return source.slice(startIdx, endIdx);
+}
+
+/**
+ * Within an already-isolated ClubRow source, finds the nearest preceding
+ * `<div className="...">` open tag before the `onFitting &&` conditional —
+ * i.e. the actual action-row container, identified structurally rather than
+ * by searching the whole file for the class string in isolation.
+ */
+function findActionContainerClassName(clubRowSource: string): string {
+  const conditionalMarker = "onFitting &&";
+  const conditionalIdx = clubRowSource.indexOf(conditionalMarker);
+  expect(conditionalIdx, `${VIRTUAL_BAG_FILE}: could not find "${conditionalMarker}" inside ClubRow`).toBeGreaterThanOrEqual(0);
+
+  const before = clubRowSource.slice(0, conditionalIdx);
+  const divTagPattern = /<div className="([^"]*)"/g;
+  let lastMatch: RegExpExecArray | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = divTagPattern.exec(before)) !== null) {
+    lastMatch = match;
+  }
+  expect(lastMatch, `${VIRTUAL_BAG_FILE}: could not find a <div className="..."> preceding "${conditionalMarker}"`).not.toBeNull();
+  return lastMatch![1];
+}
+
+describe("VirtualBag — touch-accessible row actions", () => {
+  it("VirtualBag source file exists", () => {
+    expect(existsSync(path.join(repoRoot, VIRTUAL_BAG_FILE)), `missing file: ${VIRTUAL_BAG_FILE}`).toBe(true);
+  });
+
+  it("ClubRow retains its normal flex-row structure and the group class", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const rootDivMatch = clubRow.match(/<div className="([^"]*)"/);
+    expect(rootDivMatch, `${VIRTUAL_BAG_FILE}: could not find ClubRow's root row <div>`).not.toBeNull();
+    const tokens = rootDivMatch![1].split(/\s+/).filter(Boolean);
+    expect(tokens, `${VIRTUAL_BAG_FILE}: ClubRow root row missing "flex"`).toContain("flex");
+    expect(tokens, `${VIRTUAL_BAG_FILE}: ClubRow root row missing "items-center"`).toContain("items-center");
+    expect(tokens, `${VIRTUAL_BAG_FILE}: ClubRow root row missing "group"`).toContain("group");
+  });
+
+  it("the action container is independently identified as the nearest <div> preceding onFitting &&", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const actionContainerClass = findActionContainerClassName(clubRow);
+    expect(actionContainerClass, `${VIRTUAL_BAG_FILE}: action container class unexpectedly empty`).toBeTruthy();
+  });
+
+  it("the action container contains flex, items-center, gap-1, shrink-0, and ml-1", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const actionContainerClass = findActionContainerClassName(clubRow);
+    const tokens = actionContainerClass.split(/\s+/).filter(Boolean);
+    for (const required of ["flex", "items-center", "gap-1", "shrink-0", "ml-1"]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: action container missing "${required}" — found "${actionContainerClass}"`).toContain(required);
+    }
+  });
+
+  it("the action container does not contain opacity-0, invisible, hidden, pointer-events-none, or absolute", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const actionContainerClass = findActionContainerClassName(clubRow);
+    const tokens = actionContainerClass.split(/\s+/).filter(Boolean);
+    for (const forbidden of ["opacity-0", "invisible", "hidden", "pointer-events-none", "absolute"]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: action container unexpectedly contains "${forbidden}" — found "${actionContainerClass}"`).not.toContain(forbidden);
+    }
+  });
+
+  it("ClubRow contains no hover-only visibility contract for the action group", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    for (const forbidden of ["group-hover:opacity-100", "group-hover:visible", "group-hover:block", "group-hover:flex"]) {
+      expect(clubRow, `${VIRTUAL_BAG_FILE}: ClubRow unexpectedly still contains "${forbidden}"`).not.toContain(forbidden);
+    }
+    // Sanity check: this test must not reject the unrelated row-background
+    // hover affordance, which is expected to remain untouched.
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: row background hover class unexpectedly removed`).toContain("hover:bg-white/[0.04]");
+  });
+
+  it("the fitting control remains conditional with exact callback wiring", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onFitting && ("`).toContain("{onFitting && (");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onFitting}"`).toContain("onClick={onFitting}");
+  });
+
+  it("the removal control remains conditional with exact callback wiring", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onRemove && ("`).toContain("{onRemove && (");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onRemove}"`).toContain("onClick={onRemove}");
+  });
+
+  it("the fitting button retains its title, accessible label, icon, visible text, and sm:inline behavior", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing fitting title`).toContain('title="AI shaft fitting"');
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing exact fitting aria-label`).toContain("aria-label={`Get AI shaft fitting for ${clubDisplayName(club)}`}");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Zap icon on the fitting button`).toContain("<Zap className=");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing visible "Fit" text`).toContain(">Fit<");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "hidden sm:inline" on the Fit label`).toContain("hidden sm:inline");
+  });
+
+  it("the removal button retains its title, accessible label, and icon", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing removal title`).toContain('title="Remove from bag"');
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing exact removal aria-label`).toContain("aria-label={`Remove ${clubDisplayName(club)} from bag`}");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Trash2 icon on the removal button`).toContain("<Trash2 className=");
+  });
+});

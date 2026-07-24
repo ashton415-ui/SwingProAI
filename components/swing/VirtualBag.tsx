@@ -181,12 +181,13 @@ function ClubRow({
         <span className="text-xs text-slate-600 italic shrink-0">No data</span>
       )}
 
-      {/* Hover actions */}
-      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-1">
+      {/* Actions */}
+      <div className="flex items-center gap-1 shrink-0 ml-1">
         {onFitting && (
           <button
             onClick={onFitting}
             title="AI shaft fitting"
+            aria-label={`Get AI shaft fitting for ${clubDisplayName(club)}`}
             className="flex items-center gap-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors"
           >
             <Zap className="w-3 h-3" />
@@ -197,6 +198,7 @@ function ClubRow({
           <button
             onClick={onRemove}
             title="Remove from bag"
+            aria-label={`Remove ${clubDisplayName(club)} from bag`}
             className="p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded-lg hover:bg-red-400/10"
           >
             <Trash2 className="w-3.5 h-3.5" />
