@@ -8,16 +8,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const migrationsDir = path.join(__dirname, "..", "supabase", "migrations");
 const migrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql"));
 
-// This test file is written to validate exactly one baseline migration. If
-// that assumption ever changes, fail loudly rather than silently picking
-// the wrong file.
-if (migrationFiles.length !== 1) {
+// This test file is written to validate exactly one canonical baseline
+// migration, selected by its exact known filename — not "whatever the only
+// .sql file happens to be." Later, independently authored migrations (e.g.
+// EQ1-S1R) are expected and permitted to coexist alongside the baseline in
+// supabase/migrations; this file must keep validating the baseline
+// specifically rather than accidentally picking up one of them. If the
+// canonical baseline file is ever missing, or if baseline selection somehow
+// becomes ambiguous, fail loudly rather than silently testing the wrong SQL
+// file.
+const BASELINE_MIGRATION_FILENAME = "20260721220000_swingproai_production_baseline.sql";
+
+const baselineMigrationFiles = migrationFiles.filter((f) => f === BASELINE_MIGRATION_FILENAME);
+
+if (baselineMigrationFiles.length !== 1) {
   throw new Error(
-    `Expected exactly one migration file under supabase/migrations, found ${migrationFiles.length}: ${migrationFiles.join(", ")}`
+    `Expected exactly one canonical baseline migration named "${BASELINE_MIGRATION_FILENAME}", found ${baselineMigrationFiles.length}. SQL migrations present: ${migrationFiles.join(", ")}`
   );
 }
 
-const migrationPath = path.join(migrationsDir, migrationFiles[0]);
+const migrationPath = path.join(migrationsDir, BASELINE_MIGRATION_FILENAME);
 // Normalized to LF immediately after reading, matching the SEC1A schema
 // tests, so exact-newline-adjacent assertions are independent of Windows
 // core.autocrlf checkout behavior.
