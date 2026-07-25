@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -571,35 +570,39 @@ describe("EQ1-S1R TypeScript contracts", () => {
   });
 });
 
-describe("EQ1-S1R repository scope", () => {
-  it("exactly the five authorized files are modified or untracked in the repository, where git is available", () => {
-    let output = "";
-    try {
-      output = execSync("git status --porcelain", { cwd: repoRoot, encoding: "utf8" });
-    } catch {
-      return;
-    }
+// Changed-file scope is a pull-request/workflow invariant verified by Git
+// and PR audits. Permanent tests verify the source artifacts themselves and
+// must not depend on transient repository state.
+describe("EQ1-S1R artifact inventory", () => {
+  it("tracks the five intended EQ1-S1R artifacts at their exact paths", () => {
     // EQ1-S1R-C2: the final authorized slice is exactly five files — the
     // fifth (BASELINE_TEST_FILE) was authorized by EQ1-S1R-C1 to correct the
     // canonical baseline-migration selection guard. This list is intentionally
     // explicit (no wildcard, no directory-wide acceptance, no arbitrary file
-    // under lib/ or supabase/migrations/) so a sixth, unrelated change is
-    // still rejected.
-    const authorizedFiles = [
+    // under lib/ or supabase/migrations/).
+    const expectedArtifacts = [
       MIGRATION_FILE,
       TYPES_FILE,
       THIS_TEST_FILE,
       DOCS_FILE,
       BASELINE_TEST_FILE,
     ];
-    const allowed = new Set(authorizedFiles);
-    const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-    const changedPaths = lines.map((line) => line.replace(/^[AMD?!\s]+/, "").trim().replace(/\\/g, "/"));
 
-    const unexpected = changedPaths.filter((p) => !allowed.has(p));
-    expect(unexpected, `unexpected changed/untracked path(s) outside the authorized five-file scope: ${unexpected.join(", ") || "(none)"}`).toEqual([]);
+    expect(expectedArtifacts).toEqual([
+      "supabase/migrations/20260725020835_equipment_intelligence_putting_foundation.sql",
+      "types/database.ts",
+      "lib/equipment-intelligence-schema.test.ts",
+      "docs/EQUIPMENT_INTELLIGENCE_ROLLOUT.md",
+      "lib/migration-replay-baseline.test.ts",
+    ]);
 
-    const missing = authorizedFiles.filter((f) => !changedPaths.includes(f));
-    expect(missing, `expected authorized file(s) not found as changed/untracked: ${missing.join(", ") || "(none)"}`).toEqual([]);
+    expect(new Set(expectedArtifacts).size).toBe(5);
+
+    for (const artifact of expectedArtifacts) {
+      expect(
+        existsSync(path.join(repoRoot, artifact)),
+        `missing EQ1-S1R artifact: ${artifact}`
+      ).toBe(true);
+    }
   });
 });
