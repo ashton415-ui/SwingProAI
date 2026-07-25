@@ -9,6 +9,20 @@ export type FeedbackPriority = "low" | "medium" | "high" | "critical";
 export type LessonPlanStatus = "active" | "completed" | "archived";
 export type ViewAngle = "face_on" | "down_the_line";
 
+// ─── Equipment / Analysis-Routing Enums (EQ1-S1R — foundation only) ───────────
+//
+// analysis_mode = AI depth / subscription-driven model routing (basic /
+//   advanced / ultra). Already live on swing_videos and swing_analysis.
+// analysis_family = the mechanical analysis pipeline selected from the
+//   validated club (full_swing / putting). A separate, orthogonal concept —
+//   never renamed, repurposed, or conflated with analysis_mode.
+
+export type ClubType = "Driver" | "Wood" | "Hybrid" | "Iron" | "Wedge" | "Putter";
+
+export type AnalysisDepth = "basic" | "advanced" | "ultra";
+
+export type AnalysisFamily = "full_swing" | "putting";
+
 // ─── Coach Marketplace Enums (CM1 — foundation only) ──────────────────────────
 // These types back an inactive, additive schema foundation (see
 // supabase-schema-v6.sql). No route, page, or component uses them until a
@@ -116,6 +130,11 @@ export interface SwingVideo {
   status: SwingVideoStatus;
   recorded_at: string | null;
   created_at: string;
+  /** AI depth / subscription-driven model routing. Not the mechanical pipeline — see analysis_family. */
+  analysis_mode: AnalysisDepth;
+  requested_model: string | null;
+  launch_monitor_attached: boolean;
+  priority: number;
 }
 
 // ─── Swing Analysis ───────────────────────────────────────────────────────────
@@ -173,8 +192,115 @@ export interface SwingAnalysis {
   swing_highlights: HighlightItem[] | null;
   detailed_summary_html: string | null;
   created_at: string;
+  /** AI depth / subscription-driven model routing. Not the mechanical pipeline — see analysis_family. */
+  analysis_mode: AnalysisDepth | null;
+  /** The mechanical analysis pipeline (full-swing vs. putting), database-derived from the validated club. Never client-supplied. */
+  analysis_family: AnalysisFamily | null;
+  model_used: string | null;
+  /** References user_equipment.id (ON DELETE SET NULL). Null for analyses with no validated club selection. */
+  club_id: string | null;
+  telemetry_id: string | null;
+  /** Database-owned, immutable after insert. See EquipmentSnapshotV1. */
+  equipment_snapshot: EquipmentSnapshotV1 | null;
+  putt_tempo_ratio: number | null;
+  face_angle_at_impact_deg: number | null;
+  path_deviation_mm: number | null;
+  putt_analytics: Record<string, unknown> | null;
+  putting_analysis: Record<string, unknown> | null;
+  ai_equipment_recommendations: Record<string, unknown> | null;
+  spine_angle: number | null;
+  hip_rotation: number | null;
+  shoulder_rotation: number | null;
+  launch_monitor_summary: Record<string, unknown> | null;
+  fusion_notes: string | null;
   // joined
   swing_video?: SwingVideo;
+}
+
+// ─── Equipment Intelligence (EQ1-S1R — foundation only) ───────────────────────
+//
+// Backs the additive, unapplied schema in
+// supabase/migrations/<generated>_equipment_intelligence_putting_foundation.sql.
+// EquipmentManufacturer/EquipmentModel are RLS-enabled with a single
+// authenticated, active-only SELECT policy each — no browser write path.
+// Model catalog population is EQ1-S2; no route, page, or component consumes
+// these types yet.
+
+export interface EquipmentManufacturer {
+  id: string;
+  canonical_name: string;
+  slug: string;
+  normalized_name: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EquipmentModel {
+  id: string;
+  manufacturer_id: string;
+  club_type: ClubType;
+  canonical_name: string;
+  slug: string;
+  normalized_name: string;
+  model_year: number | null;
+  specifications: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  // joined
+  manufacturer?: EquipmentManufacturer;
+}
+
+export interface UserEquipment {
+  id: string;
+  user_id: string;
+  club_type: ClubType;
+  /** Legacy/free-text brand. Coexists with manufacturer_id — never overwritten by catalog selection. */
+  brand: string | null;
+  /** Legacy/free-text model. Coexists with equipment_model_id — never overwritten by catalog selection. */
+  model: string | null;
+  shaft_flex: string | null;
+  shaft_weight: number | null;
+  loft_deg: number | null;
+  custom_club: boolean;
+  custom_brand: string | null;
+  custom_model: string | null;
+  custom_notes: string | null;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+  /** Nullable catalog reference. Database-validated (existence + active) via a before-insert/update trigger. */
+  manufacturer_id: string | null;
+  /** Nullable catalog reference. Must match manufacturer_id and club_type when present. */
+  equipment_model_id: string | null;
+  // joined
+  manufacturer?: EquipmentManufacturer;
+  equipment_model?: EquipmentModel;
+}
+
+/**
+ * Database-owned snapshot written by a before-insert trigger on
+ * swing_analysis and frozen thereafter. Deliberately excludes user identity,
+ * freeform notes, video/storage references, and any billing/location data —
+ * it must remain useful and privacy-safe after the live equipment row is
+ * later edited or deleted.
+ */
+export interface EquipmentSnapshotV1 {
+  schema_version: 1;
+  captured_at: string;
+  equipment_id: string;
+  club_type: ClubType;
+  manufacturer: { id: string; canonical_name: string; slug: string } | null;
+  model: { id: string; canonical_name: string; slug: string; model_year: number | null } | null;
+  entered_brand: string | null;
+  entered_model: string | null;
+  custom_club: boolean;
+  custom_brand: string | null;
+  custom_model: string | null;
+  shaft_flex: string | null;
+  shaft_weight_grams: number | null;
+  loft_deg: number | null;
 }
 
 // ─── Coach Feedback ───────────────────────────────────────────────────────────
