@@ -188,7 +188,7 @@ function ClubRow({
             onClick={onFitting}
             title="AI shaft fitting"
             aria-label={`Get AI shaft fitting for ${clubDisplayName(club)}`}
-            className="flex items-center gap-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors"
+            className="flex min-h-11 min-w-11 items-center justify-center gap-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-lg transition-colors"
           >
             <Zap className="w-3 h-3" />
             <span className="hidden sm:inline">Fit</span>
@@ -199,7 +199,7 @@ function ClubRow({
             onClick={onRemove}
             title="Remove from bag"
             aria-label={`Remove ${clubDisplayName(club)} from bag`}
-            className="p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded-lg hover:bg-red-400/10"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center p-1.5 text-slate-600 hover:text-red-400 transition-colors rounded-lg hover:bg-red-400/10"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
