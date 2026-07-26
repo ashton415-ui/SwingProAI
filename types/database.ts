@@ -248,8 +248,74 @@ export interface EquipmentModel {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  /** Immutable identity key (EQ1-S2). Display-name, slug, or metadata corrections never change this. */
+  catalog_key: string;
+  /** Consumer-facing sub-brand under this parent manufacturer (e.g. "Odyssey" under Callaway). Never a separate manufacturer row. */
+  brand_line: string | null;
+  brand_line_slug: string | null;
+  model_family: string | null;
+  model_family_slug: string | null;
+  release_year: number | null;
   // joined
   manufacturer?: EquipmentManufacturer;
+  putter_specs?: EquipmentPutterModelSpecs;
+}
+
+// ─── Putter Fitting Metadata (EQ1-S2 — foundation only) ───────────────────────
+//
+// One-to-one with EquipmentModel where club_type = "Putter", enforced by a
+// database trigger. Optional fields stay null when the official source does
+// not clearly state them — never inferred.
+
+export type EquipmentPutterHeadShape = "blade" | "mid_mallet" | "mallet";
+
+export type EquipmentPutterNeckType =
+  | "plumbers_neck"
+  | "slant_neck"
+  | "flow_neck"
+  | "long_neck"
+  | "single_bend"
+  | "double_bend"
+  | "center_shaft"
+  | "broomstick_center_shaft";
+
+export type EquipmentPutterToeHangClass = "face_balanced" | "slight" | "moderate" | "strong" | "toe_down";
+
+export type EquipmentPutterFaceConstruction = "milled" | "insert" | "hybrid";
+
+export type EquipmentPutterHandedness = "right" | "left" | "both";
+
+export interface EquipmentPutterModelSpecs {
+  equipment_model_id: string;
+  head_shape: EquipmentPutterHeadShape;
+  neck_type: EquipmentPutterNeckType | null;
+  /** Official factual label as published (e.g. "L-Neck", "Double Bend") — retained even when neck_type is null because the mapping was ambiguous. */
+  neck_source_label: string | null;
+  toe_hang_class: EquipmentPutterToeHangClass | null;
+  face_construction: EquipmentPutterFaceConstruction | null;
+  handedness: EquipmentPutterHandedness | null;
+  standard_lengths_inches: number[] | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ─── Equipment Model Provenance (EQ1-S2 — server-only) ────────────────────────
+//
+// SERVER-ONLY. The backing table (public.equipment_model_sources) has no
+// authenticated grant and no RLS policy for authenticated — it is reachable
+// only by service_role. Never query this from browser code.
+
+export type EquipmentModelSourceType = "official_product_page" | "official_spec_pdf" | "official_archive";
+
+/** SERVER-ONLY. Not readable through the browser Data API — see EQ1-S2 migration RLS/grants. */
+export interface EquipmentModelSource {
+  id: string;
+  equipment_model_id: string;
+  source_type: EquipmentModelSourceType;
+  source_name: string;
+  source_url: string;
+  verified_at: string;
+  created_at: string;
 }
 
 export interface UserEquipment {

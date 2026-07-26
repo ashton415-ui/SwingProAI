@@ -1,8 +1,9 @@
 # Equipment Intelligence & Premium Putting Rollout
 
-Status: **EQ1-S1R implemented locally, source-only, unapplied.** No SQL in
-this rollout has been executed against any Supabase project. No UI, API
-route, AI prompt, or subscription behavior has changed.
+Status: **EQ1-S1R merged into `main` (PR #13).** **EQ1-S2 implemented locally,
+source-only, unapplied.** Neither slice's SQL has been executed against any
+Supabase project. No UI, API route, AI prompt, or subscription behavior has
+changed.
 
 ## Existing foundation this work extends
 
@@ -191,15 +192,154 @@ are built with the modern pattern from day one: RLS enabled, a single
 PUBLIC` and `anon`, explicit `GRANT SELECT TO authenticated`, and explicit
 `service_role` access for trusted server-side writes.
 
+## EQ1-S2 — Curated putter catalog v1 (source-only, unapplied)
+
+EQ1-S2 adds 21 officially verified, currently marketed putter configurations
+across all five existing parent manufacturers (taylormade 5, callaway 3,
+titleist 7, ping 2, mizuno 4) and the schema needed to describe them
+factually. **No SQL in this slice has been applied to any Supabase project.**
+
+### Configuration-level identity, not family-level rows
+
+A catalog row represents one purchasable configuration — the lowest
+officially named or selectable neck/shaft variant needed to produce one
+unambiguous `head_shape`/neck-label/toe-hang/handedness/length record — never
+a generic family-level row collapsing multiple materially distinct official
+configurations into one. Where an official source exposes separately named
+configurations (e.g. TaylorMade Spider Tour's Small Slant and Double Bend
+hosels, or Mizuno M.Craft's `.P`/`.S`/`.B` suffixes), each receives its own
+catalog key, deterministic UUID, canonical name, slug, specs row, and source
+row. A prior implementation draft collapsed several of these into generic
+family rows (e.g. a single "Spider Tour" row); those generic rows have been
+removed and replaced with their exact named configurations.
+
+### Global slug uniqueness
+
+`public.equipment_models.slug` carries an exact database constraint,
+`equipment_models_slug_unique`, in addition to (not replacing) the existing
+`equipment_models_manufacturer_type_name_year_uidx` compound identity index.
+Both rules are enforced by PostgreSQL, not only by the generator.
+
+### snake_case TypeScript database-row convention
+
+The new `EquipmentModel` fields (`catalog_key`, `brand_line`,
+`brand_line_slug`, `model_family`, `model_family_slug`, `release_year`,
+`putter_specs`) follow the interface's established database-row naming
+convention, matching `manufacturer_id`, `canonical_name`, `model_year`, and
+every other existing field on that interface — not a second camelCase shape.
+
+### Brand-line identity, not additional manufacturers
+
+Consumer-facing sub-brands are represented with new nullable
+`brand_line`/`brand_line_slug` columns on `equipment_models`, never as
+additional parent-manufacturer rows:
+
+```text
+manufacturer: Callaway   brand_line: Odyssey
+manufacturer: Titleist   brand_line: Scotty Cameron
+```
+
+The five parent manufacturers seeded in EQ1-S1R remain unchanged and are not
+duplicated.
+
+### Two new tables
+
+- `public.equipment_putter_model_specs` — one row per putter model
+  (`equipment_model_id` primary key, FK `ON DELETE CASCADE`), holding
+  `head_shape` (required) plus nullable `neck_type`, `neck_source_label`,
+  `toe_hang_class`, `face_construction`, `handedness`, and
+  `standard_lengths_inches`, each drawn from a fixed, database-enforced
+  vocabulary. A database trigger rejects a specs row for any model whose
+  `club_type` is not `Putter`. Authenticated users may `SELECT` a row only
+  when the joined model is `is_active`; there is no browser write path.
+- `public.equipment_model_sources` — provenance only (`source_type`,
+  `source_name`, HTTPS-only `source_url`, `verified_at`), FK `ON DELETE
+  CASCADE`. **Isolated from `equipment_models`, and never browser-readable —
+  `authenticated` has no grant and no RLS policy on this table at all.** Only
+  `service_role` can read or write it.
+
+No alias table was created in this slice — alias matching has no current
+consumer and is deferred until a concrete search or reconciliation
+requirement exists.
+
+### No user backfill
+
+EQ1-S2 performs zero updates to `public.user_equipment`,
+`public.swing_analysis`, `public.user_bags`, or `public.user_clubs`. No model
+matching, manufacturer matching, alias matching, fuzzy matching, or
+candidate-report generation is included.
+
+### Deterministic, immutable identity
+
+Every model carries an immutable `catalog_key` (e.g.
+`callaway/odyssey/ai-one-2-ball-ch/v1`). Model and source UUIDs are
+RFC-4122 UUIDv5 values deterministically derived from that key under a fixed
+SwingProAI namespace (`05690d1f-f17d-5ab8-a2b6-ef0328a2783a`), computed by
+`scripts/generate-equipment-catalog-putters-v1.mjs` from
+`data/equipment-catalog-putters-v1.json` — never inside PostgreSQL, and never
+from mutable display names, slugs, or years. Correcting a display name, slug,
+or metadata field never changes a model's identity.
+
+### Provenance and completeness policy
+
+Every seeded model has at least one `equipment_model_sources` row citing an
+exact official manufacturer product page, verified 2026-07-25. Optional
+fitting fields (`neck_type`, `toe_hang_class`, `face_construction`,
+`handedness`, `standard_lengths_inches`) remain `null` whenever the official
+source does not state them unambiguously — they are never inferred or filled
+merely to claim completeness. Raw numeric toe-hang degrees (e.g. "29°",
+"90° Up") are never mapped into the qualitative `toe_hang_class` vocabulary
+without an explicit qualitative label on the source page itself.
+
+Of the 21 source rows: 17 cite an exact individual product page (one per
+model — TaylorMade 5, Odyssey 3, Scotty Cameron 7, PING 2); the remaining 4
+(all Mizuno) cite the single official M.Craft family/product page at
+`mizunogolf.com/us/golf-clubs/m-craft-putters/`, which is explicitly permitted
+because it contains the complete factual specification table for each
+retained Mizuno configuration individually — unlike a bare marketing family
+listing page. No other manufacturer's records may rely on a family-only page.
+
+**Search-result snippets are discovery aids only, never catalog evidence.**
+A search index may help locate the correct official URL, but every retained
+factual field must be verified from directly fetched or rendered content of
+that exact official page. Three Odyssey records in an earlier working draft
+of this catalog cited a family page and search-derived summaries rather than
+individually fetched product pages; they were replaced with three
+directly-verified Ai-ONE configurations (`ai-one-2-ball-ch`,
+`ai-one-rossie-db`, `ai-one-square-2-square-7-center-shaft`) once exact
+official product-page content was independently obtained.
+
+An HTML specification page is never labeled `official_spec_pdf` — that
+source type is reserved for an actual PDF document (URL pathname ending in
+`.pdf`). The v1 catalog contains zero `official_spec_pdf` entries; the
+Mizuno specification table is classified `official_product_page`.
+
+### Unchanged from EQ1-S1R
+
+`equipment_snapshot.schema_version` remains `1`. Neither
+`apply_swing_analysis_equipment_snapshot()` nor
+`guard_swing_analysis_equipment_immutability()` was modified. Putter catalog
+specifications are live catalog metadata, joined at read time — they are not
+copied into historical analysis snapshots in this slice. `analysis_mode` and
+`analysis_family` semantics are unchanged.
+
+### Out of scope for this slice
+
+No UI, no AI routing, no subscription enforcement, no fitting conclusions, no
+advertising influence, and no Supabase migration application (staging or
+production) occurred in EQ1-S2. `public.user_bags` and `public.user_clubs`
+remain legacy, unreferenced tables and were not touched.
+
 ## Rollout roadmap
 
 ```text
 EQ1-S1R   Schema, manufacturer vocabulary, catalog tables, equipment
           snapshots, analysis_family, secure trigger contracts, types,
-          tests, and documentation                          [this slice]
+          tests, and documentation                    [merged, PR #13]
 
-EQ1-S2    Curated manufacturer/model catalog import, including putter
-          metadata
+EQ1-S2    Curated putter-model catalog v1: brand-line identity, putter
+          fitting metadata, isolated provenance, deterministic catalog
+          keys and UUIDs                        [this slice, source-only]
 
 EQ1-S3    Apply and validate the migration in an isolated Supabase staging
           branch/project
