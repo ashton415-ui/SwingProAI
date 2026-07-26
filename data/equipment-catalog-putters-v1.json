@@ -1,0 +1,659 @@
+{
+  "schema_version": 1,
+  "catalog_name": "equipment-catalog-putters-v1",
+  "uuid_namespace": "05690d1f-f17d-5ab8-a2b6-ef0328a2783a",
+  "verified_on": "2026-07-25",
+  "models": [
+    {
+      "catalog_key": "taylormade/spider-tour/spider-tour-small-slant/v1",
+      "manufacturer_slug": "taylormade",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Spider Tour",
+      "model_family_slug": "spider-tour",
+      "canonical_name": "TaylorMade Spider Tour Small Slant",
+      "slug": "spider-tour-small-slant",
+      "normalized_name": "taylormadespidertoursmallslant",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "slant_neck",
+        "neck_source_label": "Small Slant",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "both",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Spider Tour Small Slant product page",
+          "source_url": "https://www.taylormadegolf.com/Spider-Tour-Small-Slant-/DW-TE672.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/spider-tour/spider-tour-double-bend/v1",
+      "manufacturer_slug": "taylormade",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Spider Tour",
+      "model_family_slug": "spider-tour",
+      "canonical_name": "TaylorMade Spider Tour Double Bend",
+      "slug": "spider-tour-double-bend",
+      "normalized_name": "taylormadespidertourdoublebend",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "double_bend",
+        "neck_source_label": "Double Bend",
+        "toe_hang_class": "face_balanced",
+        "face_construction": "insert",
+        "handedness": "both",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Spider Tour Double Bend product page",
+          "source_url": "https://www.taylormadegolf.com/Spider-Tour-Double-Bend/DW-TC845.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/spider-tour/spider-tour-x-l-neck/v1",
+      "manufacturer_slug": "taylormade",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Spider Tour",
+      "model_family_slug": "spider-tour",
+      "canonical_name": "TaylorMade Spider Tour X L-Neck",
+      "slug": "spider-tour-x-l-neck",
+      "normalized_name": "taylormadespidertourxlneck",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": null,
+        "neck_source_label": "L-Neck",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Spider Tour X L-Neck product page",
+          "source_url": "https://www.taylormadegolf.com/Spider-Tour-X-L-Neck/DW-TC928.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/spider-tour/spider-tour-x-small-slant/v1",
+      "manufacturer_slug": "taylormade",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Spider Tour",
+      "model_family_slug": "spider-tour",
+      "canonical_name": "TaylorMade Spider Tour X Small Slant",
+      "slug": "spider-tour-x-small-slant",
+      "normalized_name": "taylormadespidertourxsmallslant",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "slant_neck",
+        "neck_source_label": "Small Slant",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "both",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Spider Tour X Small Slant product page",
+          "source_url": "https://www.taylormadegolf.com/Spider-Tour-X-Small-Slant/DW-TE675.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/spider-tour/spider-tour-x-double-bend/v1",
+      "manufacturer_slug": "taylormade",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Spider Tour",
+      "model_family_slug": "spider-tour",
+      "canonical_name": "TaylorMade Spider Tour X Double Bend",
+      "slug": "spider-tour-x-double-bend",
+      "normalized_name": "taylormadespidertourxdoublebend",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "double_bend",
+        "neck_source_label": "Double Bend",
+        "toe_hang_class": "face_balanced",
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Spider Tour X Double Bend product page",
+          "source_url": "https://www.taylormadegolf.com/Spider-Tour-X-Double-Bend/DW-TC847.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/odyssey/ai-one-2-ball-ch/v1",
+      "manufacturer_slug": "callaway",
+      "brand_line": "Odyssey",
+      "brand_line_slug": "odyssey",
+      "model_family": "Ai-ONE",
+      "model_family_slug": "ai-one",
+      "canonical_name": "Odyssey Ai-ONE 2-Ball CH",
+      "slug": "ai-one-2-ball-ch",
+      "normalized_name": "odysseyaione2ballch",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": null,
+        "neck_source_label": "Crank Hosel",
+        "toe_hang_class": "moderate",
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Odyssey Ai-ONE 2-Ball CH product page",
+          "source_url": "https://odyssey.callawaygolf.com/ody/putters/ai-one/putters-2024-ai-one-2-ball-ch.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/odyssey/ai-one-rossie-db/v1",
+      "manufacturer_slug": "callaway",
+      "brand_line": "Odyssey",
+      "brand_line_slug": "odyssey",
+      "model_family": "Ai-ONE",
+      "model_family_slug": "ai-one",
+      "canonical_name": "Odyssey Ai-ONE Rossie DB",
+      "slug": "ai-one-rossie-db",
+      "normalized_name": "odysseyaionerossiedb",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "double_bend",
+        "neck_source_label": "Double Bend",
+        "toe_hang_class": "face_balanced",
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Odyssey Ai-ONE Rossie DB product page",
+          "source_url": "https://odyssey.callawaygolf.com/putters/ai-one/putters-2024-ai-one-rossie-db.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/odyssey/ai-one-square-2-square-7-center-shaft/v1",
+      "manufacturer_slug": "callaway",
+      "brand_line": "Odyssey",
+      "brand_line_slug": "odyssey",
+      "model_family": "Ai-ONE Square 2 Square",
+      "model_family_slug": "ai-one-square-2-square",
+      "canonical_name": "Odyssey Ai-ONE Square 2 Square #7 Center Shaft",
+      "slug": "ai-one-square-2-square-7-center-shaft",
+      "normalized_name": "odysseyaionesquare2square7centershaft",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "center_shaft",
+        "neck_source_label": "Center Shaft",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Odyssey Ai-ONE Square 2 Square #7 product page",
+          "source_url": "https://www.callawaygolf.com/square-2-square/putters-2025-square-to-square-seven.html",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-5/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 5",
+      "slug": "phantom-5",
+      "normalized_name": "scottycameronphantom5",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "single_bend",
+        "neck_source_label": "Mid-Single Bend",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": null,
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 5 product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-5/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-5-2/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 5.2",
+      "slug": "phantom-5-2",
+      "normalized_name": "scottycameronphantom52",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "plumbers_neck",
+        "neck_source_label": "Plumbing Neck",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 5.2 product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-5-2/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-5-5/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 5.5",
+      "slug": "phantom-5-5",
+      "normalized_name": "scottycameronphantom55",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": null,
+        "neck_source_label": "Jet Neck",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "both",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 5.5 product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-5-5/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-5-oc/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 5 OC",
+      "slug": "phantom-5-oc",
+      "normalized_name": "scottycameronphantom5oc",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "center_shaft",
+        "neck_source_label": "Onset Center (OC)",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 5 OC product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-5-oc/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-7/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 7",
+      "slug": "phantom-7",
+      "normalized_name": "scottycameronphantom7",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "double_bend",
+        "neck_source_label": "Double Bend",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "both",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 7 product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-7/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-7-2/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 7.2",
+      "slug": "phantom-7-2",
+      "normalized_name": "scottycameronphantom72",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "plumbers_neck",
+        "neck_source_label": "Plumbing Neck",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "right",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 7.2 product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-7-2/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/scotty-cameron/phantom-7-5/v1",
+      "manufacturer_slug": "titleist",
+      "brand_line": "Scotty Cameron",
+      "brand_line_slug": "scotty-cameron",
+      "model_family": "Phantom",
+      "model_family_slug": "phantom",
+      "canonical_name": "Scotty Cameron Phantom 7.5",
+      "slug": "phantom-7-5",
+      "normalized_name": "scottycameronphantom75",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": null,
+        "neck_source_label": "Jet Neck",
+        "toe_hang_class": null,
+        "face_construction": "insert",
+        "handedness": "both",
+        "standard_lengths_inches": [33, 34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Scotty Cameron Phantom 7.5 product page",
+          "source_url": "https://www.scottycameron.com/putters/phantom/phantom-7-5/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/pld-milled/anser/v1",
+      "manufacturer_slug": "ping",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "PLD Milled",
+      "model_family_slug": "pld-milled",
+      "canonical_name": "PING PLD Milled Anser",
+      "slug": "pld-milled-anser",
+      "normalized_name": "pingpldmilledanser",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "blade",
+        "neck_type": null,
+        "neck_source_label": "H1 Hosel",
+        "toe_hang_class": null,
+        "face_construction": "milled",
+        "handedness": null,
+        "standard_lengths_inches": [35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING PLD Milled Anser product page",
+          "source_url": "https://ping.com/en-us/clubs/putters/pld-milled-plus/anser",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/pld-milled/anser-2d/v1",
+      "manufacturer_slug": "ping",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "PLD Milled",
+      "model_family_slug": "pld-milled",
+      "canonical_name": "PING PLD Milled Anser 2D",
+      "slug": "pld-milled-anser-2d",
+      "normalized_name": "pingpldmilledanser2d",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "blade",
+        "neck_type": null,
+        "neck_source_label": "H1 Hosel",
+        "toe_hang_class": null,
+        "face_construction": "milled",
+        "handedness": null,
+        "standard_lengths_inches": [35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING PLD Milled Anser 2D product page",
+          "source_url": "https://ping.com/en-us/clubs/putters/pld-milled-plus/anser-2d",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/m-craft/kyoto-p/v1",
+      "manufacturer_slug": "mizuno",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "M.Craft",
+      "model_family_slug": "m-craft",
+      "canonical_name": "Mizuno M.Craft Kyoto.P",
+      "slug": "m-craft-kyoto-p",
+      "normalized_name": "mizunomcraftkyotop",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "blade",
+        "neck_type": "plumbers_neck",
+        "neck_source_label": "Kyoto.P",
+        "toe_hang_class": null,
+        "face_construction": "milled",
+        "handedness": "both",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno M.Craft putters page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/m-craft-putters/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/m-craft/kyoto-s/v1",
+      "manufacturer_slug": "mizuno",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "M.Craft",
+      "model_family_slug": "m-craft",
+      "canonical_name": "Mizuno M.Craft Kyoto.S",
+      "slug": "m-craft-kyoto-s",
+      "normalized_name": "mizunomcraftkyotos",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "blade",
+        "neck_type": "slant_neck",
+        "neck_source_label": "Kyoto.S",
+        "toe_hang_class": null,
+        "face_construction": "milled",
+        "handedness": "right",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno M.Craft putters page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/m-craft-putters/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/m-craft/tokyo-s/v1",
+      "manufacturer_slug": "mizuno",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "M.Craft",
+      "model_family_slug": "m-craft",
+      "canonical_name": "Mizuno M.Craft Tokyo.S",
+      "slug": "m-craft-tokyo-s",
+      "normalized_name": "mizunomcrafttokyos",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "slant_neck",
+        "neck_source_label": "Tokyo.S",
+        "toe_hang_class": null,
+        "face_construction": "milled",
+        "handedness": "right",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno M.Craft putters page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/m-craft-putters/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/m-craft/tokyo-b/v1",
+      "manufacturer_slug": "mizuno",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "M.Craft",
+      "model_family_slug": "m-craft",
+      "canonical_name": "Mizuno M.Craft Tokyo.B",
+      "slug": "m-craft-tokyo-b",
+      "normalized_name": "mizunomcrafttokyob",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "putter_specs": {
+        "head_shape": "mallet",
+        "neck_type": "double_bend",
+        "neck_source_label": "Tokyo.B",
+        "toe_hang_class": null,
+        "face_construction": "milled",
+        "handedness": "right",
+        "standard_lengths_inches": [34, 35]
+      },
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno M.Craft putters page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/m-craft-putters/",
+          "verified_at": "2026-07-25"
+        }
+      ]
+    }
+  ]
+}
