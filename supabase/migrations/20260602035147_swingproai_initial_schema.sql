@@ -1,0 +1,15 @@
+-- SwingProAI historical migration bridge — local history only.
+-- Remote (production) version: 20260602035147
+-- Remote (production) name: swingproai_initial_schema
+-- This file intentionally executes no SQL.
+-- This is a local migration-history bridge, not a schema migration, and
+-- never modifies the remote Supabase migration ledger.
+-- The actual historical SQL for this version remains preserved in
+-- production's migration-history table (supabase_migrations.schema_migrations)
+-- and is not reproduced here.
+-- The actual historical migration chain is known not to replay from empty;
+-- see docs/MIGRATION_REPLAY_RECOVERY.md.
+-- This bridge must never be replaced with fabricated or reconstructed
+-- historical SQL.
+-- Canonical fresh-environment schema replay begins at
+-- 20260721220000_swingproai_production_baseline.sql.
