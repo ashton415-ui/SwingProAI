@@ -44,6 +44,7 @@ const EXPECTED_BRIDGES: { version: string; name: string }[] = [
 const BASELINE_FILENAME = "20260721220000_swingproai_production_baseline.sql";
 const S1R_FILENAME = "20260725020835_equipment_intelligence_putting_foundation.sql";
 const S2_FILENAME = "20260725174239_equipment_putter_catalog_v1.sql";
+const SEC1B_FN_FILENAME = "20260729054500_pin_function_search_path.sql";
 
 const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [BASELINE_FILENAME]: "33a599f07cd6aba5761ce7feea811ed3c096bb9dbc50f21d519037df45d4b828",
@@ -59,11 +60,11 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 
 // ============================================================================
 // 1-3, 23-24. Exact set membership, no missing, no unexpected extra, exact
-// 19-file inventory, strict timestamp ordering.
+// 20-file inventory, strict timestamp ordering.
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
-  it("the migrations directory contains exactly 19 SQL files", () => {
-    expect(allMigrationFiles.length).toBe(19);
+  it("the migrations directory contains exactly 20 SQL files", () => {
+    expect(allMigrationFiles.length).toBe(20);
   });
 
   it("contains exactly the approved 16 bridge files, no missing", () => {
@@ -80,14 +81,15 @@ describe("migration-history bridge — exact file inventory", () => {
       BASELINE_FILENAME,
       S1R_FILENAME,
       S2_FILENAME,
+      SEC1B_FN_FILENAME,
     ]);
     const unexpected = allMigrationFiles.filter((f) => !expectedNames.has(f));
     expect(unexpected, `unexpected migration file(s) present: ${JSON.stringify(unexpected)}`).toEqual([]);
   });
 
-  it("strict timestamp ordering: 16 bridges, then baseline, then S1R, then S2", () => {
+  it("strict timestamp ordering: 16 bridges, then baseline, then S1R, then S2, then SEC1B-FN", () => {
     const sorted = [...allMigrationFiles].sort();
-    const expectedOrder = [...EXPECTED_BRIDGES.map(expectedBridgeFilename), BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME].sort();
+    const expectedOrder = [...EXPECTED_BRIDGES.map(expectedBridgeFilename), BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1B_FN_FILENAME].sort();
     // Both lists are independently sorted lexicographically (equivalent to
     // timestamp order for these fixed-width numeric prefixes), so this
     // proves the actual directory contents collapse to the same ordered
