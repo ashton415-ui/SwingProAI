@@ -296,9 +296,14 @@ describe("SEC1B-FN — pre-existing SEC1A artifacts are unmodified", () => {
 describe("SEC1B-FN — migration inventory", () => {
   const sqlMigrations = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql"));
 
-  it("grows the checked-in migration inventory from 19 to exactly 20", () => {
+  // Deliberately does NOT assert the repository's current total migration count.
+  // This block verifies SEC1B's own historical contract — that it was added on
+  // top of the pinned 19 pre-existing migrations — without assuming SEC1B stays
+  // the newest or only later migration. The closed-world current inventory is
+  // owned solely by lib/migration-history-bridge.test.ts.
+  it("adds SEC1B on top of the pinned 19 pre-existing migrations", () => {
     expect(PRE_EXISTING_MIGRATIONS.length).toBe(19);
-    expect(sqlMigrations.length).toBe(20);
+    expect(sqlMigrations).toContain(MIGRATION_FILENAME);
   });
 
   it("retains every pre-existing migration unchanged in name", () => {
@@ -307,14 +312,13 @@ describe("SEC1B-FN — migration inventory", () => {
     }
   });
 
-  it("adds exactly one new migration beyond the pre-existing set", () => {
+  it("appears exactly once beyond the pre-existing set", () => {
     const added = sqlMigrations.filter((f) => !PRE_EXISTING_MIGRATIONS.includes(f));
-    expect(added).toEqual([MIGRATION_FILENAME]);
+    expect(added).toContain(MIGRATION_FILENAME);
+    expect(added.filter((name) => name === MIGRATION_FILENAME)).toHaveLength(1);
   });
 
   it("sorts strictly after every pre-existing migration", () => {
-    const sorted = [...sqlMigrations].sort();
-    expect(sorted[sorted.length - 1]).toBe(MIGRATION_FILENAME);
     for (const name of PRE_EXISTING_MIGRATIONS) {
       expect(MIGRATION_FILENAME > name).toBe(true);
     }
