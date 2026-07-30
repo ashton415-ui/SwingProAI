@@ -45,11 +45,14 @@ const BASELINE_FILENAME = "20260721220000_swingproai_production_baseline.sql";
 const S1R_FILENAME = "20260725020835_equipment_intelligence_putting_foundation.sql";
 const S2_FILENAME = "20260725174239_equipment_putter_catalog_v1.sql";
 const SEC1B_FN_FILENAME = "20260729054500_pin_function_search_path.sql";
+const SEC1C_FILENAME =
+  "20260730035500_revoke_anon_execute_link_student_to_coach.sql";
 
 const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [BASELINE_FILENAME]: "33a599f07cd6aba5761ce7feea811ed3c096bb9dbc50f21d519037df45d4b828",
   [S1R_FILENAME]: "7515cc5a8de9f3dfb492841dea0ec407b87bb26242f9f00e95b6e6e515cb8064",
   [S2_FILENAME]: "e92c9f7b2e062b17b9934b3e6ff039c6e0b7daf92fccf81590dcba74e92c95a1",
+  [SEC1C_FILENAME]: "a8a20fff1e8959a8974fb13a853c90a6adf83b35b39025aa04928830a340edca",
 };
 
 function expectedBridgeFilename(b: { version: string; name: string }): string {
@@ -60,11 +63,11 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 
 // ============================================================================
 // 1-3, 23-24. Exact set membership, no missing, no unexpected extra, exact
-// 20-file inventory, strict timestamp ordering.
+// 21-file inventory, strict timestamp ordering.
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
-  it("the migrations directory contains exactly 20 SQL files", () => {
-    expect(allMigrationFiles.length).toBe(20);
+  it("the migrations directory contains exactly 21 SQL files", () => {
+    expect(allMigrationFiles.length).toBe(21);
   });
 
   it("contains exactly the approved 16 bridge files, no missing", () => {
@@ -82,14 +85,15 @@ describe("migration-history bridge — exact file inventory", () => {
       S1R_FILENAME,
       S2_FILENAME,
       SEC1B_FN_FILENAME,
+      SEC1C_FILENAME,
     ]);
     const unexpected = allMigrationFiles.filter((f) => !expectedNames.has(f));
     expect(unexpected, `unexpected migration file(s) present: ${JSON.stringify(unexpected)}`).toEqual([]);
   });
 
-  it("strict timestamp ordering: 16 bridges, then baseline, then S1R, then S2, then SEC1B-FN", () => {
+  it("strict timestamp ordering: 16 bridges, then baseline, then S1R, then S2, then SEC1B-FN, then SEC1C", () => {
     const sorted = [...allMigrationFiles].sort();
-    const expectedOrder = [...EXPECTED_BRIDGES.map(expectedBridgeFilename), BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1B_FN_FILENAME].sort();
+    const expectedOrder = [...EXPECTED_BRIDGES.map(expectedBridgeFilename), BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1B_FN_FILENAME, SEC1C_FILENAME].sort();
     // Both lists are independently sorted lexicographically (equivalent to
     // timestamp order for these fixed-width numeric prefixes), so this
     // proves the actual directory contents collapse to the same ordered
@@ -229,10 +233,10 @@ describe.each(EXPECTED_BRIDGES)("bridge file $version_$name", (bridge) => {
 
 // ============================================================================
 // 22. Canonical migration fingerprint preservation — proves the bridge
-// implementation did not alter a single byte of the three canonical files.
+// implementation did not alter a single byte of the four canonical files.
 // ============================================================================
 describe("migration-history bridge — canonical file fingerprints unchanged", () => {
-  it.each([BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME])("%s SHA256 matches the canonical value exactly", (filename) => {
+  it.each([BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1C_FILENAME])("%s SHA256 matches the canonical value exactly", (filename) => {
     const raw = readRawBuffer(path.join(migrationsDir, filename));
     const actualSha256 = createHash("sha256").update(raw).digest("hex");
     expect(actualSha256).toBe(CANONICAL_FINGERPRINTS[filename]);
