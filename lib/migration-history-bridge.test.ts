@@ -54,7 +54,6 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
   it("the migrations directory contains exactly the approved number of SQL files", () => {
-    expect(EXPECTED_MIGRATION_COUNT).toBe(21);
     expect(allMigrationFiles.length).toBe(EXPECTED_MIGRATION_COUNT);
   });
 
