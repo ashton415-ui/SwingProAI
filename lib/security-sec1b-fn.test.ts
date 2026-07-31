@@ -2,13 +2,17 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  SEC1B_FN_FILENAME,
+  migrationsAuthoredBefore,
+} from "./migration-inventory";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const repoRoot = path.join(__dirname, "..");
 const migrationsDir = path.join(repoRoot, "supabase", "migrations");
 
-const MIGRATION_FILENAME = "20260729054500_pin_function_search_path.sql";
+const MIGRATION_FILENAME = SEC1B_FN_FILENAME;
 const migrationPath = path.join(migrationsDir, MIGRATION_FILENAME);
 
 // Normalized to LF immediately after reading, matching the convention already
@@ -40,29 +44,11 @@ const TARGETS = [
   "public.auto_assign_coach_invite_code()",
 ];
 
-/** Every migration checked in before this gate. The inventory must grow from
- *  these 19 to exactly 20 — no other migration may be added or removed. */
-const PRE_EXISTING_MIGRATIONS = [
-  "20260602035147_swingproai_initial_schema.sql",
-  "20260602035215_lock_down_handle_new_user.sql",
-  "20260603034557_add_stripe_subscription_fields.sql",
-  "20260603163859_swing_videos_upload_fields_and_storage.sql",
-  "20260604114619_add_trim_points_to_swing_videos.sql",
-  "20260604164318_add_role_coach_system.sql",
-  "20260605010541_tier_based_analysis_routing.sql",
-  "20260605015917_phase2_caddy_putting_courses.sql",
-  "20260611030421_coach_hub_tables.sql",
-  "20260611185400_coach_invite_codes.sql",
-  "20260611190546_automated_prescriptions_session_link.sql",
-  "20260711225631_create_user_clubs_table.sql",
-  "20260711231548_enable_rls_swings_text_user_id.sql",
-  "20260711231750_fix_swings_rls_drop_public_policy_and_dupes.sql",
-  "20260711231833_enable_rls_user_bags_clean.sql",
-  "20260712143342_create_rounds_table.sql",
-  "20260721220000_swingproai_production_baseline.sql",
-  "20260725020835_equipment_intelligence_putting_foundation.sql",
-  "20260725174239_equipment_putter_catalog_v1.sql",
-];
+/** Every migration that already existed when SEC1B was authored — the 19 that
+ *  sort before it. Derived from lib/migration-inventory.ts rather than
+ *  redeclared, so adding a later migration cannot invalidate SEC1B's own
+ *  historical contract. */
+const PRE_EXISTING_MIGRATIONS = migrationsAuthoredBefore(MIGRATION_FILENAME);
 
 /** Parses every `alter function <schema>.<name>(<args>) set search_path = '...'`
  *  statement, capturing the pieces each assertion needs to check independently. */
@@ -282,11 +268,21 @@ describe("SEC1B-FN — pre-existing SEC1A artifacts are unmodified", () => {
     expect(drops.length).toBe(3);
   });
 
-  it("does not promote the SEC1A contract into supabase/migrations", () => {
-    const migrationNames = readdirSync(migrationsDir);
-    for (const name of migrationNames) {
-      expect(name).not.toContain("sec1a");
-    }
+  // SEC1B's actual contract is "SEC1B did not promote the SEC1A source file
+  // into supabase/migrations" — a claim about SEC1B's OWN migration. The
+  // previous form banned the substring "sec1a" from every migration filename,
+  // which would have rejected a legitimate future migration that applies the
+  // SEC1A policy drops. Scoped to SEC1B's own file, the intent is preserved and
+  // no constraint is placed on any later migration's name.
+  it("SEC1B's own migration is not a promoted copy of the SEC1A contract", () => {
+    const sec1a = readFileSync(sec1aSqlPath, "utf8").replace(/\r\n/g, "\n");
+    const sec1b = readFileSync(
+      path.join(migrationsDir, MIGRATION_FILENAME),
+      "utf8"
+    ).replace(/\r\n/g, "\n");
+    expect(sec1b).not.toBe(sec1a);
+    // SEC1B alters function configuration; it drops no policy at all.
+    expect(sec1b.toLowerCase()).not.toContain("drop policy");
   });
 });
 

@@ -3,6 +3,17 @@ import { readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  APPROVED_MIGRATIONS,
+  BASELINE_FILENAME,
+  BRIDGE_MIGRATIONS,
+  EXPECTED_MIGRATION_COUNT,
+  S1R_FILENAME,
+  S2_FILENAME,
+  SEC1B_FN_FILENAME,
+  SEC1C_FILENAME,
+  bridgeFilename,
+} from "./migration-inventory";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(__dirname, "..");
@@ -18,35 +29,13 @@ function readRawBuffer(filePath: string): Buffer {
 
 // ============================================================================
 // The 16 approved historical bridge files: exact expected version/name
-// pairs, in file order. This list is the single source of truth for every
-// identity-shaped assertion below — no wildcard, no directory-wide
-// acceptance of "whatever matches a pattern."
+// pairs, in file order. The data now comes from lib/migration-inventory.ts so
+// it is declared once repository-wide, but this file remains the closed-world
+// authority — every identity-shaped assertion below still demands exact set
+// equality and an exact count. No wildcard, no directory-wide acceptance of
+// "whatever matches a pattern."
 // ============================================================================
-const EXPECTED_BRIDGES: { version: string; name: string }[] = [
-  { version: "20260602035147", name: "swingproai_initial_schema" },
-  { version: "20260602035215", name: "lock_down_handle_new_user" },
-  { version: "20260603034557", name: "add_stripe_subscription_fields" },
-  { version: "20260603163859", name: "swing_videos_upload_fields_and_storage" },
-  { version: "20260604114619", name: "add_trim_points_to_swing_videos" },
-  { version: "20260604164318", name: "add_role_coach_system" },
-  { version: "20260605010541", name: "tier_based_analysis_routing" },
-  { version: "20260605015917", name: "phase2_caddy_putting_courses" },
-  { version: "20260611030421", name: "coach_hub_tables" },
-  { version: "20260611185400", name: "coach_invite_codes" },
-  { version: "20260611190546", name: "automated_prescriptions_session_link" },
-  { version: "20260711225631", name: "create_user_clubs_table" },
-  { version: "20260711231548", name: "enable_rls_swings_text_user_id" },
-  { version: "20260711231750", name: "fix_swings_rls_drop_public_policy_and_dupes" },
-  { version: "20260711231833", name: "enable_rls_user_bags_clean" },
-  { version: "20260712143342", name: "create_rounds_table" },
-];
-
-const BASELINE_FILENAME = "20260721220000_swingproai_production_baseline.sql";
-const S1R_FILENAME = "20260725020835_equipment_intelligence_putting_foundation.sql";
-const S2_FILENAME = "20260725174239_equipment_putter_catalog_v1.sql";
-const SEC1B_FN_FILENAME = "20260729054500_pin_function_search_path.sql";
-const SEC1C_FILENAME =
-  "20260730035500_revoke_anon_execute_link_student_to_coach.sql";
+const EXPECTED_BRIDGES = BRIDGE_MIGRATIONS;
 
 const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [BASELINE_FILENAME]: "33a599f07cd6aba5761ce7feea811ed3c096bb9dbc50f21d519037df45d4b828",
@@ -55,9 +44,7 @@ const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [SEC1C_FILENAME]: "a8a20fff1e8959a8974fb13a853c90a6adf83b35b39025aa04928830a340edca",
 };
 
-function expectedBridgeFilename(b: { version: string; name: string }): string {
-  return `${b.version}_${b.name}.sql`;
-}
+const expectedBridgeFilename = bridgeFilename;
 
 const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".sql"));
 
@@ -66,8 +53,9 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 // 21-file inventory, strict timestamp ordering.
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
-  it("the migrations directory contains exactly 21 SQL files", () => {
-    expect(allMigrationFiles.length).toBe(21);
+  it("the migrations directory contains exactly the approved number of SQL files", () => {
+    expect(EXPECTED_MIGRATION_COUNT).toBe(21);
+    expect(allMigrationFiles.length).toBe(EXPECTED_MIGRATION_COUNT);
   });
 
   it("contains exactly the approved 16 bridge files, no missing", () => {
@@ -79,21 +67,14 @@ describe("migration-history bridge — exact file inventory", () => {
   });
 
   it("contains no unexpected seventeenth bridge file", () => {
-    const expectedNames = new Set([
-      ...EXPECTED_BRIDGES.map(expectedBridgeFilename),
-      BASELINE_FILENAME,
-      S1R_FILENAME,
-      S2_FILENAME,
-      SEC1B_FN_FILENAME,
-      SEC1C_FILENAME,
-    ]);
+    const expectedNames = new Set(APPROVED_MIGRATIONS);
     const unexpected = allMigrationFiles.filter((f) => !expectedNames.has(f));
     expect(unexpected, `unexpected migration file(s) present: ${JSON.stringify(unexpected)}`).toEqual([]);
   });
 
   it("strict timestamp ordering: 16 bridges, then baseline, then S1R, then S2, then SEC1B-FN, then SEC1C", () => {
     const sorted = [...allMigrationFiles].sort();
-    const expectedOrder = [...EXPECTED_BRIDGES.map(expectedBridgeFilename), BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1B_FN_FILENAME, SEC1C_FILENAME].sort();
+    const expectedOrder = [...APPROVED_MIGRATIONS].sort();
     // Both lists are independently sorted lexicographically (equivalent to
     // timestamp order for these fixed-width numeric prefixes), so this
     // proves the actual directory contents collapse to the same ordered
