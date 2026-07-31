@@ -2,14 +2,18 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  SEC1C_FILENAME,
+  migrationsAuthoredBefore,
+  sortsAfterAll,
+} from "./migration-inventory";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const repoRoot = path.join(__dirname, "..");
 const migrationsDir = path.join(repoRoot, "supabase", "migrations");
 
-const MIGRATION_FILENAME =
-  "20260730035500_revoke_anon_execute_link_student_to_coach.sql";
+const MIGRATION_FILENAME = SEC1C_FILENAME;
 const migrationPath = path.join(migrationsDir, MIGRATION_FILENAME);
 
 /** Raw bytes, so byte-level checks (BOM, CR, trailing newline) see the file
@@ -256,9 +260,17 @@ describe("SEC1C — migration ordering", () => {
     expect(sqlMigrations).toContain(MIGRATION_FILENAME);
   });
 
-  it("is the lexicographically last SQL migration", () => {
-    const sorted = [...sqlMigrations].sort();
-    expect(sorted[sorted.length - 1]).toBe(MIGRATION_FILENAME);
+  // Asserts SEC1C's own historical contract — it sorts after everything that
+  // existed when it was authored — rather than "is the newest file on disk",
+  // which would expire the moment any later migration is added. This mirrors
+  // the same correction already applied to the SEC1B inventory assertions.
+  it("sorts after every migration that existed when SEC1C was authored", () => {
+    const priorMigrations = migrationsAuthoredBefore(MIGRATION_FILENAME);
+    expect(priorMigrations.length).toBe(20);
+    expect(sortsAfterAll(MIGRATION_FILENAME, priorMigrations)).toBe(true);
+    for (const name of priorMigrations) {
+      expect(sqlMigrations).toContain(name);
+    }
   });
 
   it("carries a 14-digit timestamp prefix matching the Supabase CLI format", () => {
