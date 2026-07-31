@@ -12,6 +12,7 @@ import {
   S2_FILENAME,
   SEC1B_FN_FILENAME,
   SEC1C_FILENAME,
+  SEC1D_POL_FILENAME,
   bridgeFilename,
 } from "./migration-inventory";
 
@@ -42,6 +43,7 @@ const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [S1R_FILENAME]: "7515cc5a8de9f3dfb492841dea0ec407b87bb26242f9f00e95b6e6e515cb8064",
   [S2_FILENAME]: "e92c9f7b2e062b17b9934b3e6ff039c6e0b7daf92fccf81590dcba74e92c95a1",
   [SEC1C_FILENAME]: "a8a20fff1e8959a8974fb13a853c90a6adf83b35b39025aa04928830a340edca",
+  [SEC1D_POL_FILENAME]: "c38484f66d8bdbfefb4c166ee7821e7f8d735930b6f2ecd5911ac35066e48016",
 };
 
 const expectedBridgeFilename = bridgeFilename;
