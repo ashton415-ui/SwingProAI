@@ -215,10 +215,10 @@ describe.each(EXPECTED_BRIDGES)("bridge file $version_$name", (bridge) => {
 
 // ============================================================================
 // 22. Canonical migration fingerprint preservation — proves the bridge
-// implementation did not alter a single byte of the four canonical files.
+// implementation did not alter a single byte of the five canonical files.
 // ============================================================================
 describe("migration-history bridge — canonical file fingerprints unchanged", () => {
-  it.each([BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1C_FILENAME])("%s SHA256 matches the canonical value exactly", (filename) => {
+  it.each([BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1C_FILENAME, SEC1D_POL_FILENAME])("%s SHA256 matches the canonical value exactly", (filename) => {
     const raw = readRawBuffer(path.join(migrationsDir, filename));
     const actualSha256 = createHash("sha256").update(raw).digest("hex");
     expect(actualSha256).toBe(CANONICAL_FINGERPRINTS[filename]);
