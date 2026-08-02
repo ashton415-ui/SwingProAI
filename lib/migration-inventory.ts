@@ -50,6 +50,8 @@ export const S2_FILENAME = "20260725174239_equipment_putter_catalog_v1.sql";
 export const SEC1B_FN_FILENAME = "20260729054500_pin_function_search_path.sql";
 export const SEC1C_FILENAME =
   "20260730035500_revoke_anon_execute_link_student_to_coach.sql";
+export const SEC1D_POL_FILENAME =
+  "20260731220500_drop_weak_policies_sec1a_contract.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -63,6 +65,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   S2_FILENAME,
   SEC1B_FN_FILENAME,
   SEC1C_FILENAME,
+  SEC1D_POL_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
