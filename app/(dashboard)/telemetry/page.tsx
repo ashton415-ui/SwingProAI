@@ -53,6 +53,29 @@ interface RangeLog {
   completion_rate: number;
 }
 
+/**
+ * range_sessions stores its per-session metrics in the nullable `exercise_data`
+ * jsonb column, so the payload is untrusted at runtime. Every metric is checked
+ * as a finite number rather than asserted, and a null or malformed blob yields
+ * null so the caller can drop the row instead of rendering fabricated values.
+ */
+function parseRangeMetrics(
+  value: unknown
+): { shots_total: number; shots_executed: number; completion_rate: number } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+
+  const raw = value as Record<string, unknown>;
+  const total    = raw.shots_total;
+  const executed = raw.shots_executed;
+  const rate     = raw.completion_rate;
+
+  if (typeof total    !== "number" || !Number.isFinite(total))    return null;
+  if (typeof executed !== "number" || !Number.isFinite(executed)) return null;
+  if (typeof rate     !== "number" || !Number.isFinite(rate))     return null;
+
+  return { shots_total: total, shots_executed: executed, completion_rate: rate };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Equipment Optimizer — pure logic, no API calls
 // ─────────────────────────────────────────────────────────────────────────────
@@ -675,9 +698,9 @@ export default async function TelemetryPage() {
 
     supabase
       .from("range_sessions")
-      .select("id, session_type, shots_total, shots_executed, completion_rate, created_at")
+      .select("id, session_type, exercise_data, completed_at")
       .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
+      .order("completed_at", { ascending: false })
       .limit(50),
   ]);
 
@@ -730,14 +753,27 @@ export default async function TelemetryPage() {
     };
   });
 
-  const rangeLogs: RangeLog[] = (rangeResult.data ?? []).map((r) => ({
-    id:              r.id,
-    created_at:      r.created_at,
-    session_type:    r.session_type,
-    shots_total:     r.shots_total,
-    shots_executed:  r.shots_executed,
-    completion_rate: r.completion_rate,
-  }));
+  // `created_at` is retained as the RangeLog field name so the existing cards
+  // and timeline merge are untouched, but it is sourced solely from the
+  // validated `completed_at` database value. Rows whose id, session_type,
+  // completed_at, or exercise_data fail validation are omitted rather than
+  // rendered with fabricated values.
+  const rangeLogs: RangeLog[] = (rangeResult.data ?? []).flatMap((r) => {
+    const metrics = parseRangeMetrics(r.exercise_data);
+    if (metrics === null) return [];
+    if (typeof r.id !== "string") return [];
+    if (typeof r.session_type !== "string") return [];
+    if (typeof r.completed_at !== "string") return [];
+
+    return [{
+      id:              r.id,
+      created_at:      r.completed_at,
+      session_type:    r.session_type,
+      shots_total:     metrics.shots_total,
+      shots_executed:  metrics.shots_executed,
+      completion_rate: metrics.completion_rate,
+    }];
+  });
 
   // Merge chronologically
   type TimelineItem =

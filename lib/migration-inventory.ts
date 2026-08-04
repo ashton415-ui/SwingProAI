@@ -52,6 +52,8 @@ export const SEC1C_FILENAME =
   "20260730035500_revoke_anon_execute_link_student_to_coach.sql";
 export const SEC1D_POL_FILENAME =
   "20260731220500_drop_weak_policies_sec1a_contract.sql";
+export const SEC1F_RANGE_SESSIONS_FILENAME =
+  "20260804022105_add_range_sessions_owner_policies.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -66,6 +68,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   SEC1B_FN_FILENAME,
   SEC1C_FILENAME,
   SEC1D_POL_FILENAME,
+  SEC1F_RANGE_SESSIONS_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
