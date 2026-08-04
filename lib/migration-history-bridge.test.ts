@@ -13,6 +13,7 @@ import {
   SEC1B_FN_FILENAME,
   SEC1C_FILENAME,
   SEC1D_POL_FILENAME,
+  SEC1F_RANGE_SESSIONS_FILENAME,
   bridgeFilename,
 } from "./migration-inventory";
 
@@ -44,6 +45,7 @@ const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [S2_FILENAME]: "e92c9f7b2e062b17b9934b3e6ff039c6e0b7daf92fccf81590dcba74e92c95a1",
   [SEC1C_FILENAME]: "a8a20fff1e8959a8974fb13a853c90a6adf83b35b39025aa04928830a340edca",
   [SEC1D_POL_FILENAME]: "c38484f66d8bdbfefb4c166ee7821e7f8d735930b6f2ecd5911ac35066e48016",
+  [SEC1F_RANGE_SESSIONS_FILENAME]: "d155232b0e0ae7fc61aa3312658ec773c3dc3dcb29caf63db92ca9c3986e5b9b",
 };
 
 const expectedBridgeFilename = bridgeFilename;
@@ -52,7 +54,7 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 
 // ============================================================================
 // 1-3, 23-24. Exact set membership, no missing, no unexpected extra, exact
-// 21-file inventory, strict timestamp ordering.
+// 23-file inventory, strict timestamp ordering.
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
   it("the migrations directory contains exactly the approved number of SQL files", () => {
@@ -73,7 +75,7 @@ describe("migration-history bridge — exact file inventory", () => {
     expect(unexpected, `unexpected migration file(s) present: ${JSON.stringify(unexpected)}`).toEqual([]);
   });
 
-  it("strict timestamp ordering: 16 bridges, then baseline, then S1R, then S2, then SEC1B-FN, then SEC1C", () => {
+  it("strict timestamp ordering: 16 bridges, then baseline, S1R, S2, SEC1B-FN, SEC1C, SEC1D, then SEC1F range sessions", () => {
     const sorted = [...allMigrationFiles].sort();
     const expectedOrder = [...APPROVED_MIGRATIONS].sort();
     // Both lists are independently sorted lexicographically (equivalent to
@@ -215,10 +217,10 @@ describe.each(EXPECTED_BRIDGES)("bridge file $version_$name", (bridge) => {
 
 // ============================================================================
 // 22. Canonical migration fingerprint preservation — proves the bridge
-// implementation did not alter a single byte of the five canonical files.
+// implementation did not alter a single byte of the six canonical files.
 // ============================================================================
 describe("migration-history bridge — canonical file fingerprints unchanged", () => {
-  it.each([BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1C_FILENAME, SEC1D_POL_FILENAME])("%s SHA256 matches the canonical value exactly", (filename) => {
+  it.each([BASELINE_FILENAME, S1R_FILENAME, S2_FILENAME, SEC1C_FILENAME, SEC1D_POL_FILENAME, SEC1F_RANGE_SESSIONS_FILENAME])("%s SHA256 matches the canonical value exactly", (filename) => {
     const raw = readRawBuffer(path.join(migrationsDir, filename));
     const actualSha256 = createHash("sha256").update(raw).digest("hex");
     expect(actualSha256).toBe(CANONICAL_FINGERPRINTS[filename]);
