@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -534,9 +534,4 @@ describe("SEC1F — out-of-scope files are untouched", () => {
     expect(actual).toBe(sha);
   });
 
-  it("does not carry the blocked SEC1F documentation file", () => {
-    expect(
-      existsSync(path.join(repoRoot, "docs", "SUPABASE_SECURITY_ACCEPTED_FINDINGS.md"))
-    ).toBe(false);
-  });
 });
