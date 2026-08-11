@@ -78,6 +78,12 @@ const BUCKET = "swing-videos";
 const MAX_FILE_MB = 250;
 const MAX_SEGMENT_SECONDS = 15;
 
+/** Shown when the browser cannot produce the requested trimmed/compressed clip.
+ *  We fail closed here: uploading the original file instead would analyze a
+ *  different clip than the golfer asked for, and report it as a success. */
+const PREPROCESSING_FAILED_MESSAGE =
+  "Your browser couldn't prepare this clip for analysis. Try a shorter or smaller clip, or use another browser or device.";
+
 function formatYt(url: string) {
   if (!url) return "";
   if (url.includes("watch?v=")) return url.replace("watch?v=", "embed/");
@@ -155,14 +161,71 @@ export default function AnalyzePage() {
     const video = videoRef.current;
     if (!video || !file) throw new Error("No video loaded");
 
-    // Skip transcode if already small and no trim needed
-    if (trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size < 18 * 1024 * 1024) {
+    // Skip transcode if already small and no trim needed. This fast path is
+    // deliberate — it must never be gated on MediaRecorder/captureStream.
+    const preprocessingRequired = !(
+      trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size < 18 * 1024 * 1024
+    );
+    if (!preprocessingRequired) {
       return file;
     }
 
     setIsTrimming(true);
 
-    return new Promise((resolve) => {
+    // Preprocessing IS required below. Every exit must either deliver the
+    // processed clip or reject — never silently substitute the original file.
+    return new Promise<Blob>((resolve, reject) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      let check: ReturnType<typeof setInterval> | undefined;
+      let raf: number | undefined;
+      // Cleanup-owned handles. Declared here so terminal cleanup can reach the
+      // seeked listener and the recorder, both of which are created below.
+      let activeRecorder: MediaRecorder | undefined;
+      let seekedHandler: (() => void) | undefined;
+
+      const cleanup = () => {
+        // 1. Drop the pending seeked listener FIRST, so the currentTime
+        //    restoration at the end of this function cannot re-trigger it.
+        if (seekedHandler !== undefined) {
+          video.removeEventListener("seeked", seekedHandler);
+          seekedHandler = undefined;
+        }
+        // 2. Cancel every scheduled continuation.
+        if (timeout !== undefined) clearTimeout(timeout);
+        if (watchdog !== undefined) clearTimeout(watchdog);
+        if (check !== undefined) clearInterval(check);
+        if (raf !== undefined) cancelAnimationFrame(raf);
+        // 3. Stop preprocessing playback.
+        video.pause();
+        // 4. Terminate a still-running recorder. `settled` is already true when
+        //    this runs, so any resulting onstop is inert and cannot turn a
+        //    failure into a success.
+        if (activeRecorder !== undefined && activeRecorder.state !== "inactive") {
+          try { activeRecorder.stop(); } catch { /* stop is best-effort during cleanup */ }
+        }
+        // 5. Clear the busy state.
+        setIsTrimming(false);
+        // 6. Restore playback state last.
+        if (videoRef.current) { videoRef.current.playbackRate = 1; videoRef.current.currentTime = trimStart; }
+      };
+
+      const succeed = (blob: Blob) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(blob);
+      };
+
+      /** Fail closed — the requested clip could not be produced. */
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(PREPROCESSING_FAILED_MESSAGE));
+      };
+
       try {
         const aspect = video.videoWidth / video.videoHeight;
         let w = aspect < 1 ? Math.round(848 * aspect) : 848;
@@ -173,27 +236,26 @@ export default function AnalyzePage() {
         const canvas = document.createElement("canvas");
         canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext("2d", { alpha: false });
-        if (!ctx) { setIsTrimming(false); resolve(file); return; }
+        if (!ctx) { fail(); return; }
 
         const stream = (canvas as any).captureStream?.(30);
-        if (!stream) { setIsTrimming(false); resolve(file); return; }
+        if (!stream) { fail(); return; }
 
         const recorder = new MediaRecorder(stream, {
           mimeType: "video/webm",
           videoBitsPerSecond: 800_000,
         });
+        activeRecorder = recorder;
         const chunks: BlobPart[] = [];
         recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunks.push(e.data); };
 
-        let timeout: ReturnType<typeof setTimeout>;
-        let raf: number;
+        // Asynchronous recorder failure — without this the promise could never
+        // settle, leaving the UI stuck in the compressing state.
+        recorder.onerror = () => { fail(); };
 
         recorder.onstop = () => {
-          clearTimeout(timeout);
-          cancelAnimationFrame(raf);
-          setIsTrimming(false);
-          if (videoRef.current) { videoRef.current.playbackRate = 1; videoRef.current.currentTime = trimStart; }
-          resolve(new Blob(chunks, { type: "video/webm" }));
+          if (chunks.length === 0) { fail(); return; }
+          succeed(new Blob(chunks, { type: "video/webm" }));
         };
 
         const drawFrame = () => {
@@ -206,25 +268,35 @@ export default function AnalyzePage() {
         video.playbackRate = 2.0;
         video.muted = true;
 
+        // Absolute backstop, strictly later than the normal stop timeout, so no
+        // recorder path can leave this promise unsettled.
+        watchdog = setTimeout(fail, ((trimEnd - trimStart) / 2.0) * 3000 + 15000);
+
         const onSeeked = () => {
+          if (settled) return;
           video.removeEventListener("seeked", onSeeked);
+          seekedHandler = undefined;
           video.play().then(() => {
+            // play() may still have been pending when the operation settled.
+            if (settled) return;
             recorder.start(100);
             drawFrame();
-            const check = setInterval(() => {
+            check = setInterval(() => {
               if (video.currentTime >= trimEnd || video.ended) {
-                clearInterval(check); video.pause();
+                if (check !== undefined) clearInterval(check);
+                video.pause();
                 if (recorder.state !== "inactive") recorder.stop();
               }
             }, 50);
             timeout = setTimeout(() => {
-              clearInterval(check);
+              if (check !== undefined) clearInterval(check);
               if (recorder.state !== "inactive") recorder.stop();
             }, ((trimEnd - trimStart) / 2.0) * 3000 + 4000);
-          }).catch(() => { setIsTrimming(false); resolve(file); });
+          }).catch(() => { fail(); });
         };
+        seekedHandler = onSeeked;
         video.addEventListener("seeked", onSeeked);
-      } catch { setIsTrimming(false); resolve(file); }
+      } catch { fail(); }
     });
   };
 
