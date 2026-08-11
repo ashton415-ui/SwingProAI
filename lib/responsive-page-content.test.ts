@@ -772,3 +772,316 @@ describe("VirtualBag — ClubRow action button minimum touch targets", () => {
     }
   });
 });
+
+// ============================================================================
+// AnalyzePage — fail-closed browser preprocessing contract
+//
+// These are SOURCE/STATIC CONTRACT assertions. They prove the shape of the
+// preprocessing code on the reachable /analyze route. They do NOT and cannot
+// prove real browser behaviour — MediaRecorder/captureStream availability,
+// mobile video decode, and physical device rendering remain separate
+// real-device verification work.
+// ============================================================================
+
+/** Isolates the `getTrimmedBlob` implementation so assertions below cannot be
+ *  satisfied (or tripped) by unrelated code elsewhere in the 800-line page. The
+ *  body runs from the declaration to the start of the next top-level member,
+ *  `dbRowToResult`, which immediately follows it in source order. */
+function isolateGetTrimmedBlobSource(source: string): string {
+  const startMarker = "const getTrimmedBlob";
+  const startIdx = source.indexOf(startMarker);
+  expect(startIdx, `${ANALYZE_PAGE_FILE}: could not locate "${startMarker}"`).toBeGreaterThanOrEqual(0);
+
+  const endMarker = "function dbRowToResult";
+  const endIdx = source.indexOf(endMarker, startIdx);
+  expect(endIdx, `${ANALYZE_PAGE_FILE}: could not locate "${endMarker}" after "${startMarker}"`).toBeGreaterThan(startIdx);
+
+  return source.slice(startIdx, endIdx);
+}
+
+/** Isolates the executable `preprocessingRequired` predicate — the parenthesized
+ *  expression only, with `//` line comments stripped — so capability assertions
+ *  test code rather than surrounding explanatory prose. */
+function isolatePreprocessingRequiredPredicate(source: string): string {
+  const block = isolateGetTrimmedBlobSource(source);
+  const match = block.match(/const preprocessingRequired = !\(([\s\S]*?)\);/);
+  expect(match, `${ANALYZE_PAGE_FILE}: could not locate the "const preprocessingRequired = !( … );" predicate`).not.toBeNull();
+  return match![1]
+    .split("\n")
+    .map((line) => (line.indexOf("//") === -1 ? line : line.slice(0, line.indexOf("//"))))
+    .join("\n")
+    .trim();
+}
+
+/** Isolates the `cleanup` helper inside `getTrimmedBlob` so terminal-lifecycle
+ *  assertions cannot be satisfied by the separate success/failure code paths. */
+function isolateCleanupSource(source: string): string {
+  const block = isolateGetTrimmedBlobSource(source);
+  const startMarker = "const cleanup = () => {";
+  const startIdx = block.indexOf(startMarker);
+  expect(startIdx, `${ANALYZE_PAGE_FILE}: could not locate "${startMarker}"`).toBeGreaterThanOrEqual(0);
+
+  const endMarker = "const succeed";
+  const endIdx = block.indexOf(endMarker, startIdx);
+  expect(endIdx, `${ANALYZE_PAGE_FILE}: could not locate "${endMarker}" after the cleanup helper`).toBeGreaterThan(startIdx);
+
+  return block.slice(startIdx, endIdx);
+}
+
+/** Isolates the `seeked` handler, including the `video.play().then(...)`
+ *  continuation it schedules. */
+function isolateSeekedHandlerSource(source: string): string {
+  const block = isolateGetTrimmedBlobSource(source);
+  const startMarker = "const onSeeked = () => {";
+  const startIdx = block.indexOf(startMarker);
+  expect(startIdx, `${ANALYZE_PAGE_FILE}: could not locate "${startMarker}"`).toBeGreaterThanOrEqual(0);
+
+  const endMarker = 'video.addEventListener("seeked"';
+  const endIdx = block.indexOf(endMarker, startIdx);
+  expect(endIdx, `${ANALYZE_PAGE_FILE}: could not locate "${endMarker}" after the seeked handler`).toBeGreaterThan(startIdx);
+
+  return block.slice(startIdx, endIdx);
+}
+
+/** Isolates `startAnalysis` so ordering assertions are scoped to the real
+ *  submission flow rather than to similar strings elsewhere in the file. */
+function isolateStartAnalysisSource(source: string): string {
+  const startMarker = "const startAnalysis";
+  const startIdx = source.indexOf(startMarker);
+  expect(startIdx, `${ANALYZE_PAGE_FILE}: could not locate "${startMarker}"`).toBeGreaterThanOrEqual(0);
+
+  const endMarker = "const setTime";
+  const endIdx = source.indexOf(endMarker, startIdx);
+  expect(endIdx, `${ANALYZE_PAGE_FILE}: could not locate "${endMarker}" after "${startMarker}"`).toBeGreaterThan(startIdx);
+
+  return source.slice(startIdx, endIdx);
+}
+
+describe("AnalyzePage — small/untrimmed direct-file fast path is preserved", () => {
+  it("retains all three fast-path conditions", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    for (const condition of [
+      "trimStart === 0",
+      "Math.abs(trimEnd - duration) < 0.1",
+      "file.size < 18 * 1024 * 1024",
+    ]) {
+      expect(block, `${ANALYZE_PAGE_FILE}: fast-path condition "${condition}" was removed or altered`).toContain(condition);
+    }
+  });
+
+  it("still returns the original File directly for the fast path", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: the direct "return file;" fast path must be preserved`).toContain("return file;");
+  });
+
+  it("does not gate the fast path on any transcoding capability", () => {
+    // Assert against the EXECUTABLE predicate, not raw source before the fast
+    // path — the latter also spans explanatory comment prose, which legitimately
+    // names the capabilities the fast path must not depend on.
+    const predicate = isolatePreprocessingRequiredPredicate(readSource(ANALYZE_PAGE_FILE));
+    for (const gate of ["MediaRecorder", "captureStream", "getContext"]) {
+      expect(predicate, `${ANALYZE_PAGE_FILE}: "${gate}" must not gate the small/untrimmed fast path — predicate is "${predicate}"`).not.toContain(gate);
+    }
+  });
+
+  it("evaluates the fast path before any preprocessing capability is touched", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    const order: [string, number][] = [
+      ["const preprocessingRequired", block.indexOf("const preprocessingRequired")],
+      ["if (!preprocessingRequired)", block.indexOf("if (!preprocessingRequired)")],
+      ["return file;", block.indexOf("return file;")],
+      ["setIsTrimming(true)", block.indexOf("setIsTrimming(true)")],
+      ["captureStream", block.indexOf("(canvas as any).captureStream")],
+      ["new MediaRecorder", block.indexOf("new MediaRecorder")],
+    ];
+    for (const [label, idx] of order) {
+      expect(idx, `${ANALYZE_PAGE_FILE}: getTrimmedBlob is missing "${label}"`).toBeGreaterThanOrEqual(0);
+    }
+    for (let i = 1; i < order.length; i++) {
+      expect(
+        order[i - 1][1],
+        `${ANALYZE_PAGE_FILE}: "${order[i - 1][0]}" must appear before "${order[i][0]}"`,
+      ).toBeLessThan(order[i][1]);
+    }
+  });
+
+  it("keeps the 15-second requested-segment guard unchanged", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    expect(source, `${ANALYZE_PAGE_FILE}: MAX_SEGMENT_SECONDS must remain 15`).toContain("const MAX_SEGMENT_SECONDS = 15;");
+  });
+});
+
+describe("AnalyzePage — required preprocessing fails closed", () => {
+  it("contains no silent resolve-original-file fallback", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: a silent "resolve(file)" fallback would upload a different clip than the one requested`).not.toContain("resolve(file)");
+  });
+
+  it("exposes an explicit rejection path for preprocessing failure", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: the preprocessing promise must be rejectable`).toMatch(/new Promise<Blob>\(\s*\(resolve,\s*reject\)/);
+    expect(block, `${ANALYZE_PAGE_FILE}: missing a reject(...) failure path`).toContain("reject(");
+  });
+
+  it("routes every synchronous failure branch through the fail-closed helper", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    for (const branch of ["if (!ctx) { fail(); return; }", "if (!stream) { fail(); return; }", "catch { fail(); }"]) {
+      expect(block, `${ANALYZE_PAGE_FILE}: expected failure branch "${branch}"`).toContain(branch);
+    }
+  });
+
+  it("provides an asynchronous MediaRecorder error terminal path", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: missing recorder.onerror terminal path`).toContain("recorder.onerror");
+  });
+
+  it("cannot leave the preprocessing promise unsettled", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: missing single-settlement guard`).toContain("let settled = false;");
+    expect(block, `${ANALYZE_PAGE_FILE}: missing absolute watchdog backstop`).toContain("watchdog = setTimeout(fail");
+  });
+
+  it("clears the trimming busy state on every exit", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: cleanup must clear isTrimming`).toContain("setIsTrimming(false);");
+  });
+
+  // ── Terminal lifecycle: nothing may keep running after settlement ────────
+  it("cleanup owns the pending seeked listener and removes it", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    const cleanup = isolateCleanupSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: missing a cleanup-visible seeked-handler holder`).toContain("let seekedHandler");
+    expect(cleanup, `${ANALYZE_PAGE_FILE}: cleanup must remove the pending seeked listener`).toContain('video.removeEventListener("seeked", seekedHandler)');
+  });
+
+  it("removes the seeked listener before restoring currentTime", () => {
+    const cleanup = isolateCleanupSource(readSource(ANALYZE_PAGE_FILE));
+    const removeIdx = cleanup.indexOf('removeEventListener("seeked"');
+    const restoreIdx = cleanup.indexOf("currentTime = trimStart");
+    expect(removeIdx, `${ANALYZE_PAGE_FILE}: cleanup does not remove the seeked listener`).toBeGreaterThanOrEqual(0);
+    expect(restoreIdx, `${ANALYZE_PAGE_FILE}: cleanup does not restore currentTime`).toBeGreaterThanOrEqual(0);
+    expect(removeIdx, `${ANALYZE_PAGE_FILE}: the seeked listener must be removed before currentTime restoration, otherwise cleanup can re-trigger it`).toBeLessThan(restoreIdx);
+  });
+
+  it("cleanup terminates preprocessing playback before restoring state", () => {
+    const cleanup = isolateCleanupSource(readSource(ANALYZE_PAGE_FILE));
+    const pauseIdx = cleanup.indexOf("video.pause()");
+    const restoreIdx = cleanup.indexOf("playbackRate = 1");
+    expect(pauseIdx, `${ANALYZE_PAGE_FILE}: cleanup must pause the video`).toBeGreaterThanOrEqual(0);
+    expect(restoreIdx, `${ANALYZE_PAGE_FILE}: cleanup does not restore playbackRate`).toBeGreaterThanOrEqual(0);
+    expect(pauseIdx, `${ANALYZE_PAGE_FILE}: playback must be paused before playback state is restored`).toBeLessThan(restoreIdx);
+  });
+
+  it("cleanup can stop an active recorder, guarded by state and exception containment", () => {
+    const block = isolateGetTrimmedBlobSource(readSource(ANALYZE_PAGE_FILE));
+    const cleanup = isolateCleanupSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: missing a cleanup-visible recorder holder`).toContain("let activeRecorder");
+    expect(block, `${ANALYZE_PAGE_FILE}: the recorder holder is never assigned`).toContain("activeRecorder = recorder;");
+    expect(cleanup, `${ANALYZE_PAGE_FILE}: cleanup must check recorder state before stopping`).toContain('activeRecorder.state !== "inactive"');
+    expect(cleanup, `${ANALYZE_PAGE_FILE}: cleanup must stop an active recorder`).toContain("activeRecorder.stop()");
+    expect(cleanup, `${ANALYZE_PAGE_FILE}: the cleanup recorder.stop() must be exception-contained`).toMatch(/try\s*\{\s*activeRecorder\.stop\(\);\s*\}\s*catch/);
+  });
+
+  it("guards the seeked callback against an already-settled operation", () => {
+    const handler = isolateSeekedHandlerSource(readSource(ANALYZE_PAGE_FILE));
+    const guardIdx = handler.indexOf("if (settled) return;");
+    const playIdx = handler.indexOf("video.play()");
+    expect(guardIdx, `${ANALYZE_PAGE_FILE}: the seeked callback must bail out when already settled`).toBeGreaterThanOrEqual(0);
+    expect(playIdx, `${ANALYZE_PAGE_FILE}: the seeked callback no longer calls video.play()`).toBeGreaterThanOrEqual(0);
+    expect(guardIdx, `${ANALYZE_PAGE_FILE}: the settlement guard must precede video.play()`).toBeLessThan(playIdx);
+  });
+
+  it("guards the play().then continuation before starting the recorder or timers", () => {
+    const handler = isolateSeekedHandlerSource(readSource(ANALYZE_PAGE_FILE));
+    const thenIdx = handler.indexOf("video.play().then(");
+    expect(thenIdx, `${ANALYZE_PAGE_FILE}: missing the video.play().then continuation`).toBeGreaterThanOrEqual(0);
+    const continuation = handler.slice(thenIdx);
+
+    const guardIdx = continuation.indexOf("if (settled) return;");
+    const startIdx = continuation.indexOf("recorder.start(");
+    const intervalIdx = continuation.indexOf("setInterval(");
+    const timeoutIdx = continuation.indexOf("timeout = setTimeout(");
+
+    expect(guardIdx, `${ANALYZE_PAGE_FILE}: the play() continuation must bail out when already settled`).toBeGreaterThanOrEqual(0);
+    for (const [label, idx] of [["recorder.start(", startIdx], ["setInterval(", intervalIdx], ["timeout = setTimeout(", timeoutIdx]] as [string, number][]) {
+      expect(idx, `${ANALYZE_PAGE_FILE}: the play() continuation is missing "${label}"`).toBeGreaterThanOrEqual(0);
+      expect(guardIdx, `${ANALYZE_PAGE_FILE}: the settlement guard must precede "${label}"`).toBeLessThan(idx);
+    }
+  });
+
+  it("surfaces an actionable user-facing message without naming an unsupported browser", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    expect(source, `${ANALYZE_PAGE_FILE}: missing the preprocessing failure message constant`).toContain("PREPROCESSING_FAILED_MESSAGE");
+    for (const forbidden of ["Safari", "Chrome", "iOS", "Android", "not supported", "unsupported"]) {
+      expect(source, `${ANALYZE_PAGE_FILE}: the failure message must not claim a specific browser/platform is unsupported ("${forbidden}")`).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("AnalyzePage — submission ordering is unchanged", () => {
+  it("obtains the blob before any Storage upload, DB insert, or analysis call", () => {
+    const block = isolateStartAnalysisSource(readSource(ANALYZE_PAGE_FILE));
+
+    const blobIdx = block.indexOf("await getTrimmedBlob()");
+    const uploadIdx = block.indexOf(".upload(");
+    const videosIdx = block.indexOf('.from("swing_videos")');
+    const analysisIdx = block.indexOf('.from("swing_analysis")');
+    const apiIdx = block.indexOf('fetch("/api/analyze-swing"');
+
+    for (const [label, idx] of [
+      ["await getTrimmedBlob()", blobIdx],
+      [".upload(", uploadIdx],
+      ['.from("swing_videos")', videosIdx],
+      ['.from("swing_analysis")', analysisIdx],
+      ['fetch("/api/analyze-swing"', apiIdx],
+    ] as [string, number][]) {
+      expect(idx, `${ANALYZE_PAGE_FILE}: startAnalysis is missing "${label}"`).toBeGreaterThanOrEqual(0);
+    }
+
+    expect(blobIdx, `${ANALYZE_PAGE_FILE}: preprocessing must complete before Storage upload`).toBeLessThan(uploadIdx);
+    expect(uploadIdx, `${ANALYZE_PAGE_FILE}: Storage upload must precede the swing_videos insert`).toBeLessThan(videosIdx);
+    expect(videosIdx, `${ANALYZE_PAGE_FILE}: swing_videos must precede swing_analysis`).toBeLessThan(analysisIdx);
+    expect(analysisIdx, `${ANALYZE_PAGE_FILE}: the analysis row must exist before the API call`).toBeLessThan(apiIdx);
+  });
+
+  it("keeps the analysis request body limited to the analysis id", () => {
+    const block = isolateStartAnalysisSource(readSource(ANALYZE_PAGE_FILE));
+    expect(block, `${ANALYZE_PAGE_FILE}: the API request body must remain unchanged in this slice`).toContain("JSON.stringify({ analysisId: analysisRow.id })");
+    expect(block, `${ANALYZE_PAGE_FILE}: MediaPipe metrics must not be wired into the active path in this slice`).not.toContain("mediapipeMetrics");
+  });
+
+  it("adds no >20 MB final-blob guard in this slice", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    for (const forbidden of ["20 * 1024 * 1024", "20 * 1_048_576", "MAX_INLINE_VIDEO_BYTES"]) {
+      expect(source, `${ANALYZE_PAGE_FILE}: the >20 MB final-blob guard is deferred to a later slice ("${forbidden}")`).not.toContain(forbidden);
+    }
+  });
+
+  it("does not change the upload architecture to XHR progress in this slice", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    for (const forbidden of ["XMLHttpRequest", "upload.onprogress", "createSignedUploadUrl"]) {
+      expect(source, `${ANALYZE_PAGE_FILE}: upload-progress rework is deferred ("${forbidden}")`).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("AnalyzePage — dormant pipeline remains unwired", () => {
+  it("does not import SwingUploader or upload-actions", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    for (const forbidden of ["SwingUploader", "./upload-actions", "upload-actions"]) {
+      expect(source, `${ANALYZE_PAGE_FILE}: the dormant submission pipeline must not be wired in this slice ("${forbidden}")`).not.toContain(forbidden);
+    }
+  });
+
+  it("does not wire client MediaPipe extraction into the active route", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    for (const forbidden of ["extractSwingMetrics", "@/lib/biometrics"]) {
+      expect(source, `${ANALYZE_PAGE_FILE}: MediaPipe wiring is out of scope for this slice ("${forbidden}")`).not.toContain(forbidden);
+    }
+  });
+
+  it("leaves the cookie-based session helper unchanged in this slice", () => {
+    const source = readSource(ANALYZE_PAGE_FILE);
+    expect(source, `${ANALYZE_PAGE_FILE}: getSessionFromCookie must remain present and unmodified in scope`).toContain("function getSessionFromCookie()");
+  });
+});
