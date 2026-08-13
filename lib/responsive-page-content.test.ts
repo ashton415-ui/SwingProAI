@@ -1079,9 +1079,4 @@ describe("AnalyzePage — dormant pipeline remains unwired", () => {
       expect(source, `${ANALYZE_PAGE_FILE}: MediaPipe wiring is out of scope for this slice ("${forbidden}")`).not.toContain(forbidden);
     }
   });
-
-  it("leaves the cookie-based session helper unchanged in this slice", () => {
-    const source = readSource(ANALYZE_PAGE_FILE);
-    expect(source, `${ANALYZE_PAGE_FILE}: getSessionFromCookie must remain present and unmodified in scope`).toContain("function getSessionFromCookie()");
-  });
 });

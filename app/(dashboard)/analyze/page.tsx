@@ -7,7 +7,7 @@ import {
   Play, Info, Maximize2, X, Activity, Zap, Trophy,
   Lock, BarChart2, FileUp,
 } from "lucide-react";
-import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@/utils/supabase/client";
 import {
   canUseLaunchMonitor,
   getAnalysisModeForTier,
@@ -24,29 +24,13 @@ function getUserTier(): SubscriptionTier {
   return (el?.dataset?.tier as SubscriptionTier) ?? "par";
 }
 
-// ─── Auth helper (reads session cookie set by our login flow) ──────────────────
-function getSessionFromCookie(): { access_token: string; user_id: string } | null {
-  if (typeof document === "undefined") return null;
-  try {
-    const name = "sb-atlmnqispyzhsahahpjy-auth-token";
-    const match = document.cookie.split("; ").find((c) => c.startsWith(`${name}=`));
-    if (!match) return null;
-    const parsed = JSON.parse(decodeURIComponent(match.split("=").slice(1).join("=")));
-    return { access_token: parsed.access_token, user_id: parsed.user?.id };
-  } catch { return null; }
-}
-
-function getAuthClient() {
-  const s = getSessionFromCookie();
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      global: { headers: s ? { Authorization: `Bearer ${s.access_token}` } : {} },
-      auth: { persistSession: false, autoRefreshToken: false },
-    }
-  );
-}
+// ─── Auth ──────────────────────────────────────────────────────────────────────
+// Authentication is owned entirely by the managed browser client in
+// utils/supabase/client.ts. This page must never read the auth cookie itself,
+// never copy an access token into a header, and never disable session
+// persistence or auto-refresh — a hand-copied token cannot be refreshed and
+// eventually reaches its `exp`, which Storage rejects mid-submission.
+const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
@@ -345,14 +329,25 @@ export default function AnalyzePage() {
     try {
       const blob = await getTrimmedBlob();
 
-      // Auth is required upfront — we need to upload the video before calling the API
-      const session = getSessionFromCookie();
-      if (!session) throw new Error("Not authenticated. Please sign in and try again.");
-      const supabase = getAuthClient();
+      // Auth is required upfront — we need to upload the video before calling the
+      // API. Resolve the CURRENT session from the managed browser client here,
+      // after preprocessing and before any Storage/database/API mutation:
+      // preprocessing can take long enough for a previously valid access token to
+      // expire. getSession() returns the stored session and refreshes it when it
+      // is at (or near) expiry, persisting the rotated tokens through the managed
+      // client's own cookie storage. Refreshing is deliberately NOT forced on
+      // every submission.
+      const supabase = createClient();
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      // Fail here — before Storage, before swing_videos, before swing_analysis,
+      // and before /api/analyze-swing. The raw Supabase error is not surfaced to
+      // the golfer; they get an actionable instruction instead.
+      if (sessionError || !session || !userId) throw new Error(SESSION_EXPIRED_MESSAGE);
 
       // 1. Upload video to Supabase Storage
       const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const storagePath = `${session.user_id}/${crypto.randomUUID()}/${safeFilename}`;
+      const storagePath = `${userId}/${crypto.randomUUID()}/${safeFilename}`;
       const { error: uploadErr } = await supabase.storage
         .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
       if (uploadErr) throw new Error(`Video upload failed: ${uploadErr.message}`);
@@ -360,7 +355,7 @@ export default function AnalyzePage() {
       // 2. Create the swing_videos record
       const { data: videoRow, error: videoErr } = await supabase
         .from("swing_videos").insert({
-          user_id:           session.user_id,
+          user_id:           userId,
           storage_path:      storagePath,
           video_url:         storagePath,
           original_filename: safeFilename,
@@ -376,7 +371,7 @@ export default function AnalyzePage() {
       const { data: analysisRow, error: analysisErr } = await supabase
         .from("swing_analysis").insert({
           swing_video_id: videoRow.id,
-          user_id:        session.user_id,
+          user_id:        userId,
           status:         "pending",
         }).select("id").single();
       if (analysisErr || !analysisRow) throw new Error(`Failed to create analysis record: ${analysisErr?.message}`);
