@@ -1,9 +1,11 @@
 -- ============================================================================
 -- SwingProAI — EQ1-S1R Equipment Intelligence, Manufacturer Catalog,
--- Analysis-Family, and Premium Putting Foundation (Canonical, Source-Only)
+-- Analysis-Family, and Premium Putting Foundation (Canonical Source Artifact)
 -- ============================================================================
 --
--- THIS MIGRATION IS SOURCE-ONLY. IT HAS NOT BEEN APPLIED TO ANY PROJECT.
+-- PRODUCTION STATE VERIFIED PRESENT. This migration remains the canonical
+-- reproducible source artifact. Historical application mechanism/date and
+-- staging application status are not asserted here.
 --
 -- WHAT THIS IS
 -- ------------
@@ -40,8 +42,9 @@
 -- ---------------
 -- This migration does NOT insert equipment-model rows (EQ1-S2), does NOT
 -- change any existing user_equipment/swing_analysis RLS policy, does NOT add
--- swing_videos.user_equipment_id, does NOT touch chip/pitch/bunker
--- specialization, and is NOT applied to any Supabase project by this task.
+-- swing_videos.user_equipment_id, and does NOT touch chip/pitch/bunker
+-- specialization. This file is the canonical source artifact for that schema
+-- and asserts no application history of its own.
 --
 -- ============================================================================
 

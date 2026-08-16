@@ -1138,9 +1138,15 @@ describe("EQ1-S2 TypeScript contracts", () => {
 describe("EQ1-S2 rollout documentation", () => {
   const docsSource = readSource(DOCS_FILE);
 
-  it("states EQ1-S1R is merged and EQ1-S2 is source-only and unapplied", () => {
+  it("states EQ1-S1R and EQ1-S2 repository and verified-production status", () => {
     expect(docsSource).toMatch(/EQ1-S1R merged into `main`/);
-    expect(docsSource).toMatch(/EQ1-S2 implemented locally,\s*\nsource-only, unapplied/);
+    expect(docsSource).toMatch(
+      /\*\*Production verified state:\*\*[\s\S]*?present in production\./
+    );
+    // Production present-state is verified; staging application is explicitly
+    // NOT claimed. This assertion pins that distinction so a future edit cannot
+    // silently upgrade the document into asserting a staging rollout.
+    expect(docsSource).toMatch(/\*\*Staging application status: not verified\.\*\*/);
   });
 
   it("documents the exact v1 putter model count", () => {
@@ -1168,7 +1174,11 @@ describe("EQ1-S2 rollout documentation", () => {
 
   it("does not claim the catalog or migration is live", () => {
     expect(docsSource.toLowerCase()).not.toContain("catalog is live");
-    expect(docsSource).toMatch(/No SQL in this\s+slice has been applied to any Supabase project\./);
+    // The schema exists in production, so the honest remaining guarantee is
+    // that no active product surface consumes the catalog yet.
+    expect(docsSource).toMatch(
+      /No active Analyze club-selection flow currently consumes the\s+canonical catalog\./
+    );
   });
 
   it("still lists EQ1-S3 as isolated staging application and EQ1-S4 as production application", () => {

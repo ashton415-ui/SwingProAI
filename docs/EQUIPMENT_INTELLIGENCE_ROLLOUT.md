@@ -1,9 +1,23 @@
 # Equipment Intelligence & Premium Putting Rollout
 
-Status: **EQ1-S1R merged into `main` (PR #13).** **EQ1-S2 implemented locally,
-source-only, unapplied.** Neither slice's SQL has been executed against any
-Supabase project. No UI, API route, AI prompt, or subscription behavior has
-changed.
+## Status
+
+**Repository status:** EQ1-S1R merged into `main` (PR #13). EQ1-S2 is retained
+as a generator-owned canonical migration artifact. Both migration files remain
+the canonical reproducible source artifacts for this schema.
+
+**Production verified state:** an authorized read-only inspection in August 2026
+confirmed that the corresponding schema, catalog data, triggers, functions, and
+constraints are present in production. That inspection establishes present state
+only; it does not establish when or by what mechanism the schema was applied.
+
+**Staging application status: not verified.** The August 2026 inspection did not
+establish an isolated staging application.
+
+**Application/UI status:** catalog-backed equipment selection is not yet wired
+into the active application. No active Analyze club-selection flow currently
+consumes the canonical catalog, and no UI, API route, AI prompt, or subscription
+behavior has changed.
 
 ## Existing foundation this work extends
 
@@ -192,12 +206,14 @@ are built with the modern pattern from day one: RLS enabled, a single
 PUBLIC` and `anon`, explicit `GRANT SELECT TO authenticated`, and explicit
 `service_role` access for trusted server-side writes.
 
-## EQ1-S2 — Curated putter catalog v1 (source-only, unapplied)
+## EQ1-S2 — Curated putter catalog v1
 
 EQ1-S2 adds 21 officially verified, currently marketed putter configurations
 across all five existing parent manufacturers (taylormade 5, callaway 3,
 titleist 7, ping 2, mizuno 4) and the schema needed to describe them
-factually. **No SQL in this slice has been applied to any Supabase project.**
+factually. **No active Analyze club-selection flow currently consumes the
+canonical catalog.** See the Status section above for repository,
+production-verified, and staging status.
 
 ### Configuration-level identity, not family-level rows
 
@@ -339,7 +355,7 @@ EQ1-S1R   Schema, manufacturer vocabulary, catalog tables, equipment
 
 EQ1-S2    Curated putter-model catalog v1: brand-line identity, putter
           fitting metadata, isolated provenance, deterministic catalog
-          keys and UUIDs                        [this slice, source-only]
+          keys and UUIDs                      [merged, generator-owned]
 
 EQ1-S3    Apply and validate the migration in an isolated Supabase staging
           branch/project
