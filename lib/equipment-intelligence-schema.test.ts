@@ -36,7 +36,7 @@ function extractFunctionBody(source: string, functionName: string): string {
   return source.slice(startIdx, endIdx + "$function$;".length);
 }
 
-describe("EQ1-S1R migration — file exists and is source-only", () => {
+describe("EQ1-S1R migration — file exists and is the canonical source artifact", () => {
   it("the generated migration file exists", () => {
     expect(existsSync(path.join(repoRoot, MIGRATION_FILE)), `missing file: ${MIGRATION_FILE}`).toBe(true);
   });

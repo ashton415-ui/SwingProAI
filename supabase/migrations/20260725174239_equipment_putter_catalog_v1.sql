@@ -1,8 +1,10 @@
 -- ============================================================================
--- SwingProAI — EQ1-S2 Curated Putter Equipment Catalog v1 (Canonical, Source-Only)
+-- SwingProAI — EQ1-S2 Curated Putter Equipment Catalog v1 (Canonical Source Artifact)
 -- ============================================================================
 --
--- THIS MIGRATION IS SOURCE-ONLY. IT HAS NOT BEEN APPLIED TO ANY PROJECT.
+-- PRODUCTION STATE VERIFIED PRESENT. This migration remains the canonical
+-- reproducible source artifact. Historical application mechanism/date and
+-- staging application status are not asserted here.
 --
 -- Generated deterministically by scripts/generate-equipment-catalog-putters-v1.mjs
 -- from data/equipment-catalog-putters-v1.json. Do not hand-edit this file —
@@ -29,7 +31,8 @@
 -- public.user_bags, or public.user_clubs. It performs zero backfill, zero
 -- fuzzy matching, and zero alias-table creation. It does NOT alter
 -- equipment_snapshot schema_version (remains 1) or either EQ1-S1R trigger
--- function. It is NOT applied to any Supabase project by this task.
+-- function. This file is the canonical source artifact for that schema and
+-- asserts no application history of its own.
 --
 -- ============================================================================
 

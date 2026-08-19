@@ -219,7 +219,7 @@ export interface SwingAnalysis {
 
 // ─── Equipment Intelligence (EQ1-S1R — foundation only) ───────────────────────
 //
-// Backs the additive, unapplied schema in
+// Backs the additive schema in
 // supabase/migrations/<generated>_equipment_intelligence_putting_foundation.sql.
 // EquipmentManufacturer/EquipmentModel are RLS-enabled with a single
 // authenticated, active-only SELECT policy each — no browser write path.
