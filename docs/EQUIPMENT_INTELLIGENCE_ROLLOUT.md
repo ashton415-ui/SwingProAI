@@ -3,16 +3,27 @@
 ## Status
 
 **Repository status:** EQ1-S1R merged into `main` (PR #13). EQ1-S2 is retained
-as a generator-owned canonical migration artifact. Both migration files remain
-the canonical reproducible source artifacts for this schema.
+as a generator-owned canonical migration artifact. EQ Slice 2 adds a third
+generator-owned artifact family for non-putter coverage (see *EQ Slice 2* below).
+All three migration files remain the canonical reproducible source artifacts for
+this schema and its catalog data.
 
 **Production verified state:** an authorized read-only inspection in August 2026
 confirmed that the corresponding schema, catalog data, triggers, functions, and
 constraints are present in production. That inspection establishes present state
 only; it does not establish when or by what mechanism the schema was applied.
 
-**Staging application status: not verified.** The August 2026 inspection did not
-establish an isolated staging application.
+**Staging application status: not verified.** No inspection has established
+when, by what mechanism, or by whom the staging schema and catalog data were
+applied, and this document asserts no staging rollout.
+
+**Staging observed state:** separately from the above, a read-only inspection on
+2026-08-20 observed the 21-row putter canonical catalog and its supporting
+foundation present in the `swingproai-eq1-s3-staging` project, and observed the
+relevant catalog schema signatures (columns, constraints, indexes, policies,
+`club_type_enum`) matching production. That is a present-state observation only;
+it is not evidence of an application event, which is why the line above still
+stands.
 
 **Application/UI status:** catalog-backed equipment selection is not yet wired
 into the active application. No active Analyze club-selection flow currently
@@ -346,6 +357,59 @@ advertising influence, and no Supabase migration application (staging or
 production) occurred in EQ1-S2. `public.user_bags` and `public.user_clubs`
 remain legacy, unreferenced tables and were not touched.
 
+## EQ Slice 2 — non-putter canonical catalog v1
+
+A third generator-owned artifact family, additive to the closed EQ1-S2 putter
+set. It is a **source artifact only**.
+
+**THIS MIGRATION HAS NOT BEEN APPLIED TO STAGING OR PRODUCTION.**
+
+### Scope
+
+Six parent manufacturers — TaylorMade, Callaway, Titleist, PING and Mizuno
+(incumbent) plus **Cobra** (added by this slice) — across the five non-putter
+club types (Driver, Wood, Hybrid, Iron, Wedge). Exactly **30 curated models**:
+one per manufacturer × club-type cell, the minimum valid catalog under a
+coverage rule of 1–4 rows per cell and a hard 90-row ceiling. No Putter row is
+added and no existing putter row is touched.
+
+Each model carries exactly one official provenance row, so the migration inserts
+1 manufacturer + 30 models + 30 sources. It is data-only, transactional,
+append-only and fail-loud: no schema object, no `UPDATE`, no `DELETE`, no
+`user_equipment` backfill, no fuzzy matching against legacy free-text brand or
+model strings. Consumer migration (My Bag, Analyze, Telemetry) is not part of
+this slice.
+
+Loft, shaft flex, shaft weight, club number and retail SKU remain per-golfer
+customization on `public.user_equipment`. They are never canonical model
+identity and appear nowhere in the catalog data.
+
+### Manufacturer identity nuance
+
+The five incumbent manufacturer rows were seeded in EQ1-S1R without explicit
+ids, under the table's `gen_random_uuid()` default. Their ids are therefore
+**not** deterministic and are not treated as stable cross-environment identity;
+they are never rewritten. Cobra, being new, receives a deterministic
+`uuidv5(namespace, "manufacturer:cobra")` identity. To keep that asymmetry out
+of the model rows entirely, every model — Cobra's included — resolves its parent
+by canonical slug rather than by a hard-coded id.
+
+### Provenance recovery
+
+Twenty of the thirty rows were verified directly against official manufacturer
+product pages. The ten TaylorMade and Titleist rows could not be retrieved by
+the client used in the first implementation attempt, which received anti-bot
+challenge and access-control responses rather than page content; that attempt
+was blocked rather than completed from weaker evidence. A separately gated
+recovery round resolved all ten: nine through a separate assistant's ordinary
+automated product-page retrieval, and the TaylorMade driver through an official
+TaylorMade specification PDF. No CAPTCHA or anti-bot control was bypassed at any
+point, and no retailer, review site, search snippet or legacy static-catalog
+entry was ever accepted as provenance.
+
+Verifier channel is deliberately **not** encoded into catalog data: an
+`equipment_model_sources` row records what the source is, not who observed it.
+
 ## Rollout roadmap
 
 ```text
@@ -361,6 +425,16 @@ EQ1-S3    Apply and validate the migration in an isolated Supabase staging
           branch/project
 
 EQ1-S4    Separately authorized production migration
+
+EQ-S2     Non-putter canonical catalog v1: six manufacturers, 30 curated
+          Driver/Wood/Hybrid/Iron/Wedge models, one official source each,
+          append-only data migration       [source artifact, not applied]
+
+EQ-S2-A   Separately authorized staging application of the non-putter
+          catalog migration — staging must precede production
+
+EQ-S2-B   Separately authorized production application of the non-putter
+          catalog migration
 
 EQ2       Shared server-backed ClubSelector and canonical equipment queries
 

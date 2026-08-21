@@ -1,0 +1,735 @@
+{
+  "schema_version": 1,
+  "catalog_name": "equipment-catalog-non-putters-v1",
+  "uuid_namespace": "05690d1f-f17d-5ab8-a2b6-ef0328a2783a",
+  "verified_on": "2026-08-20",
+  "manufacturers": [
+    {
+      "canonical_name": "Cobra",
+      "slug": "cobra",
+      "normalized_name": "cobra"
+    }
+  ],
+  "models": [
+    {
+      "catalog_key": "taylormade/qi35/qi35-driver/v1",
+      "manufacturer_slug": "taylormade",
+      "club_type": "Driver",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Qi35",
+      "model_family_slug": "qi35",
+      "canonical_name": "TaylorMade Qi35 Driver",
+      "slug": "qi35-driver",
+      "normalized_name": "taylormadeqi35driver",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_spec_pdf",
+          "source_name": "TaylorMade Qi35 Driver official specification PDF",
+          "source_url": "https://www.taylormadegolf.com/on/demandware.static/-/Sites-TMaG-Library/en_US/v1736272938439/docs/productspecs/2025/Qi35-Core-Driver.pdf",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/qi35/qi35-fairway/v1",
+      "manufacturer_slug": "taylormade",
+      "club_type": "Wood",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Qi35",
+      "model_family_slug": "qi35",
+      "canonical_name": "TaylorMade Qi35 Fairway",
+      "slug": "qi35-fairway",
+      "normalized_name": "taylormadeqi35fairway",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Qi35 Fairway official product page",
+          "source_url": "https://www.taylormadegolf.com/Qi35-Fairway/DW-TC373.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/qi35/qi35-rescue/v1",
+      "manufacturer_slug": "taylormade",
+      "club_type": "Hybrid",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Qi35",
+      "model_family_slug": "qi35",
+      "canonical_name": "TaylorMade Qi35 Rescue",
+      "slug": "qi35-rescue",
+      "normalized_name": "taylormadeqi35rescue",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade Qi35 Rescue official product page",
+          "source_url": "https://www.taylormadegolf.com/Qi35-3-Rescue/M1465109.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/p790/p790-irons/v1",
+      "manufacturer_slug": "taylormade",
+      "club_type": "Iron",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "P·790",
+      "model_family_slug": "p790",
+      "canonical_name": "TaylorMade P·790 Irons",
+      "slug": "p790-irons",
+      "normalized_name": "taylormadep790irons",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade P·790 Irons official product page",
+          "source_url": "https://www.taylormadegolf.com/P%E2%88%99790-Irons/DW-TC635.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "taylormade/mg5/mg5-wedge/v1",
+      "manufacturer_slug": "taylormade",
+      "club_type": "Wedge",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "MG5",
+      "model_family_slug": "mg5",
+      "canonical_name": "TaylorMade MG5 Wedge",
+      "slug": "mg5-wedge",
+      "normalized_name": "taylormademg5wedge",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "TaylorMade MG5 Wedge official product page",
+          "source_url": "https://www.taylormadegolf.com/MG5-Wedge/DW-TC647.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/quantum/quantum-max-driver/v1",
+      "manufacturer_slug": "callaway",
+      "club_type": "Driver",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Quantum",
+      "model_family_slug": "quantum",
+      "canonical_name": "Callaway Quantum Max Driver",
+      "slug": "quantum-max-driver",
+      "normalized_name": "callawayquantummaxdriver",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Callaway Quantum Max Driver official product page",
+          "source_url": "https://www.callawaygolf.com/golf-clubs/drivers/drivers-2026-quantum-max.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/quantum/quantum-max-fairway-woods/v1",
+      "manufacturer_slug": "callaway",
+      "club_type": "Wood",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Quantum",
+      "model_family_slug": "quantum",
+      "canonical_name": "Callaway Quantum Max Fairway Woods",
+      "slug": "quantum-max-fairway-woods",
+      "normalized_name": "callawayquantummaxfairwaywoods",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Callaway Quantum Max Fairway Woods official product page",
+          "source_url": "https://www.callawaygolf.com/golf-clubs/woods/fwoods-2026-quantum-max.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/quantum/quantum-max-hybrids/v1",
+      "manufacturer_slug": "callaway",
+      "club_type": "Hybrid",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Quantum",
+      "model_family_slug": "quantum",
+      "canonical_name": "Callaway Quantum Max Hybrids",
+      "slug": "quantum-max-hybrids",
+      "normalized_name": "callawayquantummaxhybrids",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Callaway Quantum Max Hybrids official product page",
+          "source_url": "https://www.callawaygolf.com/golf-clubs/hybrids/hybrids-2026-quantum-max.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/quantum/quantum-max-irons/v1",
+      "manufacturer_slug": "callaway",
+      "club_type": "Iron",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Quantum",
+      "model_family_slug": "quantum",
+      "canonical_name": "Callaway Quantum Max Irons",
+      "slug": "quantum-max-irons",
+      "normalized_name": "callawayquantummaxirons",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Callaway Quantum Max Irons official product page",
+          "source_url": "https://www.callawaygolf.com/golf-clubs/irons/irons-2026-quantum-max.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "callaway/opus-sp/opus-sp-chrome-wedge/v1",
+      "manufacturer_slug": "callaway",
+      "club_type": "Wedge",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Opus SP",
+      "model_family_slug": "opus-sp",
+      "canonical_name": "Callaway Opus SP Chrome Wedge",
+      "slug": "opus-sp-chrome-wedge",
+      "normalized_name": "callawayopusspchromewedge",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Callaway Opus SP Chrome Wedge official product page",
+          "source_url": "https://www.callawaygolf.com/golf-clubs/wedges/wedges-2025-opus-sp-chrome.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/gt2/gt2-driver/v1",
+      "manufacturer_slug": "titleist",
+      "club_type": "Driver",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "GT2",
+      "model_family_slug": "gt2",
+      "canonical_name": "Titleist GT2 Driver",
+      "slug": "gt2-driver",
+      "normalized_name": "titleistgt2driver",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Titleist GT2 Driver official product page",
+          "source_url": "https://www.titleist.com/golf-clubs/drivers/gt2",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/gt2/gt2-fairway/v1",
+      "manufacturer_slug": "titleist",
+      "club_type": "Wood",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "GT2",
+      "model_family_slug": "gt2",
+      "canonical_name": "Titleist GT2 Fairway",
+      "slug": "gt2-fairway",
+      "normalized_name": "titleistgt2fairway",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Titleist GT2 Fairway official product page",
+          "source_url": "https://www.titleist.com/golf-clubs/fairways/gt2",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/gt2/gt2-hybrid/v1",
+      "manufacturer_slug": "titleist",
+      "club_type": "Hybrid",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "GT2",
+      "model_family_slug": "gt2",
+      "canonical_name": "Titleist GT2 Hybrid",
+      "slug": "gt2-hybrid",
+      "normalized_name": "titleistgt2hybrid",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Titleist GT2 Hybrid official product page",
+          "source_url": "https://www.titleist.com/product/gt2-hybrid/675C.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/t250/t250-irons/v1",
+      "manufacturer_slug": "titleist",
+      "club_type": "Iron",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "T250",
+      "model_family_slug": "t250",
+      "canonical_name": "Titleist T250 Irons",
+      "slug": "t250-irons",
+      "normalized_name": "titleistt250irons",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Titleist T250 Irons official product page",
+          "source_url": "https://www.titleist.com/product/t250/561C.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "titleist/vokey-design/vokey-sm11-wedge/v1",
+      "manufacturer_slug": "titleist",
+      "club_type": "Wedge",
+      "brand_line": "Vokey Design",
+      "brand_line_slug": "vokey-design",
+      "model_family": "SM11",
+      "model_family_slug": "sm11",
+      "canonical_name": "Titleist Vokey SM11 Wedge",
+      "slug": "vokey-sm11-wedge",
+      "normalized_name": "titleistvokeysm11wedge",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Titleist Vokey SM11 official product page",
+          "source_url": "https://www.titleist.com/product/vokey-sm11/MASTER-SM11.html",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/g440/g440-max-driver/v1",
+      "manufacturer_slug": "ping",
+      "club_type": "Driver",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "G440",
+      "model_family_slug": "g440",
+      "canonical_name": "PING G440 MAX Driver",
+      "slug": "g440-max-driver",
+      "normalized_name": "pingg440maxdriver",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING G440 MAX Driver official product page",
+          "source_url": "https://ping.com/en-us/golf-clubs/drivers/g440-max-driver",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/g440/g440-max-fairway/v1",
+      "manufacturer_slug": "ping",
+      "club_type": "Wood",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "G440",
+      "model_family_slug": "g440",
+      "canonical_name": "PING G440 MAX Fairway",
+      "slug": "g440-max-fairway",
+      "normalized_name": "pingg440maxfairway",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING G440 MAX Fairway official product page",
+          "source_url": "https://ping.com/en-us/golf-clubs/fairways/g440-max-fairway",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/g440/g440-hybrid/v1",
+      "manufacturer_slug": "ping",
+      "club_type": "Hybrid",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "G440",
+      "model_family_slug": "g440",
+      "canonical_name": "PING G440 Hybrid",
+      "slug": "g440-hybrid",
+      "normalized_name": "pingg440hybrid",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING G440 Hybrid official product page",
+          "source_url": "https://ping.com/en-us/golf-clubs/hybrids/g440-hybrid",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/i240/i240-irons/v1",
+      "manufacturer_slug": "ping",
+      "club_type": "Iron",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "i240",
+      "model_family_slug": "i240",
+      "canonical_name": "PING i240 Irons",
+      "slug": "i240-irons",
+      "normalized_name": "pingi240irons",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING i240 Irons official product page",
+          "source_url": "https://ping.com/en-us/golf-clubs/irons/i240-iron",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "ping/s259/s259-wedge/v1",
+      "manufacturer_slug": "ping",
+      "club_type": "Wedge",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "s259",
+      "model_family_slug": "s259",
+      "canonical_name": "PING s259 Wedge",
+      "slug": "s259-wedge",
+      "normalized_name": "pings259wedge",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "PING s259 Wedge official product page",
+          "source_url": "https://ping.com/en-us/golf-clubs/wedges/s259-wedge",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/jpx-one/jpx-one-driver/v1",
+      "manufacturer_slug": "mizuno",
+      "club_type": "Driver",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "JPX ONE",
+      "model_family_slug": "jpx-one",
+      "canonical_name": "Mizuno JPX ONE Driver",
+      "slug": "jpx-one-driver",
+      "normalized_name": "mizunojpxonedriver",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno JPX ONE Driver official product page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/jpx-one-series/jpx-one-driver/",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/jpx-one/jpx-one-fairway/v1",
+      "manufacturer_slug": "mizuno",
+      "club_type": "Wood",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "JPX ONE",
+      "model_family_slug": "jpx-one",
+      "canonical_name": "Mizuno JPX ONE Fairway",
+      "slug": "jpx-one-fairway",
+      "normalized_name": "mizunojpxonefairway",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno JPX ONE Fairway official product page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/jpx-one-series/jpx-one-fairway/",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/jpx-one/jpx-one-hybrid/v1",
+      "manufacturer_slug": "mizuno",
+      "club_type": "Hybrid",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "JPX ONE",
+      "model_family_slug": "jpx-one",
+      "canonical_name": "Mizuno JPX ONE Hybrid",
+      "slug": "jpx-one-hybrid",
+      "normalized_name": "mizunojpxonehybrid",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno JPX ONE Hybrid official product page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/jpx-one-series/jpx-one-hybrid/",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/jpx925-hot-metal/jpx925-hot-metal-irons/v1",
+      "manufacturer_slug": "mizuno",
+      "club_type": "Iron",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "JPX925 Hot Metal",
+      "model_family_slug": "jpx925-hot-metal",
+      "canonical_name": "Mizuno JPX925 Hot Metal Irons",
+      "slug": "jpx925-hot-metal-irons",
+      "normalized_name": "mizunojpx925hotmetalirons",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno JPX925 Hot Metal Irons official product page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/jpx925-series/jpx925-hot-metals/",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "mizuno/mizuno-pro-t3/mizuno-pro-t3-wedge/v1",
+      "manufacturer_slug": "mizuno",
+      "club_type": "Wedge",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "Mizuno Pro T-3",
+      "model_family_slug": "mizuno-pro-t3",
+      "canonical_name": "Mizuno Pro T-3 Wedge",
+      "slug": "mizuno-pro-t3-wedge",
+      "normalized_name": "mizunoprot3wedge",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Mizuno Pro T-3 official product page",
+          "source_url": "https://mizunogolf.com/us/golf-clubs/mp-series/mizuno-pro-t3/",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "cobra/optm/optm-max-k-driver/v1",
+      "manufacturer_slug": "cobra",
+      "club_type": "Driver",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "OPTM",
+      "model_family_slug": "optm",
+      "canonical_name": "Cobra OPTM MAX-K Driver",
+      "slug": "optm-max-k-driver",
+      "normalized_name": "cobraoptmmaxkdriver",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Cobra OPTM MAX-K Driver official product page",
+          "source_url": "https://www.cobragolf.com/products/optm-max-k-driver",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "cobra/optm/optm-x-fairway/v1",
+      "manufacturer_slug": "cobra",
+      "club_type": "Wood",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "OPTM",
+      "model_family_slug": "optm",
+      "canonical_name": "Cobra OPTM X Fairway",
+      "slug": "optm-x-fairway",
+      "normalized_name": "cobraoptmxfairway",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Cobra OPTM X Fairway official product page",
+          "source_url": "https://www.cobragolf.com/products/optm-x-fairway",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "cobra/optm/optm-hybrid/v1",
+      "manufacturer_slug": "cobra",
+      "club_type": "Hybrid",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "OPTM",
+      "model_family_slug": "optm",
+      "canonical_name": "Cobra OPTM Hybrid",
+      "slug": "optm-hybrid",
+      "normalized_name": "cobraoptmhybrid",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Cobra OPTM Hybrid official product page",
+          "source_url": "https://www.cobragolf.com/products/optm-hybrid",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "cobra/king/king-irons/v1",
+      "manufacturer_slug": "cobra",
+      "club_type": "Iron",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "KING",
+      "model_family_slug": "king",
+      "canonical_name": "Cobra KING Irons",
+      "slug": "king-irons",
+      "normalized_name": "cobrakingirons",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Cobra KING Irons official product page",
+          "source_url": "https://www.cobragolf.com/products/king-irons",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    },
+    {
+      "catalog_key": "cobra/king/king-wedge/v1",
+      "manufacturer_slug": "cobra",
+      "club_type": "Wedge",
+      "brand_line": null,
+      "brand_line_slug": null,
+      "model_family": "KING",
+      "model_family_slug": "king",
+      "canonical_name": "Cobra KING Wedge",
+      "slug": "king-wedge",
+      "normalized_name": "cobrakingwedge",
+      "model_year": null,
+      "release_year": null,
+      "is_active": true,
+      "specifications": {},
+      "sources": [
+        {
+          "source_type": "official_product_page",
+          "source_name": "Cobra KING Wedge official product page",
+          "source_url": "https://www.cobragolf.com/products/king-wedge-2025",
+          "verified_at": "2026-08-20"
+        }
+      ]
+    }
+  ]
+}
