@@ -35,11 +35,19 @@
  *
  * COVERAGE HONESTY
  * ----------------
- * The canonical catalog is currently putter-only. Asking for a non-putter club
- * type is a legitimate question with a legitimate answer — "no canonical
- * coverage" — which is reported distinctly from both an empty catalog and a
- * query error, so a caller can offer a Custom/Other path without ever being
- * misled into thinking the database failed.
+ * This reader supports all six club types. The repository now carries curated
+ * canonical source artifacts for putter coverage (EQ1-S2) and for non-putter
+ * coverage across Driver, Wood, Hybrid, Iron and Wedge (EQ Slice 2); applying
+ * either migration to a given environment remains separately gated, so what a
+ * caller actually sees depends on the data present in the environment it
+ * queries.
+ *
+ * `missing_coverage` therefore remains a first-class, permanent result. Asking
+ * for a club type the queried environment holds no canonical rows for is a
+ * legitimate question with a legitimate answer — "no canonical coverage" —
+ * which is reported distinctly from both an empty catalog and a query error, so
+ * a caller can offer a Custom/Other path without ever being misled into
+ * thinking the database failed.
  *
  * Loft, shaft flex and shaft weight are deliberately absent: they do not exist
  * in the catalog schema at all. They are per-golfer customizations stored on
