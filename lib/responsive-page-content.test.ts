@@ -20,6 +20,9 @@ const TABLE_PAGES: { route: string; file: string; minWidth: string; hasEmptyStat
   { route: "/admin/users", file: "app/(dashboard)/admin/users/page.tsx", minWidth: "min-w-[760px]", hasEmptyState: false, emptyStateText: "" },
   { route: "/admin/coaches", file: "app/(dashboard)/admin/coaches/page.tsx", minWidth: "min-w-[680px]", hasEmptyState: true, emptyStateText: "No coaches yet" },
   { route: "/admin/swings", file: "app/(dashboard)/admin/swings/page.tsx", minWidth: "min-w-[760px]", hasEmptyState: true, emptyStateText: "No videos yet" },
+  // RW3-S1: Progress Hub keeps the full desktop table at md+ and pairs it with a
+  // dedicated phone renderer (asserted separately below).
+  { route: "/dashboard", file: "app/(dashboard)/dashboard/page.tsx", minWidth: "min-w-[800px]", hasEmptyState: true, emptyStateText: "Telemetry Array Empty" },
 ];
 
 /**
@@ -60,7 +63,7 @@ function findSingleTableIndex(source: string): number {
   return indices[0];
 }
 
-describe("responsive page content — coach/admin table scroll wrappers", () => {
+describe("responsive page content — table scroll wrappers", () => {
   it.each(TABLE_PAGES)("$route ($file) exists on disk", ({ file }) => {
     expect(existsSync(path.join(repoRoot, file)), `missing file: ${file}`).toBe(true);
   });
@@ -1077,6 +1080,188 @@ describe("AnalyzePage — dormant pipeline remains unwired", () => {
     const source = readSource(ANALYZE_PAGE_FILE);
     for (const forbidden of ["extractSwingMetrics", "@/lib/biometrics"]) {
       expect(source, `${ANALYZE_PAGE_FILE}: MediaPipe wiring is out of scope for this slice ("${forbidden}")`).not.toContain(forbidden);
+    }
+  });
+});
+
+// ============================================================================
+// Progress Hub — phone telemetry renderer + desktop table (RW3-S1)
+// ============================================================================
+
+// Independently defined here — not imported from the page — so a regression
+// that silently drops a field from the phone renderer is caught rather than
+// only self-confirmed against the page's own source.
+const PROGRESS_HUB_FILE = "app/(dashboard)/dashboard/page.tsx";
+const TELEMETRY_LOG_FIELDS = ["Timestamp", "Club", "Score", "Tempo", "Status"];
+
+/**
+ * Isolates the phone-only telemetry list: from the `md:hidden` <ul ...> open
+ * tag through its closing </ul>.
+ */
+function isolateProgressHubMobileList(source: string): string {
+  const startIdx = source.search(/<ul className="[^"]*md:hidden[^"]*"/);
+  expect(
+    startIdx,
+    `${PROGRESS_HUB_FILE}: could not locate a phone-only (md:hidden) <ul> telemetry renderer`
+  ).toBeGreaterThanOrEqual(0);
+  const endIdx = source.indexOf("</ul>", startIdx);
+  expect(
+    endIdx,
+    `${PROGRESS_HUB_FILE}: could not locate the closing </ul> of the phone telemetry renderer`
+  ).toBeGreaterThan(startIdx);
+  return source.slice(startIdx, endIdx);
+}
+
+function desktopTableWrapperClassName(source: string): string {
+  const tableIdx = findSingleTableIndex(source);
+  const precedingDivs = precedingDivClassNames(source, tableIdx);
+  expect(
+    precedingDivs.length,
+    `${PROGRESS_HUB_FILE}: expected a wrapper <div> immediately before the table`
+  ).toBeGreaterThan(0);
+  return precedingDivs[0];
+}
+
+describe("Progress Hub — phone telemetry renderer and desktop table", () => {
+  it("Progress Hub source file exists", () => {
+    expect(existsSync(path.join(repoRoot, PROGRESS_HUB_FILE)), `missing file: ${PROGRESS_HUB_FILE}`).toBe(true);
+  });
+
+  it("exposes a phone-only (md:hidden) telemetry renderer", () => {
+    const list = isolateProgressHubMobileList(readSource(PROGRESS_HUB_FILE));
+    expect(list.length, `${PROGRESS_HUB_FILE}: phone telemetry renderer is unexpectedly empty`).toBeGreaterThan(0);
+  });
+
+  it.each(TELEMETRY_LOG_FIELDS)("phone renderer labels the %s field", (field) => {
+    const list = isolateProgressHubMobileList(readSource(PROGRESS_HUB_FILE));
+    expect(
+      list,
+      `${PROGRESS_HUB_FILE}: phone telemetry renderer no longer surfaces "${field}" — the full log dataset must stay reachable without horizontal scrolling`
+    ).toContain(field);
+  });
+
+  it("phone renderer preserves the desktop value and fallback semantics", () => {
+    const list = isolateProgressHubMobileList(readSource(PROGRESS_HUB_FILE));
+    expect(list, "Timestamp must come from the same created_at value").toContain("swing.created_at");
+    expect(list, "Club fallback must be unchanged").toContain('swing.swing_video?.club ?? "Unknown"');
+    expect(list, "Score must come from the same score value").toContain("swing.score");
+    expect(list, "Tempo formatting/fallback must be unchanged").toContain('swing.tempo_ratio?.toFixed(1) ?? "—"');
+    expect(list, "Status fallback must be unchanged").toContain('swing.status ?? "pending"');
+  });
+
+  it("phone renderer keeps each record linked to its swing detail route", () => {
+    const list = isolateProgressHubMobileList(readSource(PROGRESS_HUB_FILE));
+    expect(list, `${PROGRESS_HUB_FILE}: phone records must still reach the swing detail route`).toContain("/swings/${swing.id}");
+  });
+
+  it("phone renderer does not rely on a horizontal scroller or a width floor", () => {
+    const list = isolateProgressHubMobileList(readSource(PROGRESS_HUB_FILE));
+    expect(list, "the phone renderer must not reintroduce sideways scrolling").not.toContain("overflow-x-auto");
+    expect(list, "the phone renderer must not impose a fixed width floor").not.toContain("min-w-[");
+    expect(list, "the phone renderer must not be viewport-width sized").not.toContain("w-screen");
+  });
+
+  it("phone and desktop renderers read the one existing swings collection", () => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    expect(
+      (source.match(/swings\.map\(/g) ?? []).length,
+      `${PROGRESS_HUB_FILE}: expected exactly two renderers mapping the same swings array`
+    ).toBe(2);
+    expect(
+      (source.match(/await supabase/g) ?? []).length,
+      `${PROGRESS_HUB_FILE}: the dual renderer must not add a second query`
+    ).toBe(1);
+    expect(
+      (source.match(/\.from\("swing_analysis"\)/g) ?? []).length,
+      `${PROGRESS_HUB_FILE}: swing_analysis must be queried exactly once`
+    ).toBe(1);
+  });
+
+  it("desktop table is hidden below md and shown from md up", () => {
+    const tokens = desktopTableWrapperClassName(readSource(PROGRESS_HUB_FILE)).split(/\s+/).filter(Boolean);
+    expect(tokens, `${PROGRESS_HUB_FILE}: desktop table wrapper must be hidden on phones`).toContain("hidden");
+    expect(tokens, `${PROGRESS_HUB_FILE}: desktop table wrapper must appear from md up`).toContain("md:block");
+    expect(tokens, `${PROGRESS_HUB_FILE}: desktop table must keep its own local scroll container`).toContain("overflow-x-auto");
+  });
+
+  it.each(TELEMETRY_LOG_FIELDS)("desktop table retains the %s column header", (field) => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    expect(
+      source,
+      `${PROGRESS_HUB_FILE}: desktop table lost its "${field}" column`
+    ).toContain(`<th className="px-8 py-4">${field}</th>`);
+  });
+
+  it("desktop table retains its detail-link column", () => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    expect(source, `${PROGRESS_HUB_FILE}: desktop detail link column missing`).toContain("/swings/${swing.id}");
+    expect(source, `${PROGRESS_HUB_FILE}: desktop table lost its trailing chevron column`).toContain('<th className="px-8 py-4"></th>');
+  });
+});
+
+// ============================================================================
+// Telemetry Equipment Optimizer — narrow-screen header containment (RW3-S1)
+// ============================================================================
+
+/**
+ * Isolates the Equipment Optimizer header row: from the component's header
+ * marker through the start of its three insight tiles.
+ */
+function isolateEquipmentOptimizerHeader(source: string): string {
+  const startMarker = "function EquipmentOptimizer(";
+  const startIdx = source.indexOf(startMarker);
+  expect(startIdx, `${TELEMETRY_PAGE_FILE}: could not locate "${startMarker}"`).toBeGreaterThanOrEqual(0);
+  const headerIdx = source.indexOf("{/* Header */}", startIdx);
+  expect(headerIdx, `${TELEMETRY_PAGE_FILE}: could not locate the optimizer header marker`).toBeGreaterThan(startIdx);
+  const endMarker = "{/* Three insight tiles */}";
+  const endIdx = source.indexOf(endMarker, headerIdx);
+  expect(endIdx, `${TELEMETRY_PAGE_FILE}: could not locate "${endMarker}"`).toBeGreaterThan(headerIdx);
+  return source.slice(headerIdx, endIdx);
+}
+
+describe("Telemetry Equipment Optimizer — narrow-screen header containment", () => {
+  it("header row permits wrapping instead of clipping", () => {
+    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
+    const rowMatch = header.match(/<div className="([^"]*)"/);
+    expect(rowMatch, `${TELEMETRY_PAGE_FILE}: could not isolate the optimizer header row`).not.toBeNull();
+    const tokens = rowMatch![1].split(/\s+/).filter(Boolean);
+    expect(tokens, "optimizer header row must remain a flex row").toContain("flex");
+    expect(tokens, "optimizer header row must be allowed to wrap on narrow screens").toContain("flex-wrap");
+  });
+
+  it("the flexible title container is allowed to shrink", () => {
+    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
+    expect(
+      header,
+      `${TELEMETRY_PAGE_FILE}: the flex-1 title container must carry min-w-0`
+    ).toContain('className="flex-1 min-w-0"');
+  });
+
+  it("the HSI pill stays intact and shrink-protected", () => {
+    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
+    const pill = header.match(/<div className="([^"]*rounded-full[^"]*)"/);
+    expect(pill, `${TELEMETRY_PAGE_FILE}: could not isolate the HSI pill`).not.toBeNull();
+    expect(pill![1].split(/\s+/).filter(Boolean), "HSI pill must not be squeezed").toContain("shrink-0");
+    expect(header, "HSI value must remain").toContain("insight.hipSpeedIndex");
+    expect(header, "HSI label must remain").toContain("HSI");
+  });
+
+  it("the attack-angle label stays intact and shrink-protected", () => {
+    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
+    expect(header, "attack-angle label must not be squeezed").toMatch(/tracking-widest shrink-0 \$\{attackColor\}/);
+    expect(header, "attack-angle label text must remain").toContain("{attackLabel}");
+  });
+
+  it("the optimizer header truncates nothing to fit", () => {
+    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
+    expect(header, "optimizer header must not truncate its title").not.toContain("truncate");
+    expect(header, "optimizer title text must remain").toContain("Equipment Optimizer Insight");
+  });
+
+  it("all three optimizer insight tiles remain present", () => {
+    const source = readSource(TELEMETRY_PAGE_FILE);
+    for (const tile of ["Shaft Flex", "Driver Config", "Ball Spec"]) {
+      expect(source, `${TELEMETRY_PAGE_FILE}: optimizer tile "${tile}" missing`).toContain(tile);
     }
   });
 });

@@ -116,8 +116,69 @@ export default async function DashboardPage() {
             </Link>
           </div>
         ) : (
-          /* THE FIX: Added overflow-x-auto wrapper here */
-          <div className="overflow-x-auto w-full">
+          <>
+          {/* Phone (<md): purpose-built telemetry records. Carries the same five
+              core fields as the table so nothing is reachable only by scrolling. */}
+          <ul className="md:hidden divide-y divide-white/5">
+            {swings.map((swing) => (
+              <li key={swing.id}>
+                <Link
+                  href={`/swings/${swing.id}`}
+                  className="block px-5 py-4 hover:bg-white/5 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Timestamp</p>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Calendar size={12} className="text-gray-600 shrink-0" />
+                        <span className="text-xs font-mono text-gray-400 break-words">
+                          {new Date(swing.created_at).toLocaleDateString("en-US", {
+                            month: "short", day: "numeric", year: "numeric",
+                          })}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Status</p>
+                      <span className="inline-block px-3 py-1 bg-white/5 text-gray-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-white/5">
+                        {swing.status ?? "pending"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-3 mt-4">
+                    <div className="min-w-0">
+                      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Club</p>
+                      <p className="text-sm font-bold text-gray-200 capitalize break-words">
+                        {swing.swing_video?.club ?? "Unknown"}
+                      </p>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Score</p>
+                      <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${
+                        (swing.score ?? 0) >= 80
+                          ? "text-golf-green border-golf-green/20"
+                          : (swing.score ?? 0) >= 60
+                          ? "text-yellow-400 border-yellow-400/20"
+                          : "text-red-400 border-red-500/20"
+                      }`}>
+                        {swing.score != null ? `${swing.score} pts` : "—"}
+                      </div>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Tempo</p>
+                      <p className="text-xs font-mono font-black text-white">
+                        {swing.tempo_ratio?.toFixed(1) ?? "—"}
+                      </p>
+                    </div>
+                  </div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+
+          {/* Tablet/desktop (md+): the full semantic table, unchanged. */}
+          <div className="hidden md:block overflow-x-auto w-full">
             <table className="w-full text-left min-w-[800px]">
               <thead>
                 <tr className="bg-black/20 text-gray-600 text-[9px] uppercase tracking-[0.3em] font-black">
@@ -181,6 +242,7 @@ export default async function DashboardPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
     </div>

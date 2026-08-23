@@ -230,6 +230,15 @@ describe("RW1 source guards — structural responsive contract", () => {
     expect(tokens.some((t) => /^pb-\[calc\(/.test(t))).toBe(true);
   });
 
+  // RW3-S1: <main> is a flex item of the shell's flex row. Without min-w-0 its
+  // automatic minimum size is min-content, so any wide descendant can push the
+  // content column past the viewport instead of shrinking to it.
+  it("main content can shrink below its content's min-content width (min-w-0)", () => {
+    const tokens = mainTagClassNames();
+    expect(tokens, "main is a flex child and must be allowed to shrink").toContain("flex-1");
+    expect(tokens, "main must carry min-w-0 so descendants cannot widen the content column").toContain("min-w-0");
+  });
+
   it("safe-area-inset handling is present in the shell/navigation source", () => {
     const combined = [LAYOUT_FILE, MOBILE_NAV_FILE].map(readSource).join("\n");
     expect(combined).toContain("safe-area-inset");

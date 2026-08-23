@@ -116,7 +116,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       />
 
       <main
-        className="flex-1 min-h-screen pt-[calc(3.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:ml-16 md:pb-[env(safe-area-inset-bottom)] lg:ml-64 lg:pt-0 lg:pb-0"
+        className="flex-1 min-w-0 min-h-screen pt-[calc(3.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:ml-16 md:pb-[env(safe-area-inset-bottom)] lg:ml-64 lg:pt-0 lg:pb-0"
       >
         {children}
       </main>

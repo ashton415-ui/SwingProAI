@@ -364,25 +364,25 @@ function EquipmentOptimizer({ insight }: { insight: EquipmentInsight }) {
   return (
     <div className="rounded-2xl border border-amber-400/15 bg-amber-400/[0.03] overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-3.5 border-b border-amber-400/10">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3.5 border-b border-amber-400/10">
         <div className="w-7 h-7 rounded-lg bg-amber-400/10 border border-amber-400/20 flex items-center justify-center shrink-0">
           <Cpu className="w-3.5 h-3.5 text-amber-400" />
         </div>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <span className="text-[9px] font-black uppercase tracking-[0.25em] text-amber-400">
             Equipment Optimizer Insight
           </span>
         </div>
         {/* Hip Speed Index pill */}
         {insight.hipSpeedIndex != null && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/30 border border-white/[0.07]">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/30 border border-white/[0.07] shrink-0">
             <Gauge className="w-3 h-3 text-gray-500" />
             <span className="text-[9px] font-black font-mono text-white">{insight.hipSpeedIndex}</span>
             <span className="text-[8px] text-gray-600">HSI</span>
           </div>
         )}
         {/* Attack angle bias */}
-        <span className={`text-[9px] font-black uppercase tracking-widest ${attackColor}`}>
+        <span className={`text-[9px] font-black uppercase tracking-widest shrink-0 ${attackColor}`}>
           {attackLabel}
         </span>
       </div>
