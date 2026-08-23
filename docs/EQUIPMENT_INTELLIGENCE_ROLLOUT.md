@@ -13,9 +13,12 @@ confirmed that the corresponding schema, catalog data, triggers, functions, and
 constraints are present in production. That inspection establishes present state
 only; it does not establish when or by what mechanism the schema was applied.
 
-**Staging application status: not verified.** No inspection has established
-when, by what mechanism, or by whom the staging schema and catalog data were
-applied, and this document asserts no staging rollout.
+**Staging application status: not verified.** This concerns the earlier EQ1-S1R
+schema foundation and EQ1-S2 putter catalog only. No inspection has established
+when, by what mechanism, or by whom that earlier staging schema and putter
+catalog data were applied, and this document asserts no staging rollout for
+them. It does not describe the later EQ Slice-2 non-putter application, whose
+verified deployment is recorded separately below.
 
 **Staging observed state:** separately from the above, a read-only inspection on
 2026-08-20 observed the 21-row putter canonical catalog and its supporting
@@ -24,6 +27,15 @@ relevant catalog schema signatures (columns, constraints, indexes, policies,
 `club_type_enum`) matching production. That is a present-state observation only;
 it is not evidence of an application event, which is why the line above still
 stands.
+
+**EQ Slice-2 non-putter deployment status: applied and independently verified.**
+The logical migration `equipment_non_putter_catalog_v1` was applied to staging
+(Supabase-assigned version `20260823035942`) and to production (Supabase-assigned
+version `20260823042455`). Application and independent verification passed in
+both environments. The canonical repository artifact keeps its own filename
+timestamp `20260820132900`; database-assigned versions are allocated per
+environment at application time and need not equal it or each other. This was a
+database/catalog deployment only.
 
 **Application/UI status:** catalog-backed equipment selection is not yet wired
 into the active application. No active Analyze club-selection flow currently
@@ -360,9 +372,15 @@ remain legacy, unreferenced tables and were not touched.
 ## EQ Slice 2 — non-putter canonical catalog v1
 
 A third generator-owned artifact family, additive to the closed EQ1-S2 putter
-set. It is a **source artifact only**.
+set. The migration file remains the canonical reproducible source artifact,
+regenerable from its data JSON by its generator.
 
-**THIS MIGRATION HAS NOT BEEN APPLIED TO STAGING OR PRODUCTION.**
+**This migration has been applied and independently verified in both staging and
+production.** The deployed shared catalog holds 6 manufacturers, 51 models
+(21 Putters, 30 non-Putters) and 51 provenance rows. No user-equipment backfill
+occurred: production's 8 pre-existing `user_equipment` rows remain present and
+unlinked to any canonical model. Consumer migration remains separate future
+work.
 
 ### Scope
 
@@ -428,13 +446,13 @@ EQ1-S4    Separately authorized production migration
 
 EQ-S2     Non-putter canonical catalog v1: six manufacturers, 30 curated
           Driver/Wood/Hybrid/Iron/Wedge models, one official source each,
-          append-only data migration       [source artifact, not applied]
+          append-only data migration   [deployed + independently verified]
 
-EQ-S2-A   Separately authorized staging application of the non-putter
-          catalog migration — staging must precede production
+EQ-S2-A   Staging application of the non-putter catalog migration — staging
+          preceded production        [applied + verified, 20260823035942]
 
-EQ-S2-B   Separately authorized production application of the non-putter
-          catalog migration
+EQ-S2-B   Production application of the non-putter catalog migration
+                                     [applied + verified, 20260823042455]
 
 EQ2       Shared server-backed ClubSelector and canonical equipment queries
 
