@@ -665,7 +665,22 @@ describe("EQ Slice 2 — rollout documentation truth", () => {
     expect(docs).toContain("Cobra");
   });
 
-  it("does not claim the migration has been applied to any environment", () => {
-    expect(docs).toContain("HAS NOT BEEN APPLIED TO STAGING OR PRODUCTION");
+  it("records verified staging and production deployment for the non-putter catalog", () => {
+    expect(docs).toContain("equipment_non_putter_catalog_v1");
+    expect(docs).toContain("20260823035942");
+    expect(docs).toContain("20260823042455");
+    // The pre-application claim is now false and must not survive anywhere in
+    // the document; this pin is what stops it being reintroduced.
+    expect(docs).not.toContain("HAS NOT BEEN APPLIED TO STAGING OR PRODUCTION");
+  });
+
+  it("keeps the user-equipment and consumer boundaries the deployment did not cross", () => {
+    expect(docs).toContain("No user-equipment backfill");
+    expect(docs).toContain(
+      "catalog-backed equipment selection is not yet wired"
+    );
+    expect(docs).toContain(
+      "Consumer migration (My Bag, Analyze, Telemetry) is not part of"
+    );
   });
 });
