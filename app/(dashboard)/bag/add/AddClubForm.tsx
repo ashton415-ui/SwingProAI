@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import type { ClubType } from "@/components/swing/VirtualBag";
@@ -8,44 +8,196 @@ import type { ClubType } from "@/components/swing/VirtualBag";
 const CLUB_TYPES: ClubType[] = ["Driver", "Wood", "Hybrid", "Iron", "Wedge", "Putter"];
 const SHAFT_FLEX_OPTIONS = ["Ladies", "Senior", "Regular", "Stiff", "X-Stiff"];
 
-export default function AddClubForm({ userId }: { userId: string }) {
+/**
+ * The minimum canonical identity the selector needs, mapped server-side from
+ * public.equipment_models + public.equipment_manufacturers. Nothing else about
+ * a catalog row reaches the browser.
+ */
+export type CatalogOption = {
+  clubType: ClubType;
+  manufacturerId: string;
+  manufacturerName: string;
+  modelId: string;
+  modelName: string;
+};
+
+/**
+ * `unavailable` deliberately carries no message or code. A catalog query
+ * failure must never be rendered as raw database text, and must never be
+ * disguised as an empty catalog — those are different facts with different
+ * user-facing copy.
+ */
+export type CatalogState =
+  | { status: "ready"; options: CatalogOption[] }
+  | { status: "empty" }
+  | { status: "unavailable" };
+
+interface AddClubFormProps {
+  userId: string;
+  catalog: CatalogState;
+}
+
+/**
+ * Exactly the columns this form writes. Declaring it forces both payload
+ * branches below to name every identity-bearing column, which is what makes
+ * cross-mode leakage a compile error rather than a code-review question.
+ */
+type UserEquipmentInsert = {
+  user_id: string;
+  club_type: ClubType;
+  equipment_model_id: string | null;
+  manufacturer_id: string | null;
+  brand: string | null;
+  model: string | null;
+  custom_club: boolean;
+  custom_brand: string | null;
+  custom_model: string | null;
+  shaft_flex: string | null;
+  shaft_weight: number | null;
+  loft_deg: number | null;
+  is_primary: boolean;
+};
+
+/** Byte comparison, so ordering never varies with the browser's ICU data. */
+function compareStrings(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const options = catalog.status === "ready" ? catalog.options : [];
+
   const [form, setForm] = useState({
     club_type: "Driver" as ClubType,
-    brand: "",
-    model: "",
+    // Canonical selection starts empty in both dimensions. Nothing is ever
+    // auto-selected — a golfer's equipment identity must be chosen, not guessed.
+    selectedManufacturerId: "",
+    selectedModelId: "",
     shaft_flex: "",
     shaft_weight: "",
     loft_deg: "",
     is_primary: false,
-    custom_club: false,
+    // `custom_club` doubles as the mode: false = canonical catalog selection.
+    // It defaults on only when there is no canonical catalog to select from.
+    custom_club: options.length === 0,
     custom_brand: "",
     custom_model: "",
   });
 
   const set = (patch: Partial<typeof form>) => setForm((prev) => ({ ...prev, ...patch }));
 
+  // ── Derived catalog choices ─────────────────────────────────────────────────
+
+  const manufacturers = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const option of options) {
+      if (option.clubType !== form.club_type) continue;
+      if (!byId.has(option.manufacturerId)) byId.set(option.manufacturerId, option.manufacturerName);
+    }
+    return Array.from(byId, ([id, name]) => ({ id, name })).sort((a, b) =>
+      compareStrings(a.name, b.name)
+    );
+  }, [options, form.club_type]);
+
+  const models = useMemo(() => {
+    if (form.selectedManufacturerId === "") return [];
+    return options
+      .filter(
+        (option) =>
+          option.clubType === form.club_type &&
+          option.manufacturerId === form.selectedManufacturerId
+      )
+      .sort((a, b) => compareStrings(a.modelName, b.modelName));
+  }, [options, form.club_type, form.selectedManufacturerId]);
+
+  /**
+   * Every identity dimension must agree. A model id left over from a previous
+   * club type or manufacturer resolves to null here rather than being accepted,
+   * so a stale selection can never reach the payload.
+   */
+  const selectedEntry = useMemo(
+    () =>
+      options.find(
+        (option) =>
+          option.modelId === form.selectedModelId &&
+          option.clubType === form.club_type &&
+          option.manufacturerId === form.selectedManufacturerId
+      ) ?? null,
+    [options, form.selectedModelId, form.club_type, form.selectedManufacturerId]
+  );
+
+  /** Why canonical selection cannot be offered right now, if it cannot. */
+  const catalogNotice =
+    catalog.status === "unavailable"
+      ? "Canonical equipment selection is temporarily unavailable. You can still add this club using Custom / Other."
+      : catalog.status === "empty"
+        ? "The canonical equipment catalog is empty. You can still add this club using Custom / Other."
+        : manufacturers.length === 0
+          ? `No canonical ${form.club_type} models are available yet. Use Custom / Other to add this club.`
+          : null;
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
     setError(null);
 
+    // Two disjoint literals. Neither spreads `form`, and each names every
+    // identity-bearing column, so a value belonging to the other mode cannot
+    // survive a mode switch no matter what the UI state still holds.
+    let payload: UserEquipmentInsert;
+
+    if (form.custom_club) {
+      payload = {
+        user_id: userId,
+        club_type: form.club_type,
+        equipment_model_id: null,
+        manufacturer_id: null,
+        brand: null,
+        model: null,
+        custom_club: true,
+        custom_brand: form.custom_brand || null,
+        custom_model: form.custom_model || null,
+        shaft_flex: form.shaft_flex || null,
+        shaft_weight: form.shaft_weight ? parseFloat(form.shaft_weight) : null,
+        loft_deg: form.loft_deg ? parseFloat(form.loft_deg) : null,
+        is_primary: form.is_primary,
+      };
+    } else {
+      if (!selectedEntry) {
+        setError("Choose a manufacturer and model, or switch to Custom / Other.");
+        return;
+      }
+      payload = {
+        user_id: userId,
+        club_type: form.club_type,
+        equipment_model_id: selectedEntry.modelId,
+        // Left null on purpose. The database trigger derives manufacturer_id
+        // from equipment_model_id and rejects a conflicting pair, so client
+        // state is never trusted to author the manufacturer relationship.
+        manufacturer_id: null,
+        // Readable snapshot, taken from the selected catalog entry only — never
+        // from free text. It coexists with the canonical id and is what keeps a
+        // row legible if the model is ever deactivated.
+        brand: selectedEntry.manufacturerName,
+        model: selectedEntry.modelName,
+        custom_club: false,
+        custom_brand: null,
+        custom_model: null,
+        shaft_flex: form.shaft_flex || null,
+        shaft_weight: form.shaft_weight ? parseFloat(form.shaft_weight) : null,
+        loft_deg: form.loft_deg ? parseFloat(form.loft_deg) : null,
+        is_primary: form.is_primary,
+      };
+    }
+
+    setLoading(true);
+
     const supabase = createClient();
-    const { error: err } = await supabase.from("user_equipment").insert({
-      user_id: userId,
-      club_type: form.club_type,
-      brand: form.brand || null,
-      model: form.model || null,
-      shaft_flex: form.shaft_flex || null,
-      shaft_weight: form.shaft_weight ? parseFloat(form.shaft_weight) : null,
-      loft_deg: form.loft_deg ? parseFloat(form.loft_deg) : null,
-      is_primary: form.is_primary,
-      custom_club: form.custom_club,
-      custom_brand: form.custom_club ? form.custom_brand || null : null,
-      custom_model: form.custom_club ? form.custom_model || null : null,
-    });
+    const { error: err } = await supabase.from("user_equipment").insert(payload);
 
     if (err) {
       setError(err.message);
@@ -60,14 +212,23 @@ export default function AddClubForm({ userId }: { userId: string }) {
   const inputCls =
     "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-2.5 text-white text-base lg:text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500";
 
+  const noticeCls =
+    "text-sm text-amber-200/90 bg-amber-400/10 border border-amber-400/20 rounded-xl px-4 py-3";
+
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
-      {/* Club type */}
+      {/* Club type — changing it invalidates any canonical selection below. */}
       <div>
         <label className="block text-sm font-medium text-gray-300 mb-2">Club Type *</label>
         <select
           value={form.club_type}
-          onChange={(e) => set({ club_type: e.target.value as ClubType })}
+          onChange={(e) =>
+            set({
+              club_type: e.target.value as ClubType,
+              selectedManufacturerId: "",
+              selectedModelId: "",
+            })
+          }
           className={inputCls}
         >
           {CLUB_TYPES.map((t) => (
@@ -84,7 +245,15 @@ export default function AddClubForm({ userId }: { userId: string }) {
           type="checkbox"
           id="custom_club"
           checked={form.custom_club}
-          onChange={(e) => set({ custom_club: e.target.checked })}
+          onChange={(e) =>
+            set({
+              custom_club: e.target.checked,
+              selectedManufacturerId: "",
+              selectedModelId: "",
+              custom_brand: "",
+              custom_model: "",
+            })
+          }
           className="w-4 h-4 rounded border-white/20 bg-slate-800 accent-indigo-500"
         />
         <label htmlFor="custom_club" className="text-sm text-gray-300">
@@ -92,41 +261,74 @@ export default function AddClubForm({ userId }: { userId: string }) {
         </label>
       </div>
 
-      {/* Brand + Model */}
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
-            {form.custom_club ? "Custom Brand" : "Brand"}
-          </label>
-          <input
-            type="text"
-            placeholder={form.custom_club ? "e.g. KBS" : "e.g. TaylorMade"}
-            value={form.custom_club ? form.custom_brand : form.brand}
-            onChange={(e) =>
-              form.custom_club
-                ? set({ custom_brand: e.target.value })
-                : set({ brand: e.target.value })
-            }
-            className={inputCls}
-          />
+      {/* Equipment identity — canonical catalog selection, or the Custom escape. */}
+      {form.custom_club ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="min-w-0">
+            <label className="block text-sm font-medium text-gray-300 mb-2">Custom Brand</label>
+            <input
+              type="text"
+              placeholder="e.g. KBS"
+              value={form.custom_brand}
+              onChange={(e) => set({ custom_brand: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+          <div className="min-w-0">
+            <label className="block text-sm font-medium text-gray-300 mb-2">Custom Model</label>
+            <input
+              type="text"
+              placeholder="e.g. Tour 90"
+              value={form.custom_model}
+              onChange={(e) => set({ custom_model: e.target.value })}
+              className={inputCls}
+            />
+          </div>
         </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">
-            {form.custom_club ? "Custom Model" : "Model"}
-          </label>
-          <input
-            type="text"
-            placeholder={form.custom_club ? "e.g. Tour 90" : "e.g. Stealth 2"}
-            value={form.custom_club ? form.custom_model : form.model}
-            onChange={(e) =>
-              form.custom_club
-                ? set({ custom_model: e.target.value })
-                : set({ model: e.target.value })
-            }
-            className={inputCls}
-          />
+      ) : catalogNotice !== null ? (
+        <p className={noticeCls}>{catalogNotice}</p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="min-w-0">
+            <label className="block text-sm font-medium text-gray-300 mb-2">Manufacturer</label>
+            <select
+              value={form.selectedManufacturerId}
+              onChange={(e) =>
+                set({ selectedManufacturerId: e.target.value, selectedModelId: "" })
+              }
+              className={inputCls}
+            >
+              <option value="">— Select Manufacturer —</option>
+              {manufacturers.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="min-w-0">
+            <label className="block text-sm font-medium text-gray-300 mb-2">Model</label>
+            <select
+              value={form.selectedModelId}
+              onChange={(e) => set({ selectedModelId: e.target.value })}
+              disabled={form.selectedManufacturerId === ""}
+              className={inputCls}
+            >
+              <option value="">— Select Model —</option>
+              {models.map((m) => (
+                <option key={m.modelId} value={m.modelId}>
+                  {m.modelName}
+                </option>
+              ))}
+            </select>
+            {form.selectedManufacturerId !== "" && models.length === 0 && (
+              <p className={`${noticeCls} mt-2`}>
+                No canonical models for this manufacturer and club type. Use Custom / Other.
+              </p>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Shaft flex + weight */}
       <div className="grid grid-cols-2 gap-4">
