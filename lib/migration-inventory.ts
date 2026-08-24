@@ -54,6 +54,9 @@ export const SEC1D_POL_FILENAME =
   "20260731220500_drop_weak_policies_sec1a_contract.sql";
 export const SEC1F_RANGE_SESSIONS_FILENAME =
   "20260804022105_add_range_sessions_owner_policies.sql";
+/** The EQ1-S2 non-putter canonical catalog data migration. Distinct from S2_FILENAME, which is the putter catalog. */
+export const NON_PUTTER_CATALOG_V1_FILENAME =
+  "20260820132900_equipment_non_putter_catalog_v1.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -69,6 +72,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   SEC1C_FILENAME,
   SEC1D_POL_FILENAME,
   SEC1F_RANGE_SESSIONS_FILENAME,
+  NON_PUTTER_CATALOG_V1_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

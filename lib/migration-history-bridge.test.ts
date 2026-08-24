@@ -41,8 +41,8 @@ const EXPECTED_BRIDGES = BRIDGE_MIGRATIONS;
 
 const CANONICAL_FINGERPRINTS: Record<string, string> = {
   [BASELINE_FILENAME]: "33a599f07cd6aba5761ce7feea811ed3c096bb9dbc50f21d519037df45d4b828",
-  [S1R_FILENAME]: "7515cc5a8de9f3dfb492841dea0ec407b87bb26242f9f00e95b6e6e515cb8064",
-  [S2_FILENAME]: "e92c9f7b2e062b17b9934b3e6ff039c6e0b7daf92fccf81590dcba74e92c95a1",
+  [S1R_FILENAME]: "eb5b7d1269092cdd936a6829f7cdafa426fa74221743a6661b9f7edbd0a3c1cb",
+  [S2_FILENAME]: "f133d266395879e208ad3bc615a77f8b6d394f98608263e22011d07b82df9ed4",
   [SEC1C_FILENAME]: "a8a20fff1e8959a8974fb13a853c90a6adf83b35b39025aa04928830a340edca",
   [SEC1D_POL_FILENAME]: "c38484f66d8bdbfefb4c166ee7821e7f8d735930b6f2ecd5911ac35066e48016",
   [SEC1F_RANGE_SESSIONS_FILENAME]: "d155232b0e0ae7fc61aa3312658ec773c3dc3dcb29caf63db92ca9c3986e5b9b",
@@ -54,7 +54,7 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 
 // ============================================================================
 // 1-3, 23-24. Exact set membership, no missing, no unexpected extra, exact
-// 23-file inventory, strict timestamp ordering.
+// 24-file inventory, strict timestamp ordering.
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
   it("the migrations directory contains exactly the approved number of SQL files", () => {
@@ -69,13 +69,13 @@ describe("migration-history bridge — exact file inventory", () => {
     }
   });
 
-  it("contains no unexpected seventeenth bridge file", () => {
+  it("contains no unexpected migration file", () => {
     const expectedNames = new Set(APPROVED_MIGRATIONS);
     const unexpected = allMigrationFiles.filter((f) => !expectedNames.has(f));
     expect(unexpected, `unexpected migration file(s) present: ${JSON.stringify(unexpected)}`).toEqual([]);
   });
 
-  it("strict timestamp ordering: 16 bridges, then baseline, S1R, S2, SEC1B-FN, SEC1C, SEC1D, then SEC1F range sessions", () => {
+  it("strict timestamp ordering: 16 bridges, then baseline, S1R, S2, SEC1B-FN, SEC1C, SEC1D, SEC1F range sessions, then non-putter catalog v1", () => {
     const sorted = [...allMigrationFiles].sort();
     const expectedOrder = [...APPROVED_MIGRATIONS].sort();
     // Both lists are independently sorted lexicographically (equivalent to
