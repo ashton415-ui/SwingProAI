@@ -592,10 +592,15 @@ describe("Add Club form — mobile-safe input text sizing", () => {
     }
   });
 
-  it("the Add Club inputCls constant remains applied to exactly the two selects and four text/number inputs", () => {
+  // EQC1: the canonical-selection slice split the single reused Brand/Model
+  // pair into four distinct controls — two canonical selects and two Custom /
+  // Other text inputs — so the true inventory is now eight, not six. The count
+  // is re-pinned to the real form rather than evaded with a second class
+  // variable; every mobile-safety assertion around it is unchanged.
+  it("the Add Club inputCls constant remains applied to exactly the four selects and four text/number inputs", () => {
     const source = readSource(ADD_CLUB_FORM_FILE);
     const directUsages = (source.match(/className=\{inputCls\}/g) ?? []).length;
-    expect(directUsages, `${ADD_CLUB_FORM_FILE}: expected exactly six className={inputCls} usages (2 selects + 4 inputs)`).toBe(6);
+    expect(directUsages, `${ADD_CLUB_FORM_FILE}: expected exactly eight className={inputCls} usages (4 selects + 4 text/number inputs)`).toBe(8);
   });
 
   it("checkbox controls remain separately styled and unaffected by the inputCls change", () => {
