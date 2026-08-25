@@ -60,6 +60,9 @@ export const NON_PUTTER_CATALOG_V1_FILENAME =
 /** The EQ-DESIGNATION-S1 user_equipment.club_designation schema migration. */
 export const USER_CLUB_DESIGNATION_FILENAME =
   "20260824053500_equipment_user_club_designation.sql";
+/** The EQ-DESIGNATION D2 equipment snapshot V2 producer migration. */
+export const EQUIPMENT_SNAPSHOT_V2_FILENAME =
+  "20260825023500_equipment_snapshot_v2.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -77,6 +80,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   SEC1F_RANGE_SESSIONS_FILENAME,
   NON_PUTTER_CATALOG_V1_FILENAME,
   USER_CLUB_DESIGNATION_FILENAME,
+  EQUIPMENT_SNAPSHOT_V2_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

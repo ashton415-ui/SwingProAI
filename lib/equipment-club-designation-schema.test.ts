@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { migrationsAuthoredBefore, sortsAfterAll } from "./migration-inventory";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(__dirname, "..");
@@ -130,13 +131,12 @@ describe("EQ-DESIGNATION-S1 migration — file selection", () => {
     expect(MIGRATION_FILE.endsWith(files[0])).toBe(true);
   });
 
-  it("sorts after the most recent pre-existing equipment migration", () => {
-    const dir = path.join(repoRoot, "supabase", "migrations");
-    const others = readdirSync(dir)
-      .filter((f) => f.endsWith(".sql") && !f.endsWith(MIGRATION_SUFFIX))
-      .sort();
+  // Asserts this migration's own historical contract — it was authored after
+  // everything that already existed — rather than "it is the newest file on
+  // disk", which would silently expire the moment a later migration lands.
+  it("sorts after every migration that existed when this one was authored", () => {
     const mine = path.basename(MIGRATION_FILE);
-    expect(mine > others[others.length - 1]).toBe(true);
+    expect(sortsAfterAll(mine, migrationsAuthoredBefore(mine))).toBe(true);
   });
 });
 

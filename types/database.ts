@@ -223,8 +223,8 @@ export interface SwingAnalysis {
   /** References user_equipment.id (ON DELETE SET NULL). Null for analyses with no validated club selection. */
   club_id: string | null;
   telemetry_id: string | null;
-  /** Database-owned, immutable after insert. See EquipmentSnapshotV1. */
-  equipment_snapshot: EquipmentSnapshotV1 | null;
+  /** Database-owned, immutable after insert. Version-tagged — see EquipmentSnapshot. */
+  equipment_snapshot: EquipmentSnapshot | null;
   putt_tempo_ratio: number | null;
   face_angle_at_impact_deg: number | null;
   path_deviation_mm: number | null;
@@ -393,6 +393,38 @@ export interface EquipmentSnapshotV1 {
   shaft_weight_grams: number | null;
   loft_deg: number | null;
 }
+
+/**
+ * Snapshot V2 (EQ-DESIGNATION D2). Identical evidence to V1 plus the golfer's
+ * club designation, copied by value from the saved club at analysis time and
+ * never inferred — `null` means the saved club had no designation recorded.
+ *
+ * Deliberately restated in full rather than extending EquipmentSnapshotV1: the
+ * two shapes are independent historical records, and a later edit to V1 must
+ * never retroactively change what a V2 snapshot means. Snapshots are written
+ * only by public.apply_swing_analysis_equipment_snapshot() and are frozen after
+ * insert, so rows keep whichever version was current when they were captured.
+ */
+export interface EquipmentSnapshotV2 {
+  schema_version: 2;
+  captured_at: string;
+  equipment_id: string;
+  club_type: ClubType;
+  club_designation: ClubDesignation | null;
+  manufacturer: { id: string; canonical_name: string; slug: string } | null;
+  model: { id: string; canonical_name: string; slug: string; model_year: number | null } | null;
+  entered_brand: string | null;
+  entered_model: string | null;
+  custom_club: boolean;
+  custom_brand: string | null;
+  custom_model: string | null;
+  shaft_flex: string | null;
+  shaft_weight_grams: number | null;
+  loft_deg: number | null;
+}
+
+/** Any persisted snapshot shape. Discriminate on `schema_version`. */
+export type EquipmentSnapshot = EquipmentSnapshotV1 | EquipmentSnapshotV2;
 
 // ─── Coach Feedback ───────────────────────────────────────────────────────────
 
