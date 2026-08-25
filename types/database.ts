@@ -19,6 +19,29 @@ export type ViewAngle = "face_on" | "down_the_line";
 
 export type ClubType = "Driver" | "Wood" | "Hybrid" | "Iron" | "Wedge" | "Putter";
 
+// ─── Club Designation (EQ-DESIGNATION-S1) ─────────────────────────────────────
+//
+// The golfer's own club number/designation on a saved public.user_equipment
+// row — never canonical catalog identity. equipment_models stays at its
+// model-family × club_type granularity, so a 4-iron and a 7-iron from one set
+// are two user_equipment rows against a single canonical model.
+//
+// Mirrors the 28 distinct tokens permitted by
+// user_equipment_club_designation_vocabulary. Which of them is legal for a
+// given row is further narrowed by club_type in
+// user_equipment_club_designation_club_type_compat: Wood, Hybrid, Iron and
+// Wedge each accept their own subset, while Driver and Putter accept none.
+// `null` means not stated or not applicable and is always valid.
+//
+// PW is deliberately shared between Iron and Wedge; AW and GW are the same
+// club under two manufacturer names and both remain permitted.
+
+export type ClubDesignation =
+  | "2W" | "3W" | "4W" | "5W" | "7W" | "9W" | "11W"
+  | "1H" | "2H" | "3H" | "4H" | "5H" | "6H" | "7H"
+  | "1I" | "2I" | "3I" | "4I" | "5I" | "6I" | "7I" | "8I" | "9I"
+  | "PW" | "AW" | "GW" | "SW" | "LW";
+
 export type AnalysisDepth = "basic" | "advanced" | "ultra";
 
 export type AnalysisFamily = "full_swing" | "putting";
@@ -340,6 +363,8 @@ export interface UserEquipment {
   manufacturer_id: string | null;
   /** Nullable catalog reference. Must match manufacturer_id and club_type when present. */
   equipment_model_id: string | null;
+  /** The golfer's club number/designation. Database-constrained to the V1 vocabulary and to values valid for this row's club_type. Null when not stated or not applicable (always valid; the only option for Driver and Putter). */
+  club_designation: ClubDesignation | null;
   // joined
   manufacturer?: EquipmentManufacturer;
   equipment_model?: EquipmentModel;

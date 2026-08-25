@@ -57,6 +57,9 @@ export const SEC1F_RANGE_SESSIONS_FILENAME =
 /** The EQ1-S2 non-putter canonical catalog data migration. Distinct from S2_FILENAME, which is the putter catalog. */
 export const NON_PUTTER_CATALOG_V1_FILENAME =
   "20260820132900_equipment_non_putter_catalog_v1.sql";
+/** The EQ-DESIGNATION-S1 user_equipment.club_designation schema migration. */
+export const USER_CLUB_DESIGNATION_FILENAME =
+  "20260824053500_equipment_user_club_designation.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -73,6 +76,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   SEC1D_POL_FILENAME,
   SEC1F_RANGE_SESSIONS_FILENAME,
   NON_PUTTER_CATALOG_V1_FILENAME,
+  USER_CLUB_DESIGNATION_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

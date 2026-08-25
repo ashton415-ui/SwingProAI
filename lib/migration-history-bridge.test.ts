@@ -54,7 +54,7 @@ const allMigrationFiles = readdirSync(migrationsDir).filter((f) => f.endsWith(".
 
 // ============================================================================
 // 1-3, 23-24. Exact set membership, no missing, no unexpected extra, exact
-// 24-file inventory, strict timestamp ordering.
+// 25-file inventory, strict timestamp ordering.
 // ============================================================================
 describe("migration-history bridge — exact file inventory", () => {
   it("the migrations directory contains exactly the approved number of SQL files", () => {
@@ -75,7 +75,7 @@ describe("migration-history bridge — exact file inventory", () => {
     expect(unexpected, `unexpected migration file(s) present: ${JSON.stringify(unexpected)}`).toEqual([]);
   });
 
-  it("strict timestamp ordering: 16 bridges, then baseline, S1R, S2, SEC1B-FN, SEC1C, SEC1D, SEC1F range sessions, then non-putter catalog v1", () => {
+  it("strict timestamp ordering: 16 bridges, then baseline, S1R, S2, SEC1B-FN, SEC1C, SEC1D, SEC1F range sessions, then non-putter catalog v1, then user club designation", () => {
     const sorted = [...allMigrationFiles].sort();
     const expectedOrder = [...APPROVED_MIGRATIONS].sort();
     // Both lists are independently sorted lexicographically (equivalent to
