@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import type { ClubDesignation } from '@/types/database';
 import {
   Target,
   Zap,
@@ -21,6 +22,12 @@ export type ClubType = 'Driver' | 'Wood' | 'Hybrid' | 'Iron' | 'Wedge' | 'Putter
 export interface ClubRecord {
   id: string;
   club_type: ClubType;
+  /**
+   * The golfer's own club number for this saved club. Null means not stated or
+   * not applicable — always valid, and the only option for Driver and Putter.
+   * Shown as secondary metadata only; the primary label stays brand/model.
+   */
+  club_designation: ClubDesignation | null;
   brand: string | null;
   model: string | null;
   shaft_flex: string | null;
@@ -148,6 +155,9 @@ function ClubRow({
           )}
         </div>
         <div className="flex items-center gap-2 mt-0.5">
+          {club.club_designation && (
+            <span className="text-[11px] text-slate-400">{club.club_designation}</span>
+          )}
           {club.shaft_flex && (
             <span className="text-[11px] text-slate-500">{club.shaft_flex} flex</span>
           )}

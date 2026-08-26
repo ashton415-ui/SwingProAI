@@ -4,6 +4,11 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import type { ClubType } from "@/components/swing/VirtualBag";
+import type { ClubDesignation } from "@/types/database";
+import {
+  getClubDesignationOptions,
+  isClubDesignationValidFor,
+} from "@/lib/equipment/club-designation-options";
 
 const CLUB_TYPES: ClubType[] = ["Driver", "Wood", "Hybrid", "Iron", "Wedge", "Putter"];
 const SHAFT_FLEX_OPTIONS = ["Ladies", "Senior", "Regular", "Stiff", "X-Stiff"];
@@ -45,6 +50,8 @@ interface AddClubFormProps {
 type UserEquipmentInsert = {
   user_id: string;
   club_type: ClubType;
+  /** The golfer's own club number. Never inferred — see the designation select below. */
+  club_designation: ClubDesignation | null;
   equipment_model_id: string | null;
   manufacturer_id: string | null;
   brand: string | null;
@@ -74,6 +81,9 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
 
   const [form, setForm] = useState({
     club_type: "Driver" as ClubType,
+    // "" is the absence of a stated designation, never a sentinel token. It is
+    // resolved to database NULL at submit time.
+    club_designation: "" as ClubDesignation | "",
     // Canonical selection starts empty in both dimensions. Nothing is ever
     // auto-selected — a golfer's equipment identity must be chosen, not guessed.
     selectedManufacturerId: "",
@@ -131,6 +141,16 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
     [options, form.selectedModelId, form.club_type, form.selectedManufacturerId]
   );
 
+  /**
+   * The designations the database will accept for the currently selected club
+   * type. Driver and Putter yield none, so the control is replaced by a note
+   * rather than an empty list.
+   */
+  const designationOptions = useMemo(
+    () => getClubDesignationOptions(form.club_type),
+    [form.club_type]
+  );
+
   /** Why canonical selection cannot be offered right now, if it cannot. */
   const catalogNotice =
     catalog.status === "unavailable"
@@ -150,10 +170,21 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
     // survive a mode switch no matter what the UI state still holds.
     let payload: UserEquipmentInsert;
 
+    // Resolved against the CURRENT club type, so a designation left over from a
+    // previous type (Iron 7I, then switched to Wood) cannot reach the database,
+    // and Driver/Putter always resolve to null. Blank is null, never "".
+    const clubDesignation: ClubDesignation | null = isClubDesignationValidFor(
+      form.club_type,
+      form.club_designation
+    )
+      ? form.club_designation
+      : null;
+
     if (form.custom_club) {
       payload = {
         user_id: userId,
         club_type: form.club_type,
+        club_designation: clubDesignation,
         equipment_model_id: null,
         manufacturer_id: null,
         brand: null,
@@ -174,6 +205,7 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
       payload = {
         user_id: userId,
         club_type: form.club_type,
+        club_designation: clubDesignation,
         equipment_model_id: selectedEntry.modelId,
         // Left null on purpose. The database trigger derives manufacturer_id
         // from equipment_model_id and rejects a conflicting pair, so client
@@ -225,6 +257,7 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
           onChange={(e) =>
             set({
               club_type: e.target.value as ClubType,
+              club_designation: "",
               selectedManufacturerId: "",
               selectedModelId: "",
             })
@@ -237,6 +270,39 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
             </option>
           ))}
         </select>
+      </div>
+
+      {/* Club Number / Designation — the golfer's own club number, never
+          derived from the model, loft or catalog. Options come only from the
+          helper, which mirrors the D1 club-type compatibility constraint. */}
+      <div>
+        <label className="block text-sm font-medium text-gray-300 mb-2">
+          Club Number / Designation
+        </label>
+        {designationOptions.length === 0 ? (
+          // Neutral copy, not noticeCls: for a driver or putter this is the
+          // ordinary, correct state — nothing is unavailable and nothing is
+          // wrong — so it must not borrow the amber treatment the genuine
+          // catalog warnings use.
+          <p className="text-sm text-gray-400">
+            No separate club designation is recorded for this club type.
+          </p>
+        ) : (
+          <select
+            value={form.club_designation}
+            onChange={(e) =>
+              set({ club_designation: e.target.value as ClubDesignation | "" })
+            }
+            className={inputCls}
+          >
+            <option value="">— None —</option>
+            {designationOptions.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Custom club toggle */}
