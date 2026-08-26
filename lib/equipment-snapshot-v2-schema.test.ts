@@ -546,6 +546,61 @@ describe("EQ-DESIGNATION D2 migration — original V1 function drift guard", () 
   });
 });
 
+// ============================================================================
+// Both security guards compare public.apply_swing_analysis_equipment_snapshot()
+// against pg_proc.proconfig. PostgreSQL flattens `SET search_path TO ''` into
+// the proconfig element `search_path=""` — the empty value is stored QUOTED,
+// never as a bare trailing `=`. An earlier revision of this migration compared
+// against `search_path=`, a literal no correctly-declared function can ever
+// carry, so both guards were unsatisfiable by construction and a real staging
+// application aborted at EQDS2-PRE-17 against a function that had not drifted
+// at all. Nothing in the suite pinned the predicate, so the defect passed every
+// test. These two do.
+//
+// Exact array equality is deliberate rather than containment: the contract is
+// not "an empty search_path appears somewhere" but "the function carries
+// exactly the expected function-level configuration", so an extra unexpected
+// SET option must fail closed.
+// ============================================================================
+describe("EQ-DESIGNATION D2 migration — pg_proc.proconfig security-posture guard", () => {
+  const sql = stripSqlComments(readSource(MIGRATION_FILE));
+
+  const STALE_PREDICATE = "p.proconfig @> array['search_path=']";
+  const CORRECT_PREDICATE = `p.proconfig = array['search_path=""']::text[]`;
+
+  /** The `if not exists (...)` guard text immediately preceding an exception id. */
+  function guardBlock(exceptionId: string): string {
+    const at = sql.indexOf(exceptionId);
+    expect(at, `${exceptionId} not found in executable SQL`).toBeGreaterThan(-1);
+    const start = sql.lastIndexOf("if not exists (", at);
+    expect(start, `no guard block precedes ${exceptionId}`).toBeGreaterThan(-1);
+    return sql.slice(start, at);
+  }
+
+  it("never compares proconfig against the stale search_path literal", () => {
+    expect(sql).not.toContain(STALE_PREDICATE);
+    expect((sql.match(/array\['search_path='\]/g) ?? []).length).toBe(0);
+    expect((sql.match(/proconfig\s*@>/g) ?? []).length).toBe(0);
+  });
+
+  it("pins both security guards to the exact proconfig representation", () => {
+    expect(sql.split(CORRECT_PREDICATE).length - 1).toBe(2);
+
+    for (const exceptionId of ["EQDS2-PRE-17", "EQDS2-POST-2"]) {
+      const block = guardBlock(exceptionId);
+      expect(block, `${exceptionId} guard lost the exact proconfig contract`).toContain(
+        CORRECT_PREDICATE
+      );
+      expect(block, `${exceptionId} guard lost the SECURITY INVOKER contract`).toContain(
+        "p.prosecdef = false"
+      );
+      expect(block, `${exceptionId} guard still carries the stale predicate`).not.toContain(
+        STALE_PREDICATE
+      );
+    }
+  });
+});
+
 describe("EQ-DESIGNATION D2 migration — function replacement identity", () => {
   const sql = stripSqlComments(readSource(MIGRATION_FILE));
 

@@ -166,7 +166,7 @@ begin
     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.proname = 'apply_swing_analysis_equipment_snapshot'
       and p.prosecdef = false
-      and p.proconfig @> array['search_path=']
+      and p.proconfig = array['search_path=""']::text[]
   ) then
     raise exception 'EQDS2-PRE-17: the existing snapshot function is no longer SECURITY INVOKER with an empty search_path.';
   end if;
@@ -519,7 +519,7 @@ begin
     select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.proname = 'apply_swing_analysis_equipment_snapshot'
       and p.prosecdef = false
-      and p.proconfig @> array['search_path=']
+      and p.proconfig = array['search_path=""']::text[]
   ) then
     raise exception 'EQDS2-POST-2: the replaced snapshot function is not SECURITY INVOKER with an empty search_path.';
   end if;
