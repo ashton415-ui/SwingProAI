@@ -617,16 +617,16 @@ describe("EQC1 — historical bag rows and out-of-scope surfaces are untouched",
 // ============================================================================
 
 describe("EQC1 Add Club form — new selectors stay mobile-safe", () => {
-  it("applies the protected input class to all eight controls", () => {
+  it("applies the protected input class to all nine controls", () => {
     const source = readSource(FORM_FILE);
     expect(
       (source.match(/className=\{inputCls\}/g) ?? []).length,
-      `${FORM_FILE}: expected eight controls (4 selects + 4 text/number inputs)`
-    ).toBe(8);
+      `${FORM_FILE}: expected nine controls (5 selects + 4 text/number inputs)`
+    ).toBe(9);
     expect(
       (source.match(/<select/g) ?? []).length,
-      `${FORM_FILE}: expected four selects — Club Type, Manufacturer, Model, Shaft Flex`
-    ).toBe(4);
+      `${FORM_FILE}: expected five selects — Club Type, Club Number / Designation, Manufacturer, Model, Shaft Flex`
+    ).toBe(5);
   });
 
   it("keeps exactly the two existing checkbox controls", () => {

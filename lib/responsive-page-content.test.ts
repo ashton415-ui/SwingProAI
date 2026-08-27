@@ -597,10 +597,15 @@ describe("Add Club form — mobile-safe input text sizing", () => {
   // Other text inputs — so the true inventory is now eight, not six. The count
   // is re-pinned to the real form rather than evaded with a second class
   // variable; every mobile-safety assertion around it is unchanged.
-  it("the Add Club inputCls constant remains applied to exactly the four selects and four text/number inputs", () => {
+  //
+  // EQDS1 D3-S1: the Club Number / Designation select joins them, taking the
+  // inventory to nine. It is protected by the same inputCls as every other
+  // control — no exemption, no second class variable — so the count is again
+  // re-pinned to the real form rather than relaxed.
+  it("the Add Club inputCls constant remains applied to exactly the five selects and four text/number inputs", () => {
     const source = readSource(ADD_CLUB_FORM_FILE);
     const directUsages = (source.match(/className=\{inputCls\}/g) ?? []).length;
-    expect(directUsages, `${ADD_CLUB_FORM_FILE}: expected exactly eight className={inputCls} usages (4 selects + 4 text/number inputs)`).toBe(8);
+    expect(directUsages, `${ADD_CLUB_FORM_FILE}: expected exactly nine className={inputCls} usages (5 selects + 4 text/number inputs)`).toBe(9);
   });
 
   it("checkbox controls remain separately styled and unaffected by the inputCls change", () => {
