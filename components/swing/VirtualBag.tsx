@@ -9,6 +9,7 @@ import {
   TrendingUp,
   ChevronDown,
   ChevronRight,
+  Pencil,
   Plus,
   Trash2,
   Star,
@@ -55,6 +56,7 @@ export interface VirtualBagProps {
   /** Latest telemetry keyed by club ID */
   telemetry?: Record<string, TelemetryStat>;
   onAddClub?: () => void;
+  onEditClub?: (clubId: string) => void;
   onRemoveClub?: (clubId: string) => void;
   onGetFitting?: (clubId: string) => void;
 }
@@ -127,11 +129,13 @@ function StatPill({ label, value, colorClass = 'text-slate-300' }: { label: stri
 function ClubRow({
   club,
   stat,
+  onEdit,
   onRemove,
   onFitting,
 }: {
   club: ClubRecord;
   stat?: TelemetryStat;
+  onEdit?: () => void;
   onRemove?: () => void;
   onFitting?: () => void;
 }) {
@@ -204,6 +208,16 @@ function ClubRow({
             <span className="hidden sm:inline">Fit</span>
           </button>
         )}
+        {onEdit && (
+          <button
+            onClick={onEdit}
+            title="Edit club"
+            aria-label={`Edit ${clubDisplayName(club)}`}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center p-1.5 text-slate-600 hover:text-indigo-400 transition-colors rounded-lg hover:bg-indigo-400/10"
+          >
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
+        )}
         {onRemove && (
           <button
             onClick={onRemove}
@@ -225,6 +239,7 @@ export default function VirtualBag({
   clubs,
   telemetry = {},
   onAddClub,
+  onEditClub,
   onRemoveClub,
   onGetFitting,
 }: VirtualBagProps) {
@@ -333,6 +348,7 @@ export default function VirtualBag({
                         key={club.id}
                         club={club}
                         stat={telemetry[club.id]}
+                        onEdit={onEditClub ? () => onEditClub(club.id) : undefined}
                         onRemove={onRemoveClub ? () => onRemoveClub(club.id) : undefined}
                         onFitting={onGetFitting ? () => onGetFitting(club.id) : undefined}
                       />
