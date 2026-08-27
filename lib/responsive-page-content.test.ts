@@ -259,6 +259,21 @@ describe("VirtualBag — touch-accessible row actions", () => {
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onRemove}"`).toContain("onClick={onRemove}");
   });
 
+  // D3-S2: the edit control joins Fit and Remove in the same action group and
+  // is held to the same contract — conditional, callback-wired, always visible.
+  it("the edit control remains conditional with exact callback wiring", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onEdit && ("`).toContain("{onEdit && (");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onEdit}"`).toContain("onClick={onEdit}");
+  });
+
+  it("the edit button retains its title, accessible label, and icon", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing edit title`).toContain('title="Edit club"');
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing exact edit aria-label`).toContain("aria-label={`Edit ${clubDisplayName(club)}`}");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Pencil icon on the edit button`).toContain("<Pencil className=");
+  });
+
   it("the fitting button retains its title, accessible label, icon, visible text, and sm:inline behavior", () => {
     const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing fitting title`).toContain('title="AI shaft fitting"');
@@ -696,6 +711,23 @@ describe("VirtualBag — ClubRow action button minimum touch targets", () => {
     expect(tag, `${VIRTUAL_BAG_FILE}: Remove button opening tag unexpectedly empty`).toBeTruthy();
   });
 
+  it("the Edit button opening tag is uniquely located via its onEdit callback", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onEdit}", VIRTUAL_BAG_FILE);
+    expect(tag, `${VIRTUAL_BAG_FILE}: Edit button opening tag unexpectedly empty`).toBeTruthy();
+  });
+
+  it("the Edit button carries min-h-11 and min-w-11 directly, alongside its full existing token set", () => {
+    const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
+    const tag = extractButtonOpeningTag(clubRow, "onClick={onEdit}", VIRTUAL_BAG_FILE);
+    const tokens = extractButtonClassName(tag, VIRTUAL_BAG_FILE).split(/\s+/).filter(Boolean);
+    for (const required of [
+      "inline-flex", "min-h-11", "min-w-11", "items-center", "justify-center",
+    ]) {
+      expect(tokens, `${VIRTUAL_BAG_FILE}: Edit button missing "${required}"`).toContain(required);
+    }
+  });
+
   it("the Fit button carries min-h-11 and min-w-11 directly, alongside its full existing token set", () => {
     const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
     const tag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
@@ -750,8 +782,9 @@ describe("VirtualBag — ClubRow action button minimum touch targets", () => {
   it("neither button opening tag introduces hidden, invisible, opacity-0, or hover-gated visibility", () => {
     const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
     const fitTag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
+    const editTag = extractButtonOpeningTag(clubRow, "onClick={onEdit}", VIRTUAL_BAG_FILE);
     const removeTag = extractButtonOpeningTag(clubRow, "onClick={onRemove}", VIRTUAL_BAG_FILE);
-    for (const tag of [fitTag, removeTag]) {
+    for (const tag of [fitTag, editTag, removeTag]) {
       for (const forbidden of ["hidden", "invisible", "opacity-0", "group-hover:"]) {
         expect(tag, `${VIRTUAL_BAG_FILE}: unexpected "${forbidden}" on a button opening tag — found "${tag}"`).not.toContain(forbidden);
       }
@@ -776,6 +809,8 @@ describe("VirtualBag — ClubRow action button minimum touch targets", () => {
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onFitting}"`).toContain("onClick={onFitting}");
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onRemove && ("`).toContain("{onRemove && (");
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onRemove}"`).toContain("onClick={onRemove}");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "{onEdit && ("`).toContain("{onEdit && (");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "onClick={onEdit}"`).toContain("onClick={onEdit}");
   });
 
   it("no confirmation dialog or new deletion-confirmation flow was introduced", () => {

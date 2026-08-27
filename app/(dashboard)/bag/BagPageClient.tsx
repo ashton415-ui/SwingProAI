@@ -31,6 +31,10 @@ export default function BagPageClient({ initialClubs, initialTelemetry }: BagPag
     router.push("/bag/add");
   }
 
+  function handleEditClub(clubId: string) {
+    router.push(`/bag/${clubId}/edit`);
+  }
+
   function handleGetFitting(clubId: string) {
     router.push(`/analyze?club_id=${clubId}`);
   }
@@ -50,6 +54,7 @@ export default function BagPageClient({ initialClubs, initialTelemetry }: BagPag
             clubs={clubs}
             telemetry={initialTelemetry}
             onAddClub={handleAddClub}
+            onEditClub={handleEditClub}
             onRemoveClub={handleRemoveClub}
             onGetFitting={handleGetFitting}
           />
