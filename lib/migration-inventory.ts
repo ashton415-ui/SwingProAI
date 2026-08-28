@@ -63,6 +63,9 @@ export const USER_CLUB_DESIGNATION_FILENAME =
 /** The EQ-DESIGNATION D2 equipment snapshot V2 producer migration. */
 export const EQUIPMENT_SNAPSHOT_V2_FILENAME =
   "20260825023500_equipment_snapshot_v2.sql";
+/** The EQ3-DB1 equipment archive lifecycle schema foundation migration. */
+export const EQUIPMENT_ARCHIVE_LIFECYCLE_FILENAME =
+  "20260828061225_equipment_archive_lifecycle.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -81,6 +84,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   NON_PUTTER_CATALOG_V1_FILENAME,
   USER_CLUB_DESIGNATION_FILENAME,
   EQUIPMENT_SNAPSHOT_V2_FILENAME,
+  EQUIPMENT_ARCHIVE_LIFECYCLE_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

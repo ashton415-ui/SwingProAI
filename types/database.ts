@@ -357,6 +357,8 @@ export interface UserEquipment {
   custom_model: string | null;
   custom_notes: string | null;
   is_primary: boolean;
+  /** True when the golfer has removed this club from their active bag. Archived rows are excluded from the active bag and from selectable clubs rather than deleted, so historical analysis and telemetry references stay intact. */
+  is_archived: boolean;
   created_at: string;
   updated_at: string;
   /** Nullable catalog reference. Database-validated (existence + active) via a before-insert/update trigger. */
