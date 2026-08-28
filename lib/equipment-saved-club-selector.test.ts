@@ -123,6 +123,7 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: ID_A,
     club_type: "Driver",
+    club_designation: null,
     brand: "PING",
     model: "G430",
     custom_club: false,
@@ -171,10 +172,11 @@ describe("saved-club query — table and column contract", () => {
     expect(select?.args[0]).toBe(SAVED_CLUBS_SELECT);
   });
 
-  it("selects exactly the eight source columns the DTO is built from", () => {
+  it("selects exactly the nine source columns the DTO is built from", () => {
     expect(SAVED_CLUBS_SELECT.split(",")).toEqual([
       "id",
       "club_type",
+      "club_designation",
       "brand",
       "model",
       "custom_club",
@@ -279,6 +281,18 @@ describe("saved-club query — every saved row shape stays selectable", () => {
     expect(Object.keys(clubs[0]).sort()).toEqual(["clubType", "displayName", "id", "isPrimary"]);
   });
 
+  it("keeps club_designation a source column, never a DTO key", async () => {
+    const clubs = await clubsFor([row({ club_type: "Iron", club_designation: "7I" })]);
+
+    expect(clubs[0].displayName).toBe("7I · PING G430");
+    expect(
+      clubs[0],
+      "the designation reaches the consumer inside the name, not as a second field"
+    ).not.toHaveProperty("club_designation");
+    expect(clubs[0]).not.toHaveProperty("clubDesignation");
+    expect(Object.keys(clubs[0]).sort()).toEqual(["clubType", "displayName", "id", "isPrimary"]);
+  });
+
   it("leaks no owner, raw identity or catalog field into the DTO", async () => {
     const clubs = await clubsFor([
       // Extra fields the query does not request are ignored even if present.
@@ -351,6 +365,127 @@ describe("saved-club query — display-name precedence", () => {
   it("never invents a manufacturer or model", () => {
     expect(savedClubsCode).not.toMatch(/displayName:\s*["'](Unknown|Unbranded|N\/A)["']/);
     expect(savedClubsCode).not.toContain("Unknown");
+  });
+});
+
+describe("saved-club query — designation-first naming", () => {
+  it("leads the name with a designation the row legally carries", async () => {
+    expect(await displayNameFor({ club_type: "Iron", club_designation: "7I" })).toBe(
+      "7I · PING G430"
+    );
+    expect(
+      await displayNameFor({ club_type: "Wood", club_designation: "3W", model: "G430 Max" })
+    ).toBe("3W · PING G430 Max");
+    expect(
+      await displayNameFor({ club_type: "Wedge", club_designation: "SW", model: "Glide 4.0" })
+    ).toBe("SW · PING Glide 4.0");
+    expect(await displayNameFor({ club_type: "Hybrid", club_designation: "4H" })).toBe(
+      "4H · PING G430"
+    );
+  });
+
+  it("leaves an undesignated row named exactly as it was before D4", async () => {
+    const name = await displayNameFor({ club_type: "Iron", club_designation: null });
+    expect(name).toBe("PING G430");
+    expect(name).not.toContain("·");
+  });
+
+  it("leads a custom row the same way", async () => {
+    expect(
+      await displayNameFor({
+        club_type: "Wedge",
+        club_designation: "LW",
+        custom_club: true,
+        brand: null,
+        model: null,
+        custom_brand: "Acme",
+        custom_model: "Prototype",
+      })
+    ).toBe("LW · Acme Prototype");
+  });
+
+  it("still falls back to the club type when a designated row has no identity text", async () => {
+    expect(
+      await displayNameFor({ club_type: "Iron", club_designation: "9I", brand: null, model: null })
+    ).toBe("9I · Iron");
+  });
+
+  it("builds the name from the shared helper rather than a second local copy", () => {
+    expect(savedClubsCode).toContain(
+      'from "@/lib/equipment/club-display-name"'
+    );
+    expect(savedClubsCode).toContain("getClubDisplayName");
+    expect(
+      savedClubsCode,
+      `${SAVED_CLUBS_MODULE}: the separator belongs to the shared helper alone`
+    ).not.toContain('" · "');
+    expect(
+      savedClubsCode,
+      `${SAVED_CLUBS_MODULE}: a second display-name implementation would diverge from My Bag`
+    ).not.toContain("deriveDisplayName");
+  });
+
+  it("delegates compatibility to the D1-derived helper", () => {
+    expect(savedClubsCode).toContain("isClubDesignationValidFor");
+    for (const token of ["2W", "3W", "1H", "7I", "9I", "PW", "AW", "GW", "SW", "LW"]) {
+      expect(
+        savedClubsCode,
+        `${SAVED_CLUBS_MODULE}: "${token}" must not be transcribed here`
+      ).not.toContain(`"${token}"`);
+    }
+  });
+});
+
+describe("saved-club query — an illegal designation fails the read closed", () => {
+  for (const [label, override] of [
+    ["a non-string designation", { club_type: "Iron", club_designation: 7 }],
+    ["an object designation", { club_type: "Iron", club_designation: {} }],
+    ["an empty-string designation", { club_type: "Iron", club_designation: "" }],
+    ["a whitespace designation", { club_type: "Iron", club_designation: " " }],
+    ["a designation outside the vocabulary", { club_type: "Iron", club_designation: "13I" }],
+    ["a differently cased designation", { club_type: "Iron", club_designation: "7i" }],
+    ["a wood designation on an iron", { club_type: "Iron", club_designation: "3W" }],
+    ["an iron designation on a wood", { club_type: "Wood", club_designation: "7I" }],
+    ["a wedge designation on a hybrid", { club_type: "Hybrid", club_designation: "SW" }],
+    ["any designation on a driver", { club_type: "Driver", club_designation: "3W" }],
+    ["any designation on a putter", { club_type: "Putter", club_designation: "PW" }],
+  ] as const) {
+    it(`reports ${label} as malformed_data`, async () => {
+      const result = await querySavedClubs(
+        makeFakeClient(ok([row(override as Record<string, unknown>)])),
+        { userId: USER_ID }
+      );
+
+      expect(
+        result,
+        "an impossible designation must not be repaired, dropped or silently renamed"
+      ).toEqual({ status: "malformed_data", clubs: [] });
+    });
+  }
+
+  it("rejects the whole read when only a later row carries an illegal designation", async () => {
+    const result = await querySavedClubs(
+      makeFakeClient(
+        ok([
+          row({ id: ID_A, club_type: "Iron", club_designation: "7I" }),
+          row({ id: ID_B, club_type: "Iron", club_designation: "3W" }),
+        ])
+      ),
+      { userId: USER_ID }
+    );
+
+    expect(result.status).toBe("malformed_data");
+    expect(result.clubs).toEqual([]);
+  });
+
+  it("never rewrites an unexpected designation into a guess", () => {
+    expect(savedClubsCode).not.toMatch(/club_designation\s*=\s*["']/);
+    for (const forbidden of ["toUpperCase", "toLowerCase", "replace(", "fallbackDesignation"]) {
+      expect(
+        savedClubsCode,
+        `${SAVED_CLUBS_MODULE}: "${forbidden}" would repair rather than reject`
+      ).not.toContain(forbidden);
+    }
   });
 });
 

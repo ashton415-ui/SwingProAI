@@ -149,24 +149,6 @@ function designationNote(source: string): string {
   return code.slice(start, end);
 }
 
-/** The secondary metadata row in the bag club row. */
-function metadataRow(source: string): string {
-  const start = source.indexOf('<div className="flex items-center gap-2 mt-0.5">');
-  expect(start, `${BAG_FILE}: could not locate the secondary metadata row`).toBeGreaterThan(-1);
-  const end = source.indexOf("{/* Telemetry stats */}", start);
-  expect(end, `${BAG_FILE}: could not locate the end of the metadata row`).toBeGreaterThan(start);
-  return source.slice(start, end);
-}
-
-/** The clubDisplayName function body — D4 territory, frozen for D3. */
-function clubDisplayNameBody(source: string): string {
-  const start = source.indexOf("function clubDisplayName(club: ClubRecord): string {");
-  expect(start, `${BAG_FILE}: could not locate clubDisplayName`).toBeGreaterThan(-1);
-  const end = source.indexOf("\n}", start);
-  expect(end, `${BAG_FILE}: could not locate the end of clubDisplayName`).toBeGreaterThan(start);
-  return source.slice(start, end);
-}
-
 // ============================================================================
 // A–F. Exact option sets per club type.
 // ============================================================================
@@ -502,7 +484,7 @@ describe("D3-S1 Add Club form — untouched contracts", () => {
 // V, W, X. My Bag display and the D4 boundary.
 // ============================================================================
 
-describe("D3-S1 My Bag — designation is secondary metadata only", () => {
+describe("D3-S1 My Bag — designation data contract", () => {
   const source = readSource(BAG_FILE);
 
   it("carries club_designation on ClubRecord as the database union", () => {
@@ -517,30 +499,6 @@ describe("D3-S1 My Bag — designation is secondary metadata only", () => {
     expect(source, `${BAG_FILE}: the union is owned by types/database.ts`).not.toMatch(
       /type\s+ClubDesignation\s*=/
     );
-  });
-
-  it("renders the designation inside the secondary metadata row", () => {
-    const row = metadataRow(source);
-    expect(row).toContain("club.club_designation");
-    expect(row, "the designation belongs beside flex, loft and weight").toContain("club.loft_deg");
-    expect(row).toContain("club.shaft_flex");
-  });
-
-  it("renders nothing when the designation is null", () => {
-    expect(metadataRow(source)).toMatch(/\{club\.club_designation && \(/);
-  });
-
-  it("leaves clubDisplayName untouched — display naming is D4", () => {
-    const body = clubDisplayNameBody(source);
-    expect(body, `${BAG_FILE}: designation-first naming belongs to D4`).not.toContain(
-      "club_designation"
-    );
-    expect(body).toContain("club.custom_brand ?? club.brand ?? 'Custom'");
-    expect(body).toContain("`${club.brand ?? ''} ${club.model ?? ''}`.trim()");
-    expect(
-      body,
-      `${BAG_FILE}: a designation-first label belongs to D4, not here`
-    ).not.toContain(" · ");
   });
 
   it("adds no write path to a presentation component", () => {
