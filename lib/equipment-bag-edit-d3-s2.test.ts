@@ -149,15 +149,6 @@ function clubRow(source: string): string {
   return source.slice(start, end);
 }
 
-/** The clubDisplayName body — D4 territory, frozen for D3. */
-function clubDisplayNameBody(source: string): string {
-  const start = source.indexOf("function clubDisplayName(club: ClubRecord): string {");
-  expect(start, `${VIRTUAL_BAG}: could not locate clubDisplayName`).toBeGreaterThan(-1);
-  const end = source.indexOf("\n}", start);
-  expect(end, `${VIRTUAL_BAG}: could not locate the end of clubDisplayName`).toBeGreaterThan(start);
-  return source.slice(start, end);
-}
-
 /** The quoted string list assigned to SHAFT_FLEX_OPTIONS in a given file. */
 function shaftFlexOptions(source: string, fileLabel: string): string[] {
   const match = source.match(/const SHAFT_FLEX_OPTIONS = \[([^\]]*)\]/);
@@ -528,15 +519,6 @@ describe("D3-S2 My Bag — edit affordance", () => {
     expect(client).toContain("function handleEditClub(clubId: string)");
     expect(client).toContain("router.push(`/bag/${clubId}/edit`)");
     expect(client).toContain("onEditClub={handleEditClub}");
-  });
-
-  it("leaves clubDisplayName untouched — display naming is D4", () => {
-    const body = clubDisplayNameBody(bag);
-    expect(body, `${VIRTUAL_BAG}: designation-first naming belongs to D4`).not.toContain(
-      "club_designation"
-    );
-    expect(body).toContain("club.custom_brand ?? club.brand ?? 'Custom'");
-    expect(body, `${VIRTUAL_BAG}: a designation-first label belongs to D4`).not.toContain(" · ");
   });
 
   // The two new files are held to the full boundary. The modified files are

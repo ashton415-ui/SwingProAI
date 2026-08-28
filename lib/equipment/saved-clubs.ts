@@ -49,7 +49,9 @@
  *   not invented data.
  */
 
-import type { ClubType } from "@/types/database";
+import type { ClubDesignation, ClubType } from "@/types/database";
+import { isClubDesignationValidFor } from "@/lib/equipment/club-designation-options";
+import { getClubDisplayName } from "@/lib/equipment/club-display-name";
 
 // ─── Injected client ──────────────────────────────────────────────────────────
 //
@@ -126,6 +128,7 @@ export const SAVED_CLUBS_TABLE = "user_equipment";
 export const SAVED_CLUBS_SELECT = [
   "id",
   "club_type",
+  "club_designation",
   "brand",
   "model",
   "custom_club",
@@ -188,33 +191,6 @@ function isClubType(value: unknown): value is ClubType {
 }
 
 /**
- * Human-readable identity for one saved club.
- *
- * Custom rows prefer their custom text, then any legacy text, then the word
- * "Custom" so the row is still nameable. Non-custom rows — canonical and legacy
- * alike, since a canonical selection stores a readable snapshot — use the saved
- * brand/model. When that yields nothing, the club type is shown rather than an
- * invented manufacturer or model.
- */
-function deriveDisplayName(
-  clubType: ClubType,
-  brand: string | null,
-  model: string | null,
-  customClub: boolean,
-  customBrand: string | null,
-  customModel: string | null
-): string {
-  if (customClub) {
-    const brandPart = customBrand ?? brand ?? "Custom";
-    const modelPart = customModel ?? model ?? "";
-    return `${brandPart} ${modelPart}`.trim();
-  }
-
-  const name = `${brand ?? ""} ${model ?? ""}`.trim();
-  return name.length > 0 ? name : clubType;
-}
-
-/**
  * Minimum runtime validation protecting saved-club identity. Deliberately
  * narrow: it guards the fields the selector keys on and the fields the display
  * name is built from, not every column of the row.
@@ -231,17 +207,34 @@ function toSelectableClub(raw: unknown): SelectableClub | null {
   if (!isNullableString(raw.custom_brand)) return null;
   if (!isNullableString(raw.custom_model)) return null;
 
+  // A stored designation must be legal for this row's club type. Two database
+  // CHECK constraints already guarantee that, so a value failing here means the
+  // persisted row violates its own contract — malformed data, not a second
+  // tolerated taxonomy. This read-only layer therefore rejects the row rather
+  // than naming it. (The interactive edit surface deliberately differs: it
+  // blanks such a value so the golfer can correct it.)
+  const rawDesignation = raw.club_designation;
+  let clubDesignation: ClubDesignation | null = null;
+  if (rawDesignation !== null) {
+    if (typeof rawDesignation !== "string") return null;
+    if (!isClubDesignationValidFor(raw.club_type, rawDesignation as ClubDesignation | "")) {
+      return null;
+    }
+    clubDesignation = rawDesignation as ClubDesignation;
+  }
+
   return {
     id: raw.id,
     clubType: raw.club_type,
-    displayName: deriveDisplayName(
-      raw.club_type,
-      raw.brand,
-      raw.model,
-      raw.custom_club,
-      raw.custom_brand,
-      raw.custom_model
-    ),
+    displayName: getClubDisplayName({
+      club_type: raw.club_type,
+      club_designation: clubDesignation,
+      brand: raw.brand,
+      model: raw.model,
+      custom_club: raw.custom_club,
+      custom_brand: raw.custom_brand,
+      custom_model: raw.custom_model,
+    }),
     isPrimary: raw.is_primary,
   };
 }
@@ -250,6 +243,13 @@ function toSelectableClub(raw: unknown): SelectableClub | null {
  * Total order: club type (bag order) → primary first → display name → id.
  * `id` is unique, so the final comparison guarantees a total — not merely
  * partial — ordering, independent of the order the database returned rows in.
+ *
+ * Since D4 the display name may lead with the golfer's designation, so the name
+ * comparison is lexicographic over that designation first: woods sort
+ * "11W · …" before "3W · …" before "5W · …". That is a consequence of comparing
+ * names, not a judgement about club progression. Ordering clubs by loft or by
+ * set position is a separate product decision and is deliberately not made
+ * here.
  */
 function compareClubs(a: SelectableClub, b: SelectableClub): number {
   const byClubType = CLUB_TYPE_ORDER.indexOf(a.clubType) - CLUB_TYPE_ORDER.indexOf(b.clubType);

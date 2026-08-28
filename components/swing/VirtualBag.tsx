@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { ClubDesignation } from '@/types/database';
+import { getClubDisplayName as clubDisplayName } from '@/lib/equipment/club-display-name';
 import {
   Target,
   Zap,
@@ -90,16 +91,6 @@ const TYPE_ACCENT: Record<ClubType, string> = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function clubDisplayName(club: ClubRecord): string {
-  if (club.custom_club) {
-    const brand = club.custom_brand ?? club.brand ?? 'Custom';
-    const model = club.custom_model ?? club.model ?? '';
-    return `${brand} ${model}`.trim();
-  }
-  const name = `${club.brand ?? ''} ${club.model ?? ''}`.trim();
-  return name || club.club_type;
-}
-
 function fmt(n: number | null | undefined, decimals = 0): string {
   if (n == null) return '—';
   return n.toFixed(decimals);
@@ -159,9 +150,6 @@ function ClubRow({
           )}
         </div>
         <div className="flex items-center gap-2 mt-0.5">
-          {club.club_designation && (
-            <span className="text-[11px] text-slate-400">{club.club_designation}</span>
-          )}
           {club.shaft_flex && (
             <span className="text-[11px] text-slate-500">{club.shaft_flex} flex</span>
           )}
