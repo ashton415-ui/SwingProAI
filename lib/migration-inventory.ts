@@ -66,6 +66,9 @@ export const EQUIPMENT_SNAPSHOT_V2_FILENAME =
 /** The EQ3-DB1 equipment archive lifecycle schema foundation migration. */
 export const EQUIPMENT_ARCHIVE_LIFECYCLE_FILENAME =
   "20260828061225_equipment_archive_lifecycle.sql";
+/** The EQ3-DB3 migration revoking Data API DELETE on public.user_equipment. */
+export const EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME =
+  "20260829165031_equipment_revoke_delete_privilege.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -85,6 +88,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   USER_CLUB_DESIGNATION_FILENAME,
   EQUIPMENT_SNAPSHOT_V2_FILENAME,
   EQUIPMENT_ARCHIVE_LIFECYCLE_FILENAME,
+  EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
