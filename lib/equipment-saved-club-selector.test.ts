@@ -221,8 +221,37 @@ describe("saved-club query — table and column contract", () => {
     await querySavedClubs(client, { userId: USER_ID });
 
     const eqCalls = client.calls.filter((c) => c.method === "eq");
-    expect(eqCalls).toHaveLength(1);
-    expect(eqCalls[0].args).toEqual(["user_id", USER_ID]);
+    expect(eqCalls.map((c) => c.args)).toContainEqual(["user_id", USER_ID]);
+  });
+
+  it("excludes archived rows at the query boundary", async () => {
+    const client = makeFakeClient(ok([row()]));
+    await querySavedClubs(client, { userId: USER_ID });
+
+    const eqCalls = client.calls.filter((c) => c.method === "eq");
+    expect(
+      eqCalls.map((c) => c.args),
+      "a club removed from the bag must never be offered as selectable"
+    ).toContainEqual(["is_archived", false]);
+  });
+
+  it("applies exactly the owner and active-row filters, in that order", async () => {
+    const client = makeFakeClient(ok([row()]));
+    await querySavedClubs(client, { userId: USER_ID });
+
+    const eqCalls = client.calls.filter((c) => c.method === "eq");
+    expect(eqCalls).toHaveLength(2);
+    expect(eqCalls.map((c) => c.args)).toEqual([
+      ["user_id", USER_ID],
+      ["is_archived", false],
+    ]);
+  });
+
+  it("filters on the archive flag without selecting it", () => {
+    // Lifecycle is a query-boundary concern. Selecting it would put bag state
+    // into the row payload, one step from putting it into the DTO.
+    expect(SAVED_CLUBS_SELECT.split(",")).not.toContain("is_archived");
+    expect(savedClubsCode).toContain('.eq("is_archived", false)');
   });
 });
 
@@ -315,6 +344,8 @@ describe("saved-club query — every saved row shape stays selectable", () => {
       "equipment_model_id",
       "manufacturerId",
       "manufacturer_id",
+      "isArchived",
+      "is_archived",
     ]) {
       expect(clubs[0], `"${forbidden}" must not survive into SelectableClub`).not.toHaveProperty(forbidden);
     }

@@ -524,44 +524,13 @@ describe("EQ3-DB1 types — UserEquipment gains exactly one field", () => {
 });
 
 // ============================================================================
-// H. DB1 remains inert for application code.
+// EQ3-DB2 now owns application consumption of is_archived.
+// Application lifecycle behavior is guarded in
+// lib/equipment-archive-lifecycle-db2.test.ts.
+//
+// This suite's former section H asserted the opposite — that no application file
+// consumed is_archived and that My Bag still removed clubs by hard delete. That
+// was the correct DB1 contract and is now obsolete: it was waiting for exactly
+// the separately authorized slice that has since landed. Everything above
+// remains the DB1 migration and schema authority and is unchanged.
 // ============================================================================
-
-describe("EQ3-DB1 — no application dependency yet", () => {
-  const APPLICATION_FILES = [
-    "app/(dashboard)/bag/page.tsx",
-    "app/(dashboard)/bag/BagPageClient.tsx",
-    "app/(dashboard)/bag/[clubId]/edit/page.tsx",
-    "app/(dashboard)/bag/[clubId]/edit/EditClubForm.tsx",
-    "app/(dashboard)/bag/add/AddClubForm.tsx",
-    "lib/equipment/saved-clubs.ts",
-    "lib/equipment/club-display-name.ts",
-    "components/swing/VirtualBag.tsx",
-    "components/equipment/ClubSelector.tsx",
-    "app/api/equipment/[id]/route.ts",
-  ];
-
-  for (const file of APPLICATION_FILES) {
-    it(`${file} does not consume is_archived in this slice`, () => {
-      expect(
-        readSource(file),
-        `${file}: consuming is_archived belongs to the separately authorized application slice`
-      ).not.toContain("is_archived");
-    });
-  }
-
-  it("leaves the saved-club select list at its existing nine columns", () => {
-    const source = readSource("lib/equipment/saved-clubs.ts");
-    expect(source).toContain('"club_designation"');
-    expect(source).not.toContain('"is_archived"');
-  });
-
-  it("still removes clubs by delete, because the archive write is a later slice", () => {
-    // Recorded as the current state, not as an endorsement: replacing this with
-    // an archive UPDATE is the next slice's job, and this assertion is what will
-    // fail loudly to prove it happened.
-    expect(readSource("app/(dashboard)/bag/BagPageClient.tsx")).toContain(
-      '.from("user_equipment").delete()'
-    );
-  });
-});

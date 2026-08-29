@@ -14,8 +14,11 @@
  *
  * WHAT IT SELECTS
  * ---------------
- * An EXISTING public.user_equipment row — the value that eventually becomes
- * public.swing_analysis.club_id. It never selects a catalog model. Creating
+ * An EXISTING, ACTIVE public.user_equipment row — the value that eventually
+ * becomes public.swing_analysis.club_id. Rows the golfer has archived by
+ * removing them from their bag are excluded by the query itself; they remain in
+ * the database so historical analysis and telemetry references stay intact, but
+ * they are not selectable clubs. It never selects a catalog model. Creating
  * equipment from the canonical catalog is a different concern, already owned by
  * the Add Club form.
  *
@@ -295,10 +298,15 @@ export async function querySavedClubs(
 
   let response: SavedClubsPostgrestResponse;
   try {
+    // Archived rows are excluded by the query, not mapped and then discarded, so
+    // a club the golfer removed from their bag never becomes a candidate here.
+    // is_archived is filtered on but deliberately not selected: bag lifecycle is
+    // a query-boundary concern, not part of the selectable-club shape.
     response = await supabase
       .from(SAVED_CLUBS_TABLE)
       .select(SAVED_CLUBS_SELECT)
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .eq("is_archived", false);
   } catch {
     // A transport-level throw is still a query failure, never an empty bag. The
     // thrown value is deliberately not inspected or surfaced.

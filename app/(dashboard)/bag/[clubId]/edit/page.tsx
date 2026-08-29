@@ -26,6 +26,11 @@ export const metadata = { title: "Edit Club — SwingProAI" };
  * authenticated user_id — and from the RLS policy behind it. A row belonging to
  * someone else and a row that does not exist both resolve to notFound(), so the
  * route cannot be used to probe whether another golfer's club id is real.
+ *
+ * An archived club joins them. The lookup is scoped by is_archived=false, so a
+ * club the golfer has removed from their bag is not editable through a kept URL
+ * and produces the same notFound() as the other two cases — the route discloses
+ * no distinction between "never existed", "not yours" and "archived".
  */
 export default async function EditClubPage({ params }: { params: { clubId: string } }) {
   const session = await getServerSession();
@@ -40,6 +45,7 @@ export default async function EditClubPage({ params }: { params: { clubId: strin
     .select("id, club_type, club_designation, loft_deg, shaft_flex, shaft_weight, is_primary")
     .eq("id", params.clubId)
     .eq("user_id", session.user.id)
+    .eq("is_archived", false)
     .maybeSingle();
 
   if (!club) notFound();

@@ -143,11 +143,17 @@ export default function EditClubForm({ club, userId }: EditClubFormProps) {
     const supabase = createClient();
     // The user_id predicate is defence in depth beside the owner RLS policy, and
     // selecting the id back means a zero-row update cannot be read as success.
+    //
+    // is_archived=false closes the race where this form was opened on an active
+    // club that was then removed from the bag elsewhere: the stale Save affects
+    // zero rows and takes the existing generic failure path rather than writing
+    // fitting values back onto an archived row.
     const { data, error: err } = await supabase
       .from("user_equipment")
       .update(payload)
       .eq("id", club.id)
       .eq("user_id", userId)
+      .eq("is_archived", false)
       .select("id")
       .maybeSingle();
 
