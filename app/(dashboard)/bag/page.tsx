@@ -46,10 +46,24 @@ export default async function BagPage() {
   const supabase = await createClient();
 
   const [{ data: equipmentRows }, { data: telemetryRows }] = await Promise.all([
+    // Exactly the ClubRecord fields, never a wildcard. This is a server/client
+    // boundary: whatever the query returns is serialized into the browser
+    // payload, and a TypeScript cast strips nothing at runtime. Naming the
+    // columns is therefore what keeps user_id, the catalog references,
+    // custom_notes, updated_at and the is_archived flag itself out of the page.
+    //
+    // Archived clubs are excluded at the query boundary too, not filtered out
+    // after loading: a removed club must never reach the browser as bag data.
+    // The row itself survives so historical analysis and telemetry references
+    // stay intact — it simply stops being part of the active bag. is_archived is
+    // filtered on and deliberately not selected.
     supabase
       .from("user_equipment")
-      .select("*")
+      .select(
+        "id, club_type, club_designation, brand, model, shaft_flex, shaft_weight, loft_deg, custom_club, custom_brand, custom_model, is_primary, created_at"
+      )
       .eq("user_id", session.user.id)
+      .eq("is_archived", false)
       .order("created_at", { ascending: true }),
     supabase
       .from("swing_telemetry")
@@ -70,5 +84,11 @@ export default async function BagPage() {
     }
   }
 
-  return <BagPageClient initialClubs={clubs} initialTelemetry={telemetry} />;
+  return (
+    <BagPageClient
+      initialClubs={clubs}
+      initialTelemetry={telemetry}
+      userId={session.user.id}
+    />
+  );
 }
