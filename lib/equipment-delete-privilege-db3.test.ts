@@ -340,11 +340,23 @@ describe("EQ3-DB3 migration — fail-closed preflight", () => {
     expect(migrationCode).toContain("p.polpermissive");
     expect(migrationSource).toContain("p.polcmd = '*'");
     expect(migrationCode).toContain("p.polroles = array[0]::oid[]");
+    // The non-pretty deparser, not the pretty one. On PostgreSQL 17.6
+    // pg_get_expr(..., true) renders this predicate WITHOUT the outer
+    // parentheses, so a pretty comparison against the parenthesized literal
+    // fails closed on a policy that has not changed. pg_get_expr(..., false)
+    // is the stable form that yields "(auth.uid() = user_id)".
     expect(migrationSource).toContain(
-      "pg_catalog.pg_get_expr(p.polqual, p.polrelid, true) = '(auth.uid() = user_id)'"
+      "pg_catalog.pg_get_expr(p.polqual, p.polrelid, false) = '(auth.uid() = user_id)'"
     );
     expect(migrationSource).toContain(
-      "pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, true) = '(auth.uid() = user_id)'"
+      "pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, false) = '(auth.uid() = user_id)'"
+    );
+    expect(
+      migrationSource,
+      "the pretty deparser would make PRE-16 fail closed on an unchanged policy"
+    ).not.toContain("pg_catalog.pg_get_expr(p.polqual, p.polrelid, true)");
+    expect(migrationSource).not.toContain(
+      "pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, true)"
     );
   });
 
@@ -661,12 +673,30 @@ describe("EQ3-DB3 migration — fail-closed postflight", () => {
     expect(
       occurrences(migrationSource, "p.polname = 'Users manage own equipment'")
     ).toBeGreaterThanOrEqual(2);
+    // Exactly two of each: once in PRE-16, once in POST-10. An exact count is
+    // what proves the postflight carries the corrected guard too, rather than
+    // only the preflight having been fixed.
     expect(
       occurrences(
         migrationSource,
-        "pg_catalog.pg_get_expr(p.polqual, p.polrelid, true) = '(auth.uid() = user_id)'"
+        "pg_catalog.pg_get_expr(p.polqual, p.polrelid, false) = '(auth.uid() = user_id)'"
       )
-    ).toBeGreaterThanOrEqual(2);
+    ).toBe(2);
+    expect(
+      occurrences(
+        migrationSource,
+        "pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, false) = '(auth.uid() = user_id)'"
+      )
+    ).toBe(2);
+    expect(
+      postflightSource,
+      "POST-10 must carry the non-pretty deparser guard, not just PRE-16"
+    ).toContain(
+      "pg_catalog.pg_get_expr(p.polqual, p.polrelid, false) = '(auth.uid() = user_id)'"
+    );
+    expect(postflightSource).toContain(
+      "pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, false) = '(auth.uid() = user_id)'"
+    );
   });
 
   it("proves the archive column unchanged", () => {
