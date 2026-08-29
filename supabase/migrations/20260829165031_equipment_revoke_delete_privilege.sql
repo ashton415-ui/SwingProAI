@@ -206,8 +206,8 @@ begin
       and p.polpermissive
       and p.polcmd = '*'
       and p.polroles = array[0]::oid[]
-      and pg_catalog.pg_get_expr(p.polqual, p.polrelid, true) = '(auth.uid() = user_id)'
-      and pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, true) = '(auth.uid() = user_id)'
+      and pg_catalog.pg_get_expr(p.polqual, p.polrelid, false) = '(auth.uid() = user_id)'
+      and pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, false) = '(auth.uid() = user_id)'
   ) then
     raise exception 'EQ3DB3-PRE-16: the owner policy on public.user_equipment is not the expected permissive FOR ALL policy to PUBLIC with owner USING and WITH CHECK expressions.';
   end if;
@@ -415,8 +415,8 @@ begin
       and p.polpermissive
       and p.polcmd = '*'
       and p.polroles = array[0]::oid[]
-      and pg_catalog.pg_get_expr(p.polqual, p.polrelid, true) = '(auth.uid() = user_id)'
-      and pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, true) = '(auth.uid() = user_id)'
+      and pg_catalog.pg_get_expr(p.polqual, p.polrelid, false) = '(auth.uid() = user_id)'
+      and pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid, false) = '(auth.uid() = user_id)'
   ) then
     raise exception 'EQ3DB3-POST-10: the owner policy on public.user_equipment changed.';
   end if;
