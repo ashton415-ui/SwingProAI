@@ -69,6 +69,16 @@ export const EQUIPMENT_ARCHIVE_LIFECYCLE_FILENAME =
 /** The EQ3-DB3 migration revoking Data API DELETE on public.user_equipment. */
 export const EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME =
   "20260829165031_equipment_revoke_delete_privilege.sql";
+/**
+ * The EQ3-S1 DB0 migration that makes the INSERT-time snapshot producer require
+ * an ACTIVE (non-archived) equipment row and hold it FOR SHARE. It is the
+ * database prerequisite for the Analyze saved-club selector: without it an
+ * archive committed between the selector query and the swing_analysis INSERT is
+ * invisible to the INSERT, so the race cannot fail closed from application code
+ * alone.
+ */
+export const EQUIPMENT_SNAPSHOT_ACTIVE_GUARD_DB0_FILENAME =
+  "20260830162046_equipment_snapshot_active_guard_eq3_s1_db0.sql";
 
 /**
  * Every approved checked-in migration filename, in timestamp order.
@@ -89,6 +99,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   EQUIPMENT_SNAPSHOT_V2_FILENAME,
   EQUIPMENT_ARCHIVE_LIFECYCLE_FILENAME,
   EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME,
+  EQUIPMENT_SNAPSHOT_ACTIVE_GUARD_DB0_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
