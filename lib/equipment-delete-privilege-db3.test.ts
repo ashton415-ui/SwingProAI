@@ -221,9 +221,12 @@ describe("EQ3-DB3 migration — identity", () => {
       sortsAfterAll(EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME, earlier),
       "a privilege revoke must land after the archive foundation it depends on"
     ).toBe(true);
-    expect(APPROVED_MIGRATIONS[APPROVED_MIGRATIONS.length - 1]).toBe(
-      EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME
-    );
+    // DB3's permanent index, not a claim that it stays newest: everything
+    // sorting before it is exactly `earlier`, so its position is earlier.length
+    // no matter how many migrations land after it.
+    expect(
+      APPROVED_MIGRATIONS.indexOf(EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME)
+    ).toBe(earlier.length);
   });
 });
 
