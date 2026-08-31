@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   Upload, Target, CheckCircle2, AlertCircle, Loader2,
   Play, Info, Maximize2, X, Activity, Zap, Trophy,
@@ -15,6 +16,15 @@ import {
   getUpsellTier,
   type SubscriptionTier,
 } from "@/lib/entitlements";
+import ClubSelector from "@/components/equipment/ClubSelector";
+import {
+  querySavedClubs,
+  type SavedClubsResult,
+} from "@/lib/equipment/saved-clubs";
+import {
+  isSelectionStillValid,
+  resolveInitialClubId,
+} from "@/lib/equipment/analyze-club-selection";
 import type { DeficiencyItem, HighlightItem } from "@/types/database";
 
 /** Read the tier injected by the server layout */
@@ -31,6 +41,28 @@ function getUserTier(): SubscriptionTier {
 // persistence or auto-refresh — a hand-copied token cannot be refreshed and
 // eventually reaches its `exp`, which Storage rejects mid-submission.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+
+// ─── Equipment context ─────────────────────────────────────────────────────────
+// Choosing a club is optional. Every message below is fixed copy: the saved-club
+// reader already discards the underlying database text, and the golfer is told
+// what to do rather than what failed.
+const CLUBS_LOADING_MESSAGE = "Loading your bag…";
+// A failed load is not an empty bag. Saying "no clubs" here would tell a golfer
+// who owns fourteen clubs that their bag is empty.
+const CLUBS_AUTH_MESSAGE =
+  "We couldn't confirm your session, so your clubs aren't available. You can still analyze without a club.";
+const CLUBS_UNAVAILABLE_MESSAGE =
+  "We couldn't load your clubs right now. You can still analyze without a club.";
+// Raised when a club that was selectable when the page loaded is no longer in
+// the golfer's active bag at submission time. The analysis is refused rather
+// than quietly recorded against a different club, or against no club at all.
+const CLUB_UNAVAILABLE_MESSAGE =
+  "We couldn't confirm that club is still available in your bag. Remove it from this analysis or choose another club, then run the analyzer again.";
+// The database is the final authority on whether a club may be captured into an
+// analysis, so its rejection reaches the golfer as fixed copy; the raw reason is
+// logged for diagnosis instead of being rendered.
+const ANALYSIS_CREATE_FAILED_MESSAGE =
+  "We couldn't create this analysis. Please try again.";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
@@ -96,9 +128,66 @@ export default function AnalyzePage() {
   const [lmFile, setLmFile] = useState<File | null>(null);
   const [userTier, setUserTier] = useState<SubscriptionTier>("par");
 
+  // One managed browser client for the lifetime of this mounted page. A lazy
+  // ref is used rather than a memo because this is an identity that must not be
+  // recreated, not a value derived from props: memoization is a cache the
+  // runtime is free to discard, which would silently hand the selector and the
+  // submission two different clients. Selector loading and submission below
+  // both use this exact binding.
+  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
+  if (supabaseRef.current === null) {
+    supabaseRef.current = createClient();
+  }
+  const supabase = supabaseRef.current;
+
+  const searchParams = useSearchParams();
+
+  // null means "still loading". Every other state is a real SavedClubsResult,
+  // so a failed load can never be rendered as an empty bag.
+  const [savedClubs, setSavedClubs] = useState<SavedClubsResult | null>(null);
+  const [selectedClubId, setSelectedClubId] = useState<string | null>(null);
+  // The URL hint is applied at most once, so a later re-resolution cannot
+  // overwrite a choice the golfer has since made in the selector.
+  const clubHintApplied = useRef(false);
+
   useEffect(() => {
     setUserTier(getUserTier());
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      const clubsUserId = session?.user?.id;
+      if (cancelled) return;
+
+      if (sessionError || !session || !clubsUserId) {
+        // Classified, never surfaced raw. The golfer can still analyze.
+        setSavedClubs({ status: "auth_error", clubs: [] });
+        return;
+      }
+
+      // The one saved-club reader. It scopes to this user id alongside RLS and
+      // excludes archived rows in the query itself.
+      const result = await querySavedClubs(supabase, { userId: clubsUserId });
+      if (cancelled) return;
+
+      setSavedClubs(result);
+
+      if (!clubHintApplied.current) {
+        clubHintApplied.current = true;
+        // Accepted only when it exactly matches a club in this active, owned
+        // result. Malformed, unknown, foreign and archived ids all yield null.
+        const hinted = resolveInitialClubId(result, searchParams.get("club_id"));
+        if (hinted !== null) setSelectedClubId(hinted);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, searchParams]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -337,13 +426,29 @@ export default function AnalyzePage() {
       // is at (or near) expiry, persisting the rotated tokens through the managed
       // client's own cookie storage. Refreshing is deliberately NOT forced on
       // every submission.
-      const supabase = createClient();
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       const userId = session?.user?.id;
       // Fail here — before Storage, before swing_videos, before swing_analysis,
       // and before /api/analyze-swing. The raw Supabase error is not surfaced to
       // the golfer; they get an actionable instruction instead.
       if (sessionError || !session || !userId) throw new Error(SESSION_EXPIRED_MESSAGE);
+
+      // Re-check the chosen club against a freshly read active bag, using the
+      // session just resolved. A club removed from the bag since the selector
+      // loaded must not reach Storage, swing_videos or swing_analysis, so this
+      // runs before any of them. It is defence in depth, not the last word: the
+      // database's own active-row guard on the snapshot producer still decides
+      // an archive that lands after this point, and refuses the insert.
+      let validatedClubId: string | null = null;
+      if (selectedClubId !== null) {
+        const currentClubs = await querySavedClubs(supabase, { userId });
+        if (!isSelectionStillValid(currentClubs, selectedClubId)) {
+          // No substitution and no fallback — recording a club the golfer did
+          // not choose would corrupt the analysis record.
+          throw new Error(CLUB_UNAVAILABLE_MESSAGE);
+        }
+        validatedClubId = selectedClubId;
+      }
 
       // 1. Upload video to Supabase Storage
       const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -373,8 +478,19 @@ export default function AnalyzePage() {
           swing_video_id: videoRow.id,
           user_id:        userId,
           status:         "pending",
+          // The only equipment field the client may write. The derived analysis
+          // family and the immutable equipment snapshot are produced by the
+          // database trigger and are never sent from here.
+          club_id:        validatedClubId,
         }).select("id").single();
-      if (analysisErr || !analysisRow) throw new Error(`Failed to create analysis record: ${analysisErr?.message}`);
+      if (analysisErr || !analysisRow) {
+        // This branch now also covers the database refusing a club archived
+        // between the check above and this insert. Raw database text must not
+        // become golfer-facing copy, so it is logged and a fixed message is
+        // thrown instead.
+        console.error("Failed to create analysis record:", analysisErr?.message);
+        throw new Error(ANALYSIS_CREATE_FAILED_MESSAGE);
+      }
 
       // 4. Call the direct Gemini pipeline — it fetches the video from Storage itself
       const analysisRes = await fetch("/api/analyze-swing", {
@@ -565,6 +681,37 @@ export default function AnalyzePage() {
 
       {/* ── RIGHT: Results deck ── */}
       <div className="flex-1 bg-[#12140F] overflow-y-auto">
+
+        {/* ── Club Context Panel ── */}
+        <div className="border-b border-white/5 p-4">
+          <div className="bg-golf-surface border border-white/5 rounded-3xl p-5">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-8 h-8 bg-emerald-500/10 rounded-xl flex items-center justify-center shrink-0">
+                <Target size={16} className="text-emerald-400" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Club</p>
+                <p className="text-[11px] text-gray-500">Optional — analyze with or without one</p>
+              </div>
+            </div>
+
+            {savedClubs === null ? (
+              <p className="text-sm text-gray-400">{CLUBS_LOADING_MESSAGE}</p>
+            ) : savedClubs.status === "auth_error" ? (
+              <p className="text-sm text-gray-400">{CLUBS_AUTH_MESSAGE}</p>
+            ) : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? (
+              <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+            ) : (
+              <ClubSelector
+                clubs={savedClubs.clubs}
+                selectedClubId={selectedClubId}
+                onChange={setSelectedClubId}
+                disabled={isAnalyzing}
+                label="Club used for this swing"
+              />
+            )}
+          </div>
+        </div>
 
         {/* ── Launch Monitor Panel ── */}
         <div className="border-b border-white/5 p-4">

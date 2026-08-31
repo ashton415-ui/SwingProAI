@@ -49,18 +49,50 @@ const HARD_CODED_AUTH_COOKIE = "sb-atlmnqispyzhsahahpjy-auth-token";
  *  used rather than regex lookahead so a failure reports which step moved. */
 const ANCHORS = {
   preprocessing: "await getTrimmedBlob()",
-  managedClient: "createClient()",
   sessionResolution: "auth.getSession()",
   storageUpload: ".from(BUCKET).upload(",
   swingVideosInsert: `.from("swing_videos")`,
   swingAnalysisInsert: `.from("swing_analysis")`,
   analysisApi: `"/api/analyze-swing"`,
+  /** EQ3-S1: the fresh active-bag re-read that guards a stale club selection. */
+  clubRevalidation: "querySavedClubs(supabase, { userId })",
 } as const;
 
-/** Index of the single occurrence of an anchor, asserted to exist. */
-function indexOfAnchor(anchor: string): number {
-  const index = analyzeSource.indexOf(anchor);
-  expect(index, `expected Analyze source to contain: ${anchor}`).toBeGreaterThan(-1);
+/**
+ * The startAnalysis body, isolated.
+ *
+ * Submission ordering must be asserted against this slice rather than against
+ * the whole file. The page now resolves a managed session twice — once when the
+ * club selector loads, and once inside startAnalysis — so a whole-file
+ * `indexOf("auth.getSession()")` would find the selector's call and silently
+ * stop describing submission at all. Two of the ordering tests below would
+ * additionally fail outright, because the selector's resolution sits earlier in
+ * the file than preprocessing does.
+ *
+ * Boundaries match the proven pattern already used by
+ * lib/responsive-page-content.test.ts, so both suites isolate the same region.
+ */
+function startAnalysisSource(): string {
+  const startMarker = "const startAnalysis";
+  const startIdx = analyzeSource.indexOf(startMarker);
+  expect(startIdx, `expected Analyze source to contain: ${startMarker}`).toBeGreaterThanOrEqual(0);
+
+  const endMarker = "const setTime";
+  const endIdx = analyzeSource.indexOf(endMarker, startIdx);
+  expect(
+    endIdx,
+    `expected "${endMarker}" to follow "${startMarker}"`
+  ).toBeGreaterThan(startIdx);
+
+  return analyzeSource.slice(startIdx, endIdx);
+}
+
+const submissionSource = startAnalysisSource();
+
+/** Index of an anchor within the isolated submission body. */
+function indexInSubmission(anchor: string): number {
+  const index = submissionSource.indexOf(anchor);
+  expect(index, `expected startAnalysis to contain: ${anchor}`).toBeGreaterThan(-1);
   return index;
 }
 
@@ -111,18 +143,44 @@ describe("Analyze auth/session source contract — managed browser client", () =
 
 describe("Analyze auth/session source contract — submission ordering", () => {
   it("awaits managed-session resolution before the Storage upload", () => {
-    const sessionIndex = indexOfAnchor(ANCHORS.sessionResolution);
-    const uploadIndex = indexOfAnchor(ANCHORS.storageUpload);
+    const sessionIndex = indexInSubmission(ANCHORS.sessionResolution);
+    const uploadIndex = indexInSubmission(ANCHORS.storageUpload);
     expect(sessionIndex).toBeLessThan(uploadIndex);
     // Resolution must be awaited, not fired and forgotten.
-    expect(analyzeSource).toMatch(/await\s+supabase\.auth\.getSession\(\)/);
+    expect(submissionSource).toMatch(/await\s+supabase\.auth\.getSession\(\)/);
   });
 
-  it("resolves the session from the managed client created in the submission flow", () => {
-    const clientIndex = indexOfAnchor(ANCHORS.managedClient);
-    const sessionIndex = indexOfAnchor(ANCHORS.sessionResolution);
-    expect(clientIndex).toBeLessThan(sessionIndex);
-    expect(analyzeSource).toMatch(/const\s+supabase\s*=\s*createClient\(\)/);
+  it("resolves the session from the one stable managed client", () => {
+    // The client is created once, lazily, in a ref that lives as long as the
+    // mounted page, so the selector load and the submission provably share it.
+    // A memo would be wrong here: the runtime may discard a memo, which would
+    // hand those two paths different clients.
+    expect(analyzeSource).toMatch(
+      /const\s+supabaseRef\s*=\s*useRef<ReturnType<typeof\s+createClient>\s*\|\s*null>\(null\)/
+    );
+    expect(analyzeSource).toContain("supabaseRef.current = createClient();");
+    expect(analyzeSource).toMatch(/const\s+supabase\s*=\s*supabaseRef\.current/);
+    // Submission uses that binding rather than constructing its own client.
+    expect(submissionSource).not.toContain("createClient(");
+    expect(submissionSource).toContain("await supabase.auth.getSession()");
+  });
+
+  it("re-checks a selected club after the session guard and before Storage", () => {
+    // EQ3-S1: a club archived since the selector loaded must not cause a
+    // Storage object or any row to be written. The database keeps the final
+    // word on an archive that lands after this point.
+    const guardIndex = submissionSource.search(
+      /if\s*\(\s*sessionError\s*\|\|\s*!session\s*\|\|\s*!userId\s*\)\s*throw/
+    );
+    expect(guardIndex).toBeGreaterThan(-1);
+    const revalidationIndex = indexInSubmission(ANCHORS.clubRevalidation);
+    expect(guardIndex).toBeLessThan(revalidationIndex);
+    expect(revalidationIndex).toBeLessThan(indexInSubmission(ANCHORS.storageUpload));
+    expect(revalidationIndex).toBeLessThan(indexInSubmission(ANCHORS.swingVideosInsert));
+    expect(revalidationIndex).toBeLessThan(indexInSubmission(ANCHORS.swingAnalysisInsert));
+    expect(revalidationIndex).toBeLessThan(indexInSubmission(ANCHORS.analysisApi));
+    // The refusal is fixed copy, and no other club is substituted.
+    expect(submissionSource).toContain("throw new Error(CLUB_UNAVAILABLE_MESSAGE)");
   });
 
   it("does not force a refreshSession() on every submission", () => {
@@ -139,14 +197,14 @@ describe("Analyze auth/session source contract — submission ordering", () => {
   });
 
   it("places the session-failure guard before Storage, both inserts, and the analysis API", () => {
-    const guardIndex = analyzeSource.search(
+    const guardIndex = submissionSource.search(
       /if\s*\(\s*sessionError\s*\|\|\s*!session\s*\|\|\s*!userId\s*\)\s*throw/
     );
     expect(guardIndex).toBeGreaterThan(-1);
-    expect(guardIndex).toBeLessThan(indexOfAnchor(ANCHORS.storageUpload));
-    expect(guardIndex).toBeLessThan(indexOfAnchor(ANCHORS.swingVideosInsert));
-    expect(guardIndex).toBeLessThan(indexOfAnchor(ANCHORS.swingAnalysisInsert));
-    expect(guardIndex).toBeLessThan(indexOfAnchor(ANCHORS.analysisApi));
+    expect(guardIndex).toBeLessThan(indexInSubmission(ANCHORS.storageUpload));
+    expect(guardIndex).toBeLessThan(indexInSubmission(ANCHORS.swingVideosInsert));
+    expect(guardIndex).toBeLessThan(indexInSubmission(ANCHORS.swingAnalysisInsert));
+    expect(guardIndex).toBeLessThan(indexInSubmission(ANCHORS.analysisApi));
   });
 
   it("surfaces an actionable auth message without leaking raw Supabase token detail", () => {
@@ -182,11 +240,12 @@ describe("Analyze auth/session source contract — submission ordering", () => {
     const order = [
       ANCHORS.preprocessing,
       ANCHORS.sessionResolution,
+      ANCHORS.clubRevalidation,
       ANCHORS.storageUpload,
       ANCHORS.swingVideosInsert,
       ANCHORS.swingAnalysisInsert,
       ANCHORS.analysisApi,
-    ].map((anchor) => ({ anchor, index: indexOfAnchor(anchor) }));
+    ].map((anchor) => ({ anchor, index: indexInSubmission(anchor) }));
 
     for (let i = 1; i < order.length; i++) {
       expect(
@@ -235,8 +294,11 @@ describe("Analyze auth/session source contract — preprocessing left untouched"
   });
 
   it("still calls preprocessing before anything authenticated happens", () => {
-    expect(indexOfAnchor(ANCHORS.preprocessing)).toBeLessThan(
-      indexOfAnchor(ANCHORS.sessionResolution)
+    // Scoped to startAnalysis: the selector's own session resolution lives
+    // earlier in the file, and comparing against it would say nothing about
+    // submission ordering.
+    expect(indexInSubmission(ANCHORS.preprocessing)).toBeLessThan(
+      indexInSubmission(ANCHORS.sessionResolution)
     );
   });
 });

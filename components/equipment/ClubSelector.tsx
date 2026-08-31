@@ -4,14 +4,15 @@
  * SwingProAI — Equipment Consumer Slice 2: shared club selector
  *
  * A controlled, presentational picker over a golfer's already-loaded saved
- * clubs. It is the UI primitive the later desktop Analyze selector and mobile
- * recording selector are both meant to use, so it deliberately owns nothing but
+ * clubs. It is the UI primitive the desktop Analyze selector and the future
+ * mobile recording selector share, so it deliberately owns nothing but
  * presentation: no data access, no submission, no entitlement checks, no
  * routing decisions.
  *
- * It has no live consumer in this slice. That is intentional — the first
- * consumer arrives with the Analyze wiring, and shipping the contract first
- * keeps that slice from having to invent and adopt an abstraction at once.
+ * Its first live consumer is the Analyze page, which loads clubs through
+ * lib/equipment/saved-clubs.ts and passes them in. Shipping this contract
+ * before that wiring meant the Analyze slice never had to invent and adopt an
+ * abstraction at the same time.
  *
  * A native <select> is used rather than a custom listbox because it is keyboard
  * and screen-reader native for free, and on phones it opens the operating

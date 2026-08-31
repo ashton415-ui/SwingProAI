@@ -3,14 +3,16 @@
  *
  * The ONE application query implementation for reading a golfer's SAVED
  * equipment (public.user_equipment) as selectable clubs. It is the foundation
- * the later desktop Analyze selector and mobile recording selector both consume.
+ * the desktop Analyze selector consumes today — for both its initial load and
+ * its submission-time revalidation — and the future mobile recording selector
+ * will consume too.
  *
  * WHAT THIS MODULE IS
  * -------------------
  * A read-only, typed, deterministic reader over rows the golfer already owns.
- * It takes an already-constructed Supabase client, so the same implementation
- * serves whichever authenticated caller a later slice decides on; establishing
- * the session is the caller's job, not this module's.
+ * It takes an already-constructed Supabase client, so one implementation serves
+ * every authenticated caller — today the Analyze page's managed browser client;
+ * establishing the session is the caller's job, not this module's.
  *
  * WHAT IT SELECTS
  * ---------------
@@ -52,6 +54,7 @@
  *   not invented data.
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ClubDesignation, ClubType } from "@/types/database";
 import { isClubDesignationValidFor } from "@/lib/equipment/club-designation-options";
 import { getClubDisplayName } from "@/lib/equipment/club-display-name";
@@ -77,16 +80,26 @@ export interface SavedClubsPostgrestError {
   hint?: string | null;
 }
 
-/** The filter/select chain this module builds. Thenable, like PostgREST builders. */
-export interface SavedClubsQueryBuilder extends PromiseLike<SavedClubsPostgrestResponse> {
-  select(columns: string): SavedClubsQueryBuilder;
-  eq(column: string, value: unknown): SavedClubsQueryBuilder;
-}
-
-/** Minimum client contract required to read a golfer's saved clubs. */
-export interface SavedClubsSupabaseClient {
-  from(table: string): SavedClubsQueryBuilder;
-}
+/**
+ * Minimum client contract required to read a golfer's saved clubs.
+ *
+ * Only `from` is required, so only `from` is asked for. Narrowing the library's
+ * own client type to the single capability this module uses says exactly what
+ * the dependency is, and lets a caller pass anything that genuinely provides it.
+ *
+ * WHY THE BUILDER CHAIN IS NO LONGER HAND-MODELLED
+ * ------------------------------------------------
+ * Earlier revisions described the PostgREST chain with local interfaces —
+ * first flattened into one object, then split into pre-select and post-select
+ * stages, then made finite so no interface referred back to itself. The
+ * flattened form could not accept a real client at all; the later forms could
+ * not be compared against one without exhausting the type-instantiation budget,
+ * because the installed client is generic over an untyped schema and relating it
+ * to any hand-written structural target expands conditional result types without
+ * bound. Reusing the library's own declarations removes that comparison
+ * entirely. This is a compile-time change only: the request below is unchanged.
+ */
+export type SavedClubsSupabaseClient = Pick<SupabaseClient, "from">;
 
 // ─── Domain result types ──────────────────────────────────────────────────────
 
