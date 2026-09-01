@@ -112,8 +112,8 @@ async function fetchVideoBytes(
     }
 
     return { buffer: arrayBuf, mimeType };
-  } catch (err) {
-    console.warn("[analyze-swing] fetchVideoBytes error:", err instanceof Error ? err.message : err);
+  } catch {
+    console.warn("[analyze-swing] video fetch error");
     return null;
   }
 }
@@ -429,7 +429,7 @@ export async function POST(req: NextRequest) {
   // ── Auth ──────────────────────────────────────────────────────────────────
   const supabase = await createClient();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
-  console.log("[analyze-swing] auth:", user?.id ?? "none", authError?.message ?? "ok");
+  console.log("[analyze-swing] authenticated:", !authError && !!user);
 
   if (authError || !user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -445,16 +445,14 @@ export async function POST(req: NextRequest) {
 
   const { analysisId, mediapipeMetrics: clientMetrics } = body;
 
-  // ── DIAGNOSTIC: log the incoming payload so we can verify the client is sending real angles
-  console.log("INCOMING MEDIAPIPE PAYLOAD:", JSON.stringify(clientMetrics ?? null));
-  console.log("[analyze-swing] analysisId:", analysisId);
+  console.log("[analyze-swing] analysis id received");
 
   if (!analysisId) {
     return NextResponse.json({ error: "Missing analysisId" }, { status: 400 });
   }
 
   // ── Fetch DB row + video metadata ─────────────────────────────────────────
-  console.log("[analyze-swing] fetching row:", analysisId);
+  console.log("[analyze-swing] fetching analysis row");
   const { data: analysisRow, error: fetchErr } = await supabase
     .from("swing_analysis")
     .select("*, swing_video:swing_videos(id, club, original_filename, video_url, storage_path, mime_type, file_size)")
@@ -463,7 +461,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (fetchErr || !analysisRow) {
-    console.error("[analyze-swing] fetch error:", fetchErr?.message, fetchErr?.details, fetchErr?.hint);
+    console.error("[analyze-swing] analysis row fetch failed");
     return NextResponse.json({ error: "Analysis record not found." }, { status: 404 });
   }
 
@@ -483,15 +481,18 @@ export async function POST(req: NextRequest) {
     .eq("id", analysisId);
 
   if (markErr) {
-    console.error("[analyze-swing] mark-processing error:", markErr.message, markErr.details, markErr.hint);
+    console.error("[analyze-swing] mark-processing update failed");
   }
 
   const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY;
-  console.log("[analyze-swing] Gemini key present:", !!geminiKey, geminiKey ? `(${geminiKey.slice(0, 8)}...)` : "MISSING");
+  console.log("[analyze-swing] Gemini key configured:", !!geminiKey);
   if (!geminiKey) {
     console.error("[analyze-swing] FATAL: no Gemini API key — set GEMINI_API_KEY or GOOGLE_AI_API_KEY in Vercel env vars");
     await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
-    return NextResponse.json({ error: "AI service not configured. Set GEMINI_API_KEY in environment variables." }, { status: 503 });
+    return NextResponse.json(
+      { error: "AI analysis is temporarily unavailable. Please try again later." },
+      { status: 503 },
+    );
   }
 
   // ── Video metadata ────────────────────────────────────────────────────────
@@ -532,7 +533,7 @@ export async function POST(req: NextRequest) {
   };
 
   const hasRealMetrics = Object.values(merged).some((v) => v != null);
-  console.log("[analyze-swing] metrics available:", hasRealMetrics, JSON.stringify(merged));
+  console.log("[analyze-swing] metrics available:", hasRealMetrics);
 
   // ── Step 4: fetch video bytes for inline Gemini input ─────────────────────
   // Generate a 1-hour signed URL from Supabase Storage (the public URL may
@@ -607,7 +608,6 @@ export async function POST(req: NextRequest) {
     contentParts.push({ text: userPrompt });
 
     console.log("[analyze-swing] calling gemini-2.5-flash — parts:", contentParts.length, videoPayload ? "(video + text)" : "(text only)");
-    console.log("[analyze-swing] merged metrics:", JSON.stringify(merged));
     console.log("[analyze-swing] prompt length (chars):", userPrompt.length);
 
     const result = await model.generateContent({
@@ -623,7 +623,6 @@ export async function POST(req: NextRequest) {
 
     // responseSchema guarantees clean JSON — log length so we can verify in Vercel
     console.log("[analyze-swing] Gemini response length (chars):", rawText.length);
-    console.log("[analyze-swing] FULL Gemini response:", rawText);
 
     // ── Step 6: parse + validate ──────────────────────────────────────────
     let report: {
@@ -649,8 +648,7 @@ export async function POST(req: NextRequest) {
       // responseSchema means rawText is always valid JSON — no brace-extraction needed.
       report = JSON.parse(rawText);
     } catch (parseErr) {
-      console.error("[analyze-swing] JSON parse failure:", parseErr instanceof Error ? parseErr.message : parseErr);
-      console.error("[analyze-swing] RAW Gemini string that failed to parse:\n", rawText);
+      console.error("[analyze-swing] JSON parse failure");
       throw new Error(`Gemini returned non-JSON response: ${String(parseErr)}`);
     }
 
@@ -666,7 +664,6 @@ export async function POST(req: NextRequest) {
     const missing = requiredFields.filter((f) => report[f] == null);
     if (missing.length > 0) {
       console.error("[analyze-swing] response missing required fields:", missing.join(", "));
-      console.error("[analyze-swing] full raw response:", rawText);
       throw new Error(`Gemini response missing required fields: ${missing.join(", ")}`);
     }
 
@@ -675,7 +672,6 @@ export async function POST(req: NextRequest) {
       console.warn("[analyze-swing] drills array missing or empty — storing without drills");
     }
 
-    console.log("[analyze-swing] parsed — score:", report.score, "spine:", report.spine_angle, "hips:", report.hip_rotation, "shoulders:", report.shoulder_rotation);
 
     // ── Step 7: type-safe mapping + DB write ─────────────────────────────
 
@@ -718,8 +714,6 @@ export async function POST(req: NextRequest) {
     console.log("[analyze-swing] metric source — spine:", merged.spineAngle != null ? "client" : "gemini",
       "hip:", merged.hipRotation != null ? "client" : "gemini",
       "shoulder:", merged.shoulderRotation != null ? "client" : "gemini");
-    console.log("[analyze-swing] final values — score:", finalScore,
-      "spine:", finalSpineAngle, "hip:", finalHipRotation, "shoulder:", finalShoulderRotation);
 
     // Map drills array — one per deficiency
     const drills = toArr(report.drills).map((d) => {
@@ -786,7 +780,6 @@ export async function POST(req: NextRequest) {
       mechanical_deficiencies,
     };
 
-    console.log("FINAL SUPABASE PAYLOAD:", JSON.stringify(payload));
 
     const { data: updated, error: updateErr } = await supabase
       .from("swing_analysis")
@@ -796,30 +789,27 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (updateErr) {
-      console.error("SUPABASE REJECTION:", updateErr);
+      console.error("[analyze-swing] analysis completion update failed");
       await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
       return NextResponse.json(
-        {
-          error:   `Database write failed: ${updateErr.message}`,
-          details: updateErr.details ?? null,
-          hint:    updateErr.hint    ?? null,
-          code:    updateErr.code    ?? null,
-        },
+        { error: "We couldn't save your analysis. Please try again." },
         { status: 400 },
       );
     }
 
-    console.log("[analyze-swing] complete — score:", finalScore, "status:", updated?.status);
+    console.log("[analyze-swing] complete — status:", updated?.status);
     return NextResponse.json({ message: "Analysis complete", data: updated });
 
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[analyze-swing] fatal error:", msg);
+  } catch {
+    console.error("[analyze-swing] analysis pipeline failed");
     try {
       await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
-    } catch (failErr) {
-      console.error("[analyze-swing] also failed to mark row failed:", failErr);
+    } catch {
+      console.error("[analyze-swing] failed-status update also failed");
     }
-    return NextResponse.json({ error: `Analysis failed: ${msg}` }, { status: 500 });
+    return NextResponse.json(
+      { error: "Analysis failed. Please try again." },
+      { status: 500 },
+    );
   }
 }
