@@ -33,6 +33,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  isPuttingCapturePresentation,
   isSelectionStillValid,
   resolveInitialClubId,
 } from "@/lib/equipment/analyze-club-selection";
@@ -58,6 +59,8 @@ const analyzeSource = readSource(ANALYZE_PAGE);
 const bagClientSource = readSource(BAG_CLIENT);
 const analyzeApiSource = readSource(ANALYZE_API);
 const db0Source = readSource(DB0_MIGRATION);
+/** EQ3-S2 reads this only to prove it was not touched. */
+const entitlementsSource = readSource("lib/entitlements.ts");
 
 /**
  * The startAnalysis body, isolated by the same boundaries the other Analyze
@@ -450,6 +453,234 @@ describe("EQ3-S1 Analyze — truthful selector states", () => {
     expect(clubPanel).toBeLessThan(launchMonitor);
     // Nothing may sit between the marker and the deck's own opening div.
     expect(analyzeSource.slice(marker, deckDiv)).not.toContain("ClubSelector");
+  });
+});
+
+// ─── Behavioural: isPuttingCapturePresentation (EQ3-S2) ──────────────────────
+
+describe("isPuttingCapturePresentation — classifies the selection, nothing more", () => {
+  it("is false while the bag is still loading, whatever is selected", () => {
+    expect(isPuttingCapturePresentation(null, THIRD_ID)).toBe(false);
+    expect(isPuttingCapturePresentation(null, PRIMARY_ID)).toBe(false);
+    expect(isPuttingCapturePresentation(null, null)).toBe(false);
+  });
+
+  it("is false when nothing is selected", () => {
+    expect(isPuttingCapturePresentation(OK_RESULT, null)).toBe(false);
+  });
+
+  it("is false for every non-Putter club type", () => {
+    const nonPutters: SelectableClub["clubType"][] = [
+      "Driver",
+      "Wood",
+      "Hybrid",
+      "Iron",
+      "Wedge",
+    ];
+    for (const clubType of nonPutters) {
+      const result: SavedClubsResult = {
+        status: "ok",
+        clubs: [club(SECOND_ID, { clubType })],
+      };
+      expect(
+        isPuttingCapturePresentation(result, SECOND_ID),
+        `${clubType} must not produce putting capture presentation`,
+      ).toBe(false);
+    }
+  });
+
+  it("is false for the Driver and Iron already in the shared fixture", () => {
+    expect(isPuttingCapturePresentation(OK_RESULT, PRIMARY_ID)).toBe(false);
+    expect(isPuttingCapturePresentation(OK_RESULT, SECOND_ID)).toBe(false);
+  });
+
+  it("is true only for the exact saved Putter that is selected", () => {
+    expect(isPuttingCapturePresentation(OK_RESULT, THIRD_ID)).toBe(true);
+  });
+
+  it("is false for an id that is not in the result", () => {
+    expect(isPuttingCapturePresentation(OK_RESULT, ABSENT_ID)).toBe(false);
+  });
+
+  it("is false for every non-ok result, even when a Putter id is passed", () => {
+    for (const result of NON_OK_RESULTS) {
+      expect(
+        isPuttingCapturePresentation(result, THIRD_ID),
+        `${result.status} must never grant putting capture presentation`,
+      ).toBe(false);
+    }
+  });
+
+  it("returns to false when the golfer switches Putter to a non-Putter", () => {
+    expect(isPuttingCapturePresentation(OK_RESULT, THIRD_ID)).toBe(true);
+    expect(isPuttingCapturePresentation(OK_RESULT, SECOND_ID)).toBe(false);
+  });
+
+  it("returns to false when the golfer clears the selection", () => {
+    expect(isPuttingCapturePresentation(OK_RESULT, THIRD_ID)).toBe(true);
+    expect(isPuttingCapturePresentation(OK_RESULT, null)).toBe(false);
+  });
+
+  it("never throws on any combination this page can produce", () => {
+    const ids = [null, PRIMARY_ID, SECOND_ID, THIRD_ID, ABSENT_ID];
+    const results: (SavedClubsResult | null)[] = [null, OK_RESULT, ...NON_OK_RESULTS];
+    for (const result of results) {
+      for (const id of ids) {
+        expect(typeof isPuttingCapturePresentation(result, id)).toBe("boolean");
+      }
+    }
+  });
+});
+
+// ─── Structural: EQ3-S2 desktop putting capture presentation ─────────────────
+
+describe("EQ3-S2 Analyze — putting capture presentation is derived, never routed", () => {
+  it("imports the shared classifier rather than re-deriving Putter inline", () => {
+    expect(initSource).toContain("isPuttingCapturePresentation");
+    expect(initSource).toContain("@/lib/equipment/analyze-club-selection");
+    expect(initSource).toContain(
+      "isPuttingCapturePresentation(savedClubs, selectedClubId)",
+    );
+  });
+
+  it("gates capture presentation on there being no result yet", () => {
+    // Two layers on purpose: the classifier answers "is a Putter selected",
+    // the page answers "may that change the screen". Without the result guard,
+    // moving the selector after an analysis would relabel a finished report.
+    expect(initSource).toContain("const isPuttingCapture = selectedPutter && result === null;");
+  });
+
+  it("keeps every full-swing string exactly as it was", () => {
+    expect(analyzeSource).toContain("Import Swing Video");
+    expect(analyzeSource).toContain(
+      "Use the trim handles in the timeline to isolate just the swing segment before analyzing.",
+    );
+    expect(analyzeSource).toContain(
+      "Upload your swing video, trim to the impact zone, then hit Run Analyzer.",
+    );
+    expect(analyzeSource).toContain("RUN ANALYZER");
+  });
+
+  it("adds the exact putting capture copy", () => {
+    expect(analyzeSource).toContain("Import Putting Stroke Video");
+    expect(analyzeSource).toContain(
+      "Use the trim handles in the timeline to isolate one complete putting stroke.",
+    );
+    expect(analyzeSource).toContain(
+      "Upload your putting stroke video and trim to one complete stroke. AI putting analysis is coming soon.",
+    );
+  });
+
+  it("hides the launch monitor input surface only for putting capture", () => {
+    const panelIdx = analyzeSource.indexOf("── Launch Monitor Panel ──");
+    const guardIdx = analyzeSource.indexOf("{!isPuttingCapture && (");
+    const entitlementIdx = analyzeSource.indexOf("canUseLaunchMonitor(userTier)");
+    expect(panelIdx).toBeGreaterThanOrEqual(0);
+    expect(guardIdx).toBeGreaterThan(panelIdx);
+    expect(entitlementIdx).toBeGreaterThan(guardIdx);
+    // The entitlement expression itself is untouched: the panel is hidden, not
+    // granted or revoked, and no putting tier rule is introduced.
+    expect(analyzeSource).toContain("canUseLaunchMonitor(userTier) ? (");
+  });
+
+  it("offers a Putter no executable analyzer action", () => {
+    const branchIdx = analyzeSource.indexOf("isPuttingCapture ? (");
+    expect(branchIdx).toBeGreaterThanOrEqual(0);
+    const branch = analyzeSource.slice(branchIdx, analyzeSource.indexOf(") : (", branchIdx));
+    expect(branch).toContain("PUTTING ANALYSIS COMING SOON");
+    expect(branch).toContain("disabled");
+    expect(branch).not.toContain("onClick");
+    expect(branch).not.toContain("startAnalysis");
+  });
+
+  it("leaves the full-swing analyzer action executable", () => {
+    expect(analyzeSource).toContain("onClick={startAnalysis}");
+  });
+});
+// ─── Structural: EQ3-S2 defence in depth ─────────────────────────────────────
+
+describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pipeline", () => {
+  const guard = "isPuttingCapturePresentation(savedClubs, selectedClubId)";
+
+  function at(anchor: string): number {
+    const idx = submissionSource.indexOf(anchor);
+    expect(idx, `startAnalysis is missing "${anchor}"`).toBeGreaterThanOrEqual(0);
+    return idx;
+  }
+
+  it("refuses inside startAnalysis, not only in the rendered action", () => {
+    expect(submissionSource).toContain(guard);
+    expect(submissionSource).toContain("setError(PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE)");
+  });
+
+  it("refuses before preprocessing", () => {
+    expect(at(guard)).toBeLessThan(at("await getTrimmedBlob()"));
+  });
+
+  it("refuses before Storage", () => {
+    expect(at(guard)).toBeLessThan(at("supabase.storage"));
+  });
+
+  it("refuses before both database inserts", () => {
+    expect(at(guard)).toBeLessThan(at(String.raw`.from("swing_videos")`));
+    expect(at(guard)).toBeLessThan(at(String.raw`.from("swing_analysis")`));
+  });
+
+  it("refuses before the analysis API call", () => {
+    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/analyze-swing"`));
+  });
+
+  it("uses fixed golfer-facing copy that explains rather than blames", () => {
+    expect(analyzeSource).toContain(
+      "Putting analysis is coming soon. To avoid an incorrect full-swing report, this putter video can't be analyzed yet.",
+    );
+  });
+});
+// ─── Structural: EQ3-S2 boundaries this slice must not cross ─────────────────
+
+describe("EQ3-S2 — presentation only, no routing and no new surfaces", () => {
+  it("never writes a routing field from the client", () => {
+    expect(analyzeSource).not.toContain("analysis_family");
+    expect(analyzeSource).not.toContain("swing_category");
+  });
+
+  it("keeps the analysis request body limited to the analysis id", () => {
+    expect(submissionSource).toContain("JSON.stringify({ analysisId: analysisRow.id })");
+  });
+
+  it("keeps the existing club_id write and its revalidation", () => {
+    expect(submissionSource).toContain("club_id:");
+    expect(submissionSource).toContain("validatedClubId");
+    expect(submissionSource).toContain("isSelectionStillValid(currentClubs, selectedClubId)");
+  });
+
+  it("introduces no canonical catalog query", () => {
+    for (const table of [
+      "equipment_models",
+      "equipment_manufacturers",
+      "equipment_putter_model_specs",
+      "equipment_model_sources",
+    ]) {
+      expect(analyzeSource, `${table} must not be queried from Analyze`).not.toContain(table);
+    }
+  });
+
+  it("introduces no mobile capture implementation — that is EQ4", () => {
+    for (const api of ["getUserMedia", "MediaDevices", "facingMode"]) {
+      expect(analyzeSource, `${api} belongs to EQ4, not EQ3-S2`).not.toContain(api);
+    }
+  });
+
+  it("leaves the analysis API untouched by putting presentation", () => {
+    expect(analyzeApiSource).not.toContain("isPuttingCapturePresentation");
+    expect(analyzeApiSource).not.toContain("PUTTING ANALYSIS COMING SOON");
+    expect(analyzeApiSource).toContain("analysisId: string;");
+  });
+
+  it("leaves entitlement and model routing untouched", () => {
+    expect(entitlementsSource).not.toContain("isPuttingCapturePresentation");
+    expect(entitlementsSource).not.toContain("Putter");
+    expect(analyzeSource).toContain("getAnalysisModeForTier");
   });
 });
 

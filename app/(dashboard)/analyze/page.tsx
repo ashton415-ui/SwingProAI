@@ -22,6 +22,7 @@ import {
   type SavedClubsResult,
 } from "@/lib/equipment/saved-clubs";
 import {
+  isPuttingCapturePresentation,
   isSelectionStillValid,
   resolveInitialClubId,
 } from "@/lib/equipment/analyze-club-selection";
@@ -63,6 +64,13 @@ const CLUB_UNAVAILABLE_MESSAGE =
 // logged for diagnosis instead of being rendered.
 const ANALYSIS_CREATE_FAILED_MESSAGE =
   "We couldn't create this analysis. Please try again.";
+// EQ3-S2. Putting analysis has no pipeline yet: server routing on the
+// database-derived analysis family is EQ5A and the putting prompt/response
+// work is EQ5B. Sending a putt through the full-swing analyzer would return a
+// confident report about the wrong motion, so the submission is refused with
+// fixed copy that says what is happening rather than what failed.
+const PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE =
+  "Putting analysis is coming soon. To avoid an incorrect full-swing report, this putter video can't be analyzed yet.";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
@@ -149,6 +157,16 @@ export default function AnalyzePage() {
   // The URL hint is applied at most once, so a later re-resolution cannot
   // overwrite a choice the golfer has since made in the selector.
   const clubHintApplied = useRef(false);
+
+  // EQ3-S2. Layer 1 classifies the current selection and nothing else; it is
+  // presentation only and never an authority for the database analysis family,
+  // for routing, or for persistence.
+  const selectedPutter = isPuttingCapturePresentation(savedClubs, selectedClubId);
+  // Layer 2 decides whether that classification may change the screen. A
+  // completed report is evidence about a swing that was already analyzed, so
+  // moving the selector afterwards must never relabel or suppress it — capture
+  // presentation applies only while no result exists.
+  const isPuttingCapture = selectedPutter && result === null;
 
   useEffect(() => {
     setUserTier(getUserTier());
@@ -409,6 +427,15 @@ export default function AnalyzePage() {
   // ── Analysis flow ──────────────────────────────────────────────────────────
   const startAnalysis = async () => {
     if (!file) return;
+    // EQ3-S2 defence in depth. A selected Putter is not given an executable
+    // action, but a stale handler or a programmatic call must not reach the
+    // full-swing pipeline either. Refuse here — before trim validation, before
+    // preprocessing, before session resolution, before Storage, before both
+    // database inserts and before /api/analyze-swing — so nothing is mutated.
+    if (isPuttingCapturePresentation(savedClubs, selectedClubId)) {
+      setError(PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE);
+      return;
+    }
     if (trimEnd - trimStart > MAX_SEGMENT_SECONDS) {
       setError(`Trim your segment to under ${MAX_SEGMENT_SECONDS}s for best results.`);
       return;
@@ -530,11 +557,17 @@ export default function AnalyzePage() {
             <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-golf-green/10 transition-colors">
               <Upload className="w-10 h-10 text-gray-500 group-hover:text-golf-green transition-colors" />
             </div>
-            <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">Import Swing Video</h3>
+            <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">
+              {isPuttingCapture ? "Import Putting Stroke Video" : "Import Swing Video"}
+            </h3>
             <p className="text-gray-500 text-sm max-w-xs mb-4">Up to {MAX_FILE_MB}MB — MP4, MOV, or WEBM</p>
             <div className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-left max-w-xs">
               <p className="text-[9px] text-golf-green font-black uppercase tracking-widest mb-1">Pro Tip</p>
-              <p className="text-[10px] text-gray-500">Use the trim handles in the timeline to isolate just the swing segment before analyzing.</p>
+              <p className="text-[10px] text-gray-500">
+                {isPuttingCapture
+                  ? "Use the trim handles in the timeline to isolate one complete putting stroke."
+                  : "Use the trim handles in the timeline to isolate just the swing segment before analyzing."}
+              </p>
             </div>
           </label>
         ) : (
@@ -621,10 +654,20 @@ export default function AnalyzePage() {
             {!isAnalyzing && !isTrimming && (
               <div className="absolute bottom-4 left-4 right-4 z-40">
                 {!result ? (
-                  <button onClick={startAnalysis}
-                    className="w-full py-4 bg-golf-green text-golf-dark rounded-2xl font-black uppercase tracking-widest hover:bg-[#22C55E] transition-all flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(74,222,128,0.3)]">
-                    <Target size={18} />RUN ANALYZER
-                  </button>
+                  isPuttingCapture ? (
+                    /* Deliberately inert: no click handler, no alternative execution
+                       path, no navigation. EQ5A/EQ5B must ship before a putt can
+                       be analyzed at all. */
+                    <button type="button" disabled
+                      className="w-full py-4 bg-white/5 text-gray-500 border border-white/10 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 cursor-not-allowed">
+                      <Lock size={18} />PUTTING ANALYSIS COMING SOON
+                    </button>
+                  ) : (
+                    <button onClick={startAnalysis}
+                      className="w-full py-4 bg-golf-green text-golf-dark rounded-2xl font-black uppercase tracking-widest hover:bg-[#22C55E] transition-all flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(74,222,128,0.3)]">
+                      <Target size={18} />RUN ANALYZER
+                    </button>
+                  )
                 ) : (
                   <div className="bg-black/80 backdrop-blur-md border border-white/10 p-4 rounded-2xl flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
@@ -714,6 +757,10 @@ export default function AnalyzePage() {
         </div>
 
         {/* ── Launch Monitor Panel ── */}
+        {/* Hidden only while capturing a putting stroke: launch-monitor
+            telemetry has no meaning for a putt. Entitlement behaviour below is
+            untouched — this hides the surface, it never grants or revokes it. */}
+        {!isPuttingCapture && (
         <div className="border-b border-white/5 p-4">
           {canUseLaunchMonitor(userTier) ? (
             <div className="bg-golf-surface border border-white/5 rounded-3xl p-5">
@@ -785,6 +832,7 @@ export default function AnalyzePage() {
             </div>
           )}
         </div>
+        )}
 
         {!result ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-12">
@@ -792,7 +840,11 @@ export default function AnalyzePage() {
               <Activity size={28} className="text-gray-600" />
             </div>
             <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">Awaiting Session</h3>
-            <p className="text-gray-600 text-sm max-w-xs">Upload your swing video, trim to the impact zone, then hit Run Analyzer.</p>
+            <p className="text-gray-600 text-sm max-w-xs">
+              {isPuttingCapture
+                ? "Upload your putting stroke video and trim to one complete stroke. AI putting analysis is coming soon."
+                : "Upload your swing video, trim to the impact zone, then hit Run Analyzer."}
+            </p>
           </div>
         ) : (
           <div className="p-6 space-y-6 pb-16">
