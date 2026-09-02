@@ -80,3 +80,40 @@ export function isSelectionStillValid(
   if (result.status !== "ok") return false;
   return result.clubs.some((club) => club.id === selectedClubId);
 }
+
+/**
+ * EQ3-S2 — whether the club the golfer currently has selected is a saved Putter.
+ *
+ * THIS HELPER IS UI PRESENTATION ONLY.
+ *
+ * It is NOT authorization and must never become the authority for
+ * analysis_family, swing_category, AI routing, ownership, or persistence. The
+ * database derives analysis_family from the validated club_type of the
+ * referenced user_equipment row and overwrites anything a client sends; server
+ * routing on that value is EQ5A's work, not this function's.
+ *
+ * Answering true means only: "the desktop Analyze page may describe the capture
+ * it is asking for as a putting stroke." The page decides separately whether
+ * that classification is allowed to change anything on screen — in particular
+ * it must not, once a result already exists, because a completed report is
+ * evidence about a swing that was already analyzed and cannot be reinterpreted
+ * by a selector the golfer moved afterwards. That `result === null` condition
+ * deliberately lives at the call site, not here: this function classifies the
+ * selection, it does not decide what the page does with the classification.
+ *
+ * Every non-selection resolves to false through the same path — no result, a
+ * result that is not `ok`, no selected id, an id absent from the list, or any
+ * non-Putter club type. As elsewhere in this module, a rejection never reveals
+ * which of those it was.
+ */
+export function isPuttingCapturePresentation(
+  result: SavedClubsResult | null,
+  selectedClubId: string | null
+): boolean {
+  if (result === null) return false;
+  if (result.status !== "ok") return false;
+  if (selectedClubId === null) return false;
+  return result.clubs.some(
+    (club) => club.id === selectedClubId && club.clubType === "Putter"
+  );
+}
