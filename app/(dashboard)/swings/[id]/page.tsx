@@ -64,9 +64,8 @@ export default async function SwingDetailPage({
   // Entitlement check for equipment fitting
   const hasEquipmentFitting = tier === "birdie" || tier === "eagle";
 
-  // Swing category for putting engine
-  const swingCategory = (swing.swing_category ?? analysisV2?.swing_category ?? null) as string | null;
-  const isPutt = swingCategory === "putt";
+  // Database-owned analysis family for putting results
+  const isPutt = swing.analysis_family === "putting";
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
@@ -168,7 +167,7 @@ export default async function SwingDetailPage({
       </div>
 
       {/* Putting Analysis — existing panel (numeric metrics) */}
-      {!isPutt && (
+      {isPutt && (
         <PuttingAnalysisPanel
           tier={tier}
           metrics={{
