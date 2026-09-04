@@ -328,7 +328,11 @@ export interface EquipmentPutterModelSpecs {
 // authenticated grant and no RLS policy for authenticated — it is reachable
 // only by service_role. Never query this from browser code.
 
-export type EquipmentModelSourceType = "official_product_page" | "official_spec_pdf" | "official_archive";
+export type EquipmentModelSourceType =
+  | "official_product_page"
+  | "official_spec_pdf"
+  | "official_archive"
+  | "official_category_page";
 
 /** SERVER-ONLY. Not readable through the browser Data API — see EQ1-S2 migration RLS/grants. */
 export interface EquipmentModelSource {

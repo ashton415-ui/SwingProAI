@@ -428,6 +428,95 @@ entry was ever accepted as provenance.
 Verifier channel is deliberately **not** encoded into catalog data: an
 `equipment_model_sources` row records what the source is, not who observed it.
 
+## EQ-S2-B2 — Official category provenance support
+
+### Why this prerequisite exists
+
+Every provenance class the catalog has used so far assumes a source document
+that belongs to one model. That assumption holds right up until a manufacturer
+retires or redirects an individual product page while continuing to list the
+exact model, by name, in its own live catalog. The model is still officially
+current; the model-specific document simply no longer exists to cite.
+
+Before this slice the only ways to record such a model were to cite a page that
+does not name it, or to cite something that is not the manufacturer. Both are
+worse than naming the class honestly.
+
+### The vocabulary change
+
+The global provenance vocabulary was exactly three classes:
+
+- `official_product_page`
+- `official_spec_pdf`
+- `official_archive`
+
+EQ-S2-B2 adds a fourth:
+
+- `official_category_page`
+
+Both the database CHECK constraint (`equipment_model_sources_type_check`, kept
+under its original name so exactly one rule governs the column) and the shared
+`EquipmentModelSourceType` union now admit all four.
+
+### Fallback only
+
+`official_category_page` ranks last. It is legitimate only when all of the
+following hold:
+
+1. the page is owned by the official manufacturer;
+2. the exact canonical model is directly named on it as a discrete listed
+   product or model;
+3. no `official_product_page`, `official_spec_pdf` or `official_archive` can
+   serve as the model-specific source — it is unavailable, retired,
+   redirected, or otherwise unusable;
+4. the page itself directly proves the limited fact being recorded, which is
+   the model's official catalog presence and identity.
+
+Source priority is therefore:
+
+1. `official_product_page`
+2. `official_spec_pdf`
+3. `official_archive`
+4. `official_category_page` — fallback only
+
+### What it must never be
+
+A category-page source is never a search result or search snippet, a retailer
+or marketplace listing, an affiliate page, a review or listicle, a press
+release, a news story, a forum, a dealer locator, a social-media page, a
+generic manufacturer homepage, or any landing page that does not directly list
+the exact model.
+
+It is provenance for catalog presence and identity only. It never supports a
+technical specification the cited page does not state — it is not permission to
+infer missing numbers.
+
+### Boundaries
+
+- **No catalog rows.** This slice adds, removes and edits zero equipment
+  models and zero provenance rows. It changes vocabulary only.
+- **No user-equipment backfill**, and no golfer free-text reconciliation.
+- **No My Bag change.** No application code was modified; the canonical
+  selector and catalog reader are byte-identical.
+- **No AI-routing change** and no putting change.
+- **No RLS, policy, grant or browser-access change.** The provenance table
+  stays server-only: RLS enabled, service_role privileges, no anon or
+  authenticated grant.
+- **No schema change beyond the one constraint.** No column, type, foreign
+  key, uniqueness rule, HTTPS URL rule, verification-date rule, routine or
+  trigger is touched.
+- **Existing v1 catalog artifacts remain unchanged.** The putter and
+  non-putter data files, generators and applied migrations stay byte-identical,
+  and their generators keep validating their own historical three-class
+  artifact vocabulary. Widening a CHECK cannot invalidate stored rows, so no
+  rewrite is required or performed.
+- **EQ-S2-C remains a separate follow-on slice.** The current-market non-putter
+  catalog expansion that motivated this prerequisite is not implemented here.
+
+### Status
+
+LOCAL CANDIDATE ONLY — NOT APPLIED TO STAGING OR PRODUCTION
+
 ## Rollout roadmap
 
 ```text
@@ -453,6 +542,10 @@ EQ-S2-A   Staging application of the non-putter catalog migration — staging
 
 EQ-S2-B   Production application of the non-putter catalog migration
                                      [applied + verified, 20260823042455]
+
+EQ-S2-B2  Official category provenance support: fourth global source class
+          official_category_page, fallback only, zero catalog rows
+                                        [local candidate - not deployed]
 
 EQ2       Shared server-backed ClubSelector and canonical equipment queries
 
