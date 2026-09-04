@@ -515,7 +515,25 @@ infer missing numbers.
 
 ### Status
 
-LOCAL CANDIDATE ONLY — NOT APPLIED TO STAGING OR PRODUCTION
+DEPLOYED + INDEPENDENTLY VERIFIED
+
+The logical migration `equipment_model_source_category_provenance` is merged
+into `main` and was applied and independently verified in staging
+(Supabase-assigned version `20260904153906`) and then in production
+(Supabase-assigned version `20260904155020`). The canonical repository artifact
+remains `supabase/migrations/20260903213417_equipment_model_source_category_provenance.sql`;
+Supabase allocates migration-history versions per environment at application
+time, so neither environment's version equals the repository filename timestamp
+or the other environment's version.
+
+The rollout changed only the source-type CHECK vocabulary. It added zero
+equipment-model rows and zero provenance rows, and at closeout both environments
+still hold 6 manufacturers, 51 models and 51 provenance rows, of which 0 use
+`official_category_page`. That class is now legal in staging and in production;
+nothing has yet been recorded under it.
+
+EQ-S2-C remains a separate follow-on slice. It has not begun and has not been
+deployed.
 
 ## Rollout roadmap
 
@@ -545,7 +563,8 @@ EQ-S2-B   Production application of the non-putter catalog migration
 
 EQ-S2-B2  Official category provenance support: fourth global source class
           official_category_page, fallback only, zero catalog rows
-                                        [local candidate - not deployed]
+                 [applied + verified, staging 20260904153906,
+                            then production 20260904155020]
 
 EQ2       Shared server-backed ClubSelector and canonical equipment queries
 

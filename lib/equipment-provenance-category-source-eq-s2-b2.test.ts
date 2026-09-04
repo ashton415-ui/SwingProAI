@@ -371,8 +371,13 @@ describe("EQ-S2-B2 rollout documentation", () => {
     expect(docs).toContain("EQ-S2-C remains a separate follow-on slice");
   });
 
-  it("states local-candidate, not-deployed status", () => {
-    expect(docs).toContain("LOCAL CANDIDATE ONLY — NOT APPLIED TO STAGING OR PRODUCTION");
+  it("records the verified staging and production deployment", () => {
+    expect(docs).toContain("DEPLOYED + INDEPENDENTLY VERIFIED");
+    expect(docs).toContain("equipment_model_source_category_provenance");
+    expect(docs).toContain("20260904153906");
+    expect(docs).toContain("20260904155020");
+    // The pre-deployment claim is now false and must not be reintroduced.
+    expect(docs).not.toContain("LOCAL CANDIDATE ONLY");
   });
 });
 
