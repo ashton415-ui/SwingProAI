@@ -37,6 +37,17 @@ timestamp `20260820132900`; database-assigned versions are allocated per
 environment at application time and need not equal it or each other. This was a
 database/catalog deployment only.
 
+**EQ-S2-C current-market non-putter expansion status: applied and independently
+verified.** The v2 expansion is merged into `main` (PR #54, merge
+`12d4e001ec831e93f860e16c40ba7c4885caade2`). The logical migration
+`equipment_non_putter_catalog_v2` was applied and independently verified in
+staging and then in production. Because the same canonical timestamped migration
+file `20260905023640_equipment_non_putter_catalog_v2.sql` was transported and
+applied to each environment with `db push`, both environments record
+migration-history version `20260905023640`. The catalog now holds
+252 models — 231 non-putters and the untouched 21 putters. This was a
+database/catalog deployment only; the full closeout record is in *EQ-S2-C* below.
+
 **Application/UI status:** catalog-backed equipment selection is not yet wired
 into the active application. No active Analyze club-selection flow currently
 consumes the canonical catalog, and no UI, API route, AI prompt, or subscription
@@ -532,8 +543,143 @@ still hold 6 manufacturers, 51 models and 51 provenance rows, of which 0 use
 `official_category_page`. That class is now legal in staging and in production;
 nothing has yet been recorded under it.
 
-EQ-S2-C remains a separate follow-on slice. It has not begun and has not been
-deployed.
+EQ-S2-C remains a separate follow-on slice from B2; it has since been
+implemented, merged, deployed and independently verified in staging and in
+production. The counts above describe the state at B2 closeout, before that
+expansion landed. See *EQ-S2-C* below for its own record.
+
+## EQ-S2-C — Current-market non-putter catalog expansion v2
+
+### Scope and contract
+
+EQ-S2-C is an additive delta on top of the v1 catalog. It inserts 201 non-putter
+equipment models and their 201 provenance rows, and nothing else:
+
+- **No new manufacturers.** All 201 models resolve to the six existing parent
+  manufacturers by canonical slug; zero manufacturer rows are inserted.
+- **No putter change.** Zero Putter models and zero putter-spec rows are
+  inserted, updated or removed.
+- **Append-only.** The migration performs no UPDATE, no DELETE and no TRUNCATE,
+  and it rewrites none of the 51 existing models or their provenance.
+- **No user-equipment backfill**, and no golfer free-text reconciliation.
+- **No UI, API-route, AI-prompt, AI-routing or subscription change.** No
+  application code was modified by this slice.
+- **No schema change.** No table, column, type, index, constraint, policy,
+  grant or routine is created, altered or removed.
+- **Deterministic identity.** Every model and provenance id is an RFC 4122
+  UUIDv5 derived under the established catalog namespace, so the same source
+  artifact always produces the same identities.
+- **First-party provenance only.** Every one of the 201 rows cites a directly
+  observed official manufacturer resource.
+- **EQ-S2-B2 is a hard prerequisite.** One row uses `official_category_page`,
+  which only became a nameable class in B2. The migration proves the live
+  four-class source-type rule before inserting anything and proves it unchanged
+  again before committing; it never modifies that rule.
+
+### Coverage
+
+Models added, by manufacturer:
+
+| Manufacturer | Added |
+| --- | --- |
+| TaylorMade | 33 |
+| Callaway | 77 |
+| Titleist | 16 |
+| PING | 32 |
+| Mizuno | 11 |
+| Cobra | 32 |
+
+Models added, by club type:
+
+| Club type | Added |
+| --- | --- |
+| Driver | 40 |
+| Wood | 43 |
+| Hybrid | 30 |
+| Iron | 71 |
+| Wedge | 17 |
+
+Provenance added by class:
+
+- `official_product_page` — 200
+- `official_spec_pdf` — 0
+- `official_archive` — 0
+- `official_category_page` — 1
+
+The single category-page fallback is the one model whose product page,
+specification PDF and archive were all exhausted:
+
+- catalog key `mizuno/st-max/st-max-hybrid/v1`
+- source name `Mizuno ST-Max Hybrid official category page`
+- `https://mizunogolf.com/us/hybrids/`
+
+Consistent with the B2 contract, that row establishes the model's official
+catalog presence and identity only. It supports no technical specification the
+cited page does not state.
+
+### Status
+
+DEPLOYED + INDEPENDENTLY VERIFIED
+
+Repository delivery: PR #54, merged into `main` as
+`12d4e001ec831e93f860e16c40ba7c4885caade2`. The canonical repository artifact is
+`supabase/migrations/20260905023640_equipment_non_putter_catalog_v2.sql`,
+generated from `data/equipment-catalog-non-putters-v2.json` by
+`scripts/generate-equipment-catalog-non-putters-v2.mjs`.
+
+The logical migration `equipment_non_putter_catalog_v2` was applied and
+independently verified in staging (migration-history version `20260905023640`,
+bringing that project's migration history to 15 entries) and then in production
+(migration-history version `20260905023640`, bringing that project's migration
+history to 31 entries). Both environments record the same version because the
+same canonical timestamped migration file
+`20260905023640_equipment_non_putter_catalog_v2.sql` was transported and applied
+to each environment with `db push`: Supabase records the migration file's own
+timestamp as its migration-history id, so an identical file yields an identical
+version wherever it is applied.
+
+This does not alter the earlier B2 deployment record: B2 remains recorded as
+staging `20260904153906` and production `20260904155020`, exactly as
+independently verified.
+
+### Final verified state
+
+Both environments were independently verified to hold the same catalog contract
+after application:
+
+- 6 manufacturers
+- 252 equipment models — 231 non-putters and 21 putters
+- 252 provenance sources
+- 21 putter-spec rows
+
+Club-type totals: Driver 46, Wood 49, Hybrid 36, Iron 77, Wedge 23, Putter 21.
+
+Manufacturer totals: TaylorMade 43, Callaway 85, Titleist 28, PING 39,
+Mizuno 20, Cobra 37.
+
+Provenance totals: `official_product_page` 250, `official_spec_pdf` 1,
+`official_archive` 0, `official_category_page` 1.
+
+Integrity, verified as exact zeros: duplicate effective-identity groups 0,
+duplicate catalog-key groups 0, missing catalog keys 0, models without exactly
+one provenance source 0, non-HTTPS sources 0, future-dated verified sources 0,
+invalid source types 0. Every one of the 21 putters and every one of the 231
+non-putters carries exactly one provenance source.
+
+Putter preservation: the putter catalog was not touched. It remains 21 putters
+and 21 putter-spec rows, exactly as before this slice.
+
+Constraint preservation: `equipment_model_sources_type_check`,
+`equipment_model_sources_url_https`,
+`equipment_model_sources_verified_not_future` and
+`equipment_model_sources_model_url_unique` all remain in place, and the
+source-type rule still admits exactly `official_product_page`,
+`official_spec_pdf`, `official_archive` and `official_category_page`.
+
+This was a database/catalog deployment only. The Application/UI status recorded
+at the top of this document is unchanged by EQ-S2-C: catalog-backed equipment
+selection is still not wired into the active application, and EQ2 and the later
+consumer slices remain future work.
 
 ## Rollout roadmap
 
@@ -565,6 +711,11 @@ EQ-S2-B2  Official category provenance support: fourth global source class
           official_category_page, fallback only, zero catalog rows
                  [applied + verified, staging 20260904153906,
                             then production 20260904155020]
+
+EQ-S2-C   Current-market non-putter canonical catalog v2: 201 additive models
+          and 201 provenance rows, B2 category-fallback contract, final
+          252-model catalog  [applied + independently verified,
+                  staging 20260905023640, production 20260905023640]
 
 EQ2       Shared server-backed ClubSelector and canonical equipment queries
 
