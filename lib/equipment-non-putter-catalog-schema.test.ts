@@ -674,9 +674,15 @@ describe("EQ Slice 2 — rollout documentation truth", () => {
     expect(docs).not.toContain("HAS NOT BEEN APPLIED TO STAGING OR PRODUCTION");
   });
 
-  it("keeps the user-equipment and consumer boundaries the deployment did not cross", () => {
+  // This slice's boundary is what THIS DEPLOYMENT did not cross, which is a
+  // permanent historical fact. It is deliberately not a claim about what the
+  // application does today: EQ2 and EQ3 have since shipped canonical Add Club
+  // selection and a live Analyze club selector, so a global "not yet wired"
+  // status would now be false. The negative pin below keeps that stale
+  // present-tense sentence from being reintroduced.
+  it("keeps the user-equipment and historical consumer boundaries truthful", () => {
     expect(docs).toContain("No user-equipment backfill");
-    expect(docs).toContain(
+    expect(docs).not.toContain(
       "catalog-backed equipment selection is not yet wired"
     );
     expect(docs).toContain(

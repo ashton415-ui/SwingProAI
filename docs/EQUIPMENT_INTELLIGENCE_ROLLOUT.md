@@ -48,10 +48,16 @@ migration-history version `20260905023640`. The catalog now holds
 252 models — 231 non-putters and the untouched 21 putters. This was a
 database/catalog deployment only; the full closeout record is in *EQ-S2-C* below.
 
-**Application/UI status:** catalog-backed equipment selection is not yet wired
-into the active application. No active Analyze club-selection flow currently
-consumes the canonical catalog, and no UI, API route, AI prompt, or subscription
-behavior has changed.
+**Application/UI status:** canonical catalog-backed equipment selection is live
+on `/bag/add`: the authenticated Add Club flow reads the canonical catalog
+through the shared query layer, and canonical selections persist
+`user_equipment.equipment_model_id`, while Custom/Other remains a separate path.
+Analyze also has a live shared `ClubSelector`, backed by the golfer's active
+saved `user_equipment` through `querySavedClubs`; it does not directly browse
+canonical `equipment_models`. No active Analyze club-selection flow currently
+consumes the canonical catalog. Desktop putting-capture presentation is
+implemented, but Putter execution remains fail-closed until EQ5A/EQ5B. The
+mobile recording selector and putting camera guidance remain future EQ4 work.
 
 ## Existing foundation this work extends
 
@@ -718,8 +724,12 @@ EQ-S2-C   Current-market non-putter canonical catalog v2: 201 additive models
                   staging 20260905023640, production 20260905023640]
 
 EQ2       Shared server-backed ClubSelector and canonical equipment queries
+          [implemented + merged: canonical query PR #28, canonical Add Club
+           PR #33, shared ClubSelector PR #34]
 
 EQ3       Desktop Analyze club selector and putting-mode page transformation
+          [implemented + merged: Analyze selector PR #48,
+           putting-capture presentation PR #50]
 
 EQ4       Mobile recording selector and putting camera guidance
 

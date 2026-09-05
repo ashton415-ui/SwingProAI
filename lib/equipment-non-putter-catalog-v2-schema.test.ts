@@ -63,7 +63,7 @@ const PROTECTED_DIGESTS: Record<string, string> = {
   "supabase/migrations/20260820132900_equipment_non_putter_catalog_v1.sql":
     "9c11181dc15066228d8a04fedc07872adf0e5847404eee4a4540b528b16e4dcd",
   "lib/equipment-non-putter-catalog-schema.test.ts":
-    "d79392cdd6755e58e2d07ca26a7dc04e5642ad7df46826e1cf4dc03a798e81c3",
+    "452c1b0289679ffa7639c8a4b426134e9f371a9d99988ad7a1460ac2a046aaec",
   "data/equipment-catalog-putters-v1.json":
     "0a73e9460d1f416b8af04838dc983df5bcb40ea9f4fa169b9975e50a2b502029",
   "scripts/generate-equipment-catalog-putters-v1.mjs":
@@ -200,7 +200,7 @@ function uuidToBytes(uuid: string): Buffer {
 }
 
 function bytesToUuid(bytes: Buffer): string {
-  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
   return [
     hex.slice(0, 8),
     hex.slice(8, 12),
@@ -346,10 +346,10 @@ describe("EQ-S2-C v2 — root contract", () => {
   });
 
   it("uses exactly the six locked manufacturers and five non-putter club types", () => {
-    expect([...new Set(models.map((m) => m.manufacturer_slug))].sort()).toEqual(
+    expect(Array.from(new Set(models.map((m) => m.manufacturer_slug))).sort()).toEqual(
       [...EXPECTED_MANUFACTURERS].sort()
     );
-    expect([...new Set(models.map((m) => m.club_type))].sort()).toEqual(
+    expect(Array.from(new Set(models.map((m) => m.club_type))).sort()).toEqual(
       [...EXPECTED_CLUB_TYPES].sort()
     );
   });
@@ -754,9 +754,11 @@ describe("EQ-S2-C v2 — generator contract", () => {
     // substrings: the substring form would match the very array that names the
     // forbidden modules a few assertions above.
     const imported = new Set(
-      [...readText(TEST_FILE).matchAll(/^import [^;]*? from "([^"]+)";$/gm)].map((m) => m[1])
+      Array.from(
+        readText(TEST_FILE).matchAll(/^import [^;]*? from "([^"]+)";$/gm)
+      ).map((m) => m[1])
     );
-    expect([...imported].sort()).toEqual([
+    expect(Array.from(imported).sort()).toEqual([
       "./migration-inventory",
       "node:child_process",
       "node:crypto",
