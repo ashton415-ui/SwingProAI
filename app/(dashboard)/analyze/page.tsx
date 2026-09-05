@@ -550,6 +550,37 @@ export default function AnalyzePage() {
       {/* ── LEFT: Video workspace ── */}
       <div className="w-full lg:w-[600px] flex flex-col border-r border-white/10 bg-black flex-shrink-0 relative">
 
+        {/* ── EQ4-S1 Mobile Club Context Panel ── */}
+        <div className="lg:hidden border-b border-white/5 p-4">
+          <div className="bg-golf-surface border border-white/5 rounded-3xl p-5">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-8 h-8 bg-emerald-500/10 rounded-xl flex items-center justify-center shrink-0">
+                <Target size={16} className="text-emerald-400" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-[10px] font-black uppercase tracking-widest text-emerald-400">Club</p>
+                <p className="text-[11px] text-gray-500">Optional — analyze with or without one</p>
+              </div>
+            </div>
+
+            {savedClubs === null ? (
+              <p className="text-sm text-gray-400">{CLUBS_LOADING_MESSAGE}</p>
+            ) : savedClubs.status === "auth_error" ? (
+              <p className="text-sm text-gray-400">{CLUBS_AUTH_MESSAGE}</p>
+            ) : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? (
+              <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+            ) : (
+              <ClubSelector
+                clubs={savedClubs.clubs}
+                selectedClubId={selectedClubId}
+                onChange={setSelectedClubId}
+                disabled={isAnalyzing}
+                label="Club used for this swing"
+              />
+            )}
+          </div>
+        </div>
+
         {!previewUrl ? (
           <label className="flex-1 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors group p-8 text-center">
             <input type="file" accept="video/*" className="hidden"
@@ -726,7 +757,7 @@ export default function AnalyzePage() {
       <div className="flex-1 bg-[#12140F] overflow-y-auto">
 
         {/* ── Club Context Panel ── */}
-        <div className="border-b border-white/5 p-4">
+        <div className="hidden lg:block border-b border-white/5 p-4">
           <div className="bg-golf-surface border border-white/5 rounded-3xl p-5">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-8 h-8 bg-emerald-500/10 rounded-xl flex items-center justify-center shrink-0">

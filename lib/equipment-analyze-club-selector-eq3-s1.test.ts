@@ -703,3 +703,171 @@ describe("EQ3-S1 — boundaries this slice must not cross", () => {
     expect(db0Source).toContain("for share;");
   });
 });
+
+// ─── Structural: EQ4-S1 mobile club selector placement ──────────────────────
+describe("EQ4-S1 Analyze — mobile club selector placement", () => {
+  const rootClass =
+    'flex flex-col lg:h-screen lg:flex-row lg:overflow-hidden';
+  const leftClass =
+    'w-full lg:w-[600px] flex flex-col border-r border-white/10 bg-black flex-shrink-0 relative';
+  const rightClass =
+    'flex-1 bg-[#12140F] overflow-y-auto';
+  const mobileMarker = "EQ4-S1 Mobile Club Context Panel";
+  const desktopMarker = "{/* ── Club Context Panel ── */}";
+  const launchMonitorMarker = "Launch Monitor Panel";
+  const importAnchor = '<input type="file" accept="video/*" className="hidden"';
+
+  function mobileBlock(): string {
+    const leftIdx = analyzeSource.indexOf(leftClass);
+    expect(leftIdx).toBeGreaterThanOrEqual(0);
+    const markerIdx = analyzeSource.indexOf(mobileMarker, leftIdx);
+    expect(markerIdx).toBeGreaterThan(leftIdx);
+    const importIdx = analyzeSource.indexOf(importAnchor, markerIdx);
+    expect(importIdx).toBeGreaterThan(markerIdx);
+    return analyzeSource.slice(markerIdx, importIdx);
+  }
+
+  function desktopBlock(): string {
+    const rightIdx = analyzeSource.indexOf(rightClass);
+    expect(rightIdx).toBeGreaterThanOrEqual(0);
+    const markerIdx = analyzeSource.indexOf(desktopMarker, rightIdx);
+    expect(markerIdx).toBeGreaterThan(rightIdx);
+    const launchIdx = analyzeSource.indexOf(launchMonitorMarker, markerIdx);
+    expect(launchIdx).toBeGreaterThan(markerIdx);
+    return analyzeSource.slice(markerIdx, launchIdx);
+  }
+
+  it("preserves the established stacked-mobile and row-desktop Analyze shell", () => {
+    expect(analyzeSource).toContain(`<div className="${rootClass}">`);
+    expect(analyzeSource).toContain(`<div className="${leftClass}">`);
+    expect(analyzeSource).toContain(`<div className="${rightClass}">`);
+  });
+
+  it("places the mobile Club Context Panel inside the LEFT workspace before video import", () => {
+    const leftIdx = analyzeSource.indexOf(leftClass);
+    const mobileIdx = analyzeSource.indexOf(mobileMarker, leftIdx);
+    const importIdx = analyzeSource.indexOf(importAnchor, leftIdx);
+
+    expect(leftIdx).toBeGreaterThanOrEqual(0);
+    expect(mobileIdx).toBeGreaterThan(leftIdx);
+    expect(importIdx).toBeGreaterThan(mobileIdx);
+    expect(mobileBlock()).toContain('className="lg:hidden border-b border-white/5 p-4"');
+  });
+
+  it("keeps the desktop Club Context Panel in the RIGHT deck and hides it below lg", () => {
+    const rightIdx = analyzeSource.indexOf(rightClass);
+    const desktopIdx = analyzeSource.indexOf(desktopMarker, rightIdx);
+    const launchIdx = analyzeSource.indexOf(launchMonitorMarker, desktopIdx);
+
+    expect(rightIdx).toBeGreaterThanOrEqual(0);
+    expect(desktopIdx).toBeGreaterThan(rightIdx);
+    expect(launchIdx).toBeGreaterThan(desktopIdx);
+    expect(desktopBlock()).toContain(
+      'className="hidden lg:block border-b border-white/5 p-4"',
+    );
+  });
+
+  it("renders exactly two responsive presentations of the shared ClubSelector", () => {
+    expect(analyzeSource.match(/<ClubSelector\b/g) ?? []).toHaveLength(2);
+    expect(mobileBlock().match(/<ClubSelector\b/g) ?? []).toHaveLength(1);
+    expect(desktopBlock().match(/<ClubSelector\b/g) ?? []).toHaveLength(1);
+    expect(mobileBlock()).toContain("lg:hidden");
+    expect(desktopBlock()).toContain("hidden lg:block");
+    expect(analyzeSource).not.toContain("<select");
+    expect(analyzeSource).not.toContain("<optgroup");
+  });
+
+  it("binds both presentations to the same optional club data and state", () => {
+    for (const block of [mobileBlock(), desktopBlock()]) {
+      expect(block).toContain("Optional — analyze with or without one");
+      expect(block).toContain("clubs={savedClubs.clubs}");
+      expect(block).toContain("selectedClubId={selectedClubId}");
+      expect(block).toContain("onChange={setSelectedClubId}");
+      expect(block).toContain("disabled={isAnalyzing}");
+      expect(block).toContain('label="Club used for this swing"');
+      expect(block).not.toContain("allowEmpty={false}");
+    }
+  });
+
+  it("keeps selection and saved-club loading single-owner while preserving submission revalidation", () => {
+    expect(
+      analyzeSource.match(
+        /const\s+\[selectedClubId,\s*setSelectedClubId\]\s*=\s*useState<string \| null>\(null\)/g,
+      ) ?? [],
+    ).toHaveLength(1);
+
+    expect(
+      initSource.match(
+        /querySavedClubs\(supabase,\s*\{\s*userId:\s*clubsUserId\s*\}\)/g,
+      ) ?? [],
+    ).toHaveLength(1);
+
+    expect(
+      submissionSource.match(
+        /querySavedClubs\(supabase,\s*\{\s*userId\s*\}\)/g,
+      ) ?? [],
+    ).toHaveLength(1);
+
+    expect(initSource).toContain(
+      'resolveInitialClubId(result, searchParams.get("club_id"))',
+    );
+  });
+
+  it("preserves file import, full-swing copy, putting presentation, and the fail-closed Putter path", () => {
+    expect(analyzeSource).toContain(importAnchor);
+    expect(analyzeSource).toContain("Import Swing Video");
+    expect(analyzeSource).toContain("Import Putting Stroke Video");
+    expect(analyzeSource).toContain(
+      "Use the trim handles in the timeline to isolate one complete putting stroke.",
+    );
+    expect(analyzeSource).toContain("PUTTING ANALYSIS COMING SOON");
+
+    const puttingBranchIdx = analyzeSource.indexOf("isPuttingCapture ? (");
+    expect(puttingBranchIdx).toBeGreaterThanOrEqual(0);
+    const puttingBranchEnd = analyzeSource.indexOf(") : (", puttingBranchIdx);
+    expect(puttingBranchEnd).toBeGreaterThan(puttingBranchIdx);
+    const puttingBranch = analyzeSource.slice(puttingBranchIdx, puttingBranchEnd);
+    expect(puttingBranch).toContain("disabled");
+    expect(puttingBranch).not.toContain("onClick");
+
+    const guard = submissionSource.indexOf(
+      "isPuttingCapturePresentation(savedClubs, selectedClubId)",
+    );
+    const preprocessing = submissionSource.indexOf("await getTrimmedBlob()");
+    const storage = submissionSource.indexOf("supabase.storage");
+    const videos = submissionSource.indexOf('.from("swing_videos")');
+    const analysis = submissionSource.indexOf('.from("swing_analysis")');
+    const api = submissionSource.indexOf('fetch("/api/analyze-swing"');
+
+    for (const idx of [guard, preprocessing, storage, videos, analysis, api]) {
+      expect(idx).toBeGreaterThanOrEqual(0);
+    }
+
+    expect(guard).toBeLessThan(preprocessing);
+    expect(guard).toBeLessThan(storage);
+    expect(guard).toBeLessThan(videos);
+    expect(guard).toBeLessThan(analysis);
+    expect(guard).toBeLessThan(api);
+  });
+
+  it("introduces no EQ4-S2 camera surface and no client-owned routing fields", () => {
+    for (const forbidden of [
+      "getUserMedia",
+      "navigator.mediaDevices",
+      "MediaDevices",
+      "facingMode",
+      "enumerateDevices",
+      "srcObject",
+      "getTracks",
+      'capture="',
+      "capture={",
+    ]) {
+      expect(analyzeSource, `${forbidden} belongs outside EQ4-S1`).not.toContain(
+        forbidden,
+      );
+    }
+
+    expect(analyzeSource).not.toContain("analysis_family");
+    expect(analyzeSource).not.toContain("equipment_snapshot");
+  });
+});
