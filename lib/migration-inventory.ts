@@ -89,6 +89,20 @@ export const EQUIPMENT_MODEL_SOURCE_CATEGORY_PROVENANCE_FILENAME =
   "20260903213417_equipment_model_source_category_provenance.sql";
 
 /**
+ * The EQ-S2-C migration that adds the 201-model current-market non-putter
+ * catalog expansion (v2) and its 201 provenance rows. Data-only, append-only:
+ * it introduces no manufacturer, restates none of the 30 non-putter v1 rows,
+ * and touches no putter.
+ *
+ * It depends on EQUIPMENT_MODEL_SOURCE_CATEGORY_PROVENANCE_FILENAME. One of its
+ * provenance rows uses the official_category_page class, which only exists once
+ * that migration has widened the source-type CHECK to four values, so it proves
+ * the exact deployed rule before inserting anything.
+ */
+export const EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME =
+  "20260905023640_equipment_non_putter_catalog_v2.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -109,6 +123,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   EQUIPMENT_DELETE_PRIVILEGE_DB3_FILENAME,
   EQUIPMENT_SNAPSHOT_ACTIVE_GUARD_DB0_FILENAME,
   EQUIPMENT_MODEL_SOURCE_CATEGORY_PROVENANCE_FILENAME,
+  EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
