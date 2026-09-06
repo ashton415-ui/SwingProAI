@@ -665,10 +665,15 @@ describe("EQ3-S2 — presentation only, no routing and no new surfaces", () => {
     }
   });
 
-  it("introduces no mobile capture implementation — that is EQ4", () => {
-    for (const api of ["getUserMedia", "MediaDevices", "facingMode"]) {
-      expect(analyzeSource, `${api} belongs to EQ4, not EQ3-S2`).not.toContain(api);
-    }
+  it("keeps EQ4-S2 mobile capture out of the analysis and equipment contracts", () => {
+    // EQ4-S2 has since added a mobile camera path, so the original
+    // camera-absence ban is obsolete. What still matters is that capture stays
+    // a client presentation concern: it must not reach the analysis API or
+    // re-derive equipment, which is what this replacement pins.
+    expect(analyzeApiSource).not.toContain("getUserMedia");
+    expect(analyzeApiSource).not.toContain("MediaRecorder");
+    expect(analyzeApiSource).toContain("analysisId: string;");
+    expect(analyzeSource).toContain("@/lib/analyze-camera-capture");
   });
 
   it("leaves the analysis API untouched by putting presentation", () => {
@@ -850,23 +855,10 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
     expect(guard).toBeLessThan(api);
   });
 
-  it("introduces no EQ4-S2 camera surface and no client-owned routing fields", () => {
-    for (const forbidden of [
-      "getUserMedia",
-      "navigator.mediaDevices",
-      "MediaDevices",
-      "facingMode",
-      "enumerateDevices",
-      "srcObject",
-      "getTracks",
-      'capture="',
-      "capture={",
-    ]) {
-      expect(analyzeSource, `${forbidden} belongs outside EQ4-S1`).not.toContain(
-        forbidden,
-      );
-    }
-
+  it("still never writes the DB-authored routing fields from the client", () => {
+    // The camera bans that used to live here retired with EQ4-S2. These two
+    // did not: analysis_family and equipment_snapshot are database-authored,
+    // and a client write would silently claim authority it does not have.
     expect(analyzeSource).not.toContain("analysis_family");
     expect(analyzeSource).not.toContain("equipment_snapshot");
   });

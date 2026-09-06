@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import {
   Upload, Target, CheckCircle2, AlertCircle, Loader2,
   Play, Info, Maximize2, X, Activity, Zap, Trophy,
-  Lock, BarChart2, FileUp,
+  Lock, BarChart2, FileUp, Camera, Square,
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import {
@@ -26,6 +26,15 @@ import {
   isSelectionStillValid,
   resolveInitialClubId,
 } from "@/lib/equipment/analyze-club-selection";
+import {
+  CAMERA_RECORDING_TOO_LARGE_MESSAGE,
+  CAMERA_RECORDING_UNAVAILABLE_MESSAGE,
+  CAMERA_UNSUPPORTED_MESSAGE,
+  cameraFileExtensionForMime,
+  classifyCameraStartError,
+  hasCameraRecordingCapability,
+  selectCameraRecorderMimeType,
+} from "@/lib/analyze-camera-capture";
 import type { DeficiencyItem, HighlightItem } from "@/types/database";
 
 /** Read the tier injected by the server layout */
@@ -102,6 +111,40 @@ const BUCKET = "swing-videos";
 const MAX_FILE_MB = 250;
 const MAX_SEGMENT_SECONDS = 15;
 
+// ─── EQ4-S2 mobile camera capture ─────────────────────────────────────────────
+/** Every member is `ideal`: preferences, never requirements. An `exact` rear
+ *  camera or a mandatory resolution can make the request fail outright on a
+ *  device that could otherwise film a perfectly usable swing. */
+const CAMERA_CAPTURE_CONSTRAINTS: MediaStreamConstraints = {
+  audio: false,
+  video: {
+    facingMode: { ideal: "environment" },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 60 },
+  },
+};
+
+type CameraPhase = "idle" | "starting" | "ready" | "recording" | "finalizing";
+
+/** Stops every track on a stream. Module-level so it is stable across renders
+ *  and callable from cleanup that must not depend on component identity. */
+function releaseCameraTracks(stream: MediaStream | null): void {
+  if (!stream) return;
+  for (const track of stream.getTracks()) {
+    try {
+      track.stop();
+    } catch {
+      // Already ended; releasing twice is not an error worth surfacing.
+    }
+  }
+}
+
+const CAMERA_FULL_SWING_GUIDANCE =
+  "Set your phone steady at about hand height. Rear camera preferred. Use a Face-On or Down-the-Line view and keep your feet, ball, body, and full club arc in frame. Landscape is preferred.";
+const CAMERA_PUTTING_GUIDANCE =
+  "Set your phone steady at about hand height. Rear camera preferred. Use a Face-On or Down-the-Line view and keep the ball, putter head, hands, and complete stroke in frame. Landscape is preferred.";
+
 /** Shown when the browser cannot produce the requested trimmed/compressed clip.
  *  We fail closed here: uploading the original file instead would analyze a
  *  different clip than the golfer asked for, and report it as a success. */
@@ -157,6 +200,19 @@ export default function AnalyzePage() {
   // The URL hint is applied at most once, so a later re-resolution cannot
   // overwrite a choice the golfer has since made in the selector.
   const clubHintApplied = useRef(false);
+
+  // EQ4-S2 camera capture. `cameraError` is separate from the page-wide `error`
+  // banner on purpose: that banner renders inside the preview branch, so it is
+  // invisible while previewUrl is null — exactly when camera failures happen.
+  const [cameraPhase, setCameraPhase] = useState<CameraPhase>("idle");
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const cameraPreviewRef = useRef<HTMLVideoElement>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraRecorderRef = useRef<MediaRecorder | null>(null);
+  /** Async generation. Bumped on every start and every abandon, so a late
+   *  getUserMedia or a stale recorder callback can tell it is obsolete. */
+  const cameraRequestRef = useRef(0);
+  const cameraDiscardRef = useRef(false);
 
   // EQ3-S2. Layer 1 classifies the current selection and nothing else; it is
   // presentation only and never an authority for the database analysis family,
@@ -543,6 +599,302 @@ export default function AnalyzePage() {
 
   const setTime = (t: number) => { if (videoRef.current) videoRef.current.currentTime = t; };
 
+  // ─── EQ4-S2 camera lifecycle ──────────────────────────────────────────────
+  // Declared here, after the submission and preprocessing regions, so camera
+  // code never lands inside the source slices those suites isolate.
+
+  /** Idempotent teardown. Invalidates the generation first so any callback
+   *  still in flight sees itself as stale before it can touch newer state. */
+  const abandonCamera = useCallback(() => {
+    cameraRequestRef.current += 1;
+    cameraDiscardRef.current = true;
+
+    const recorder = cameraRecorderRef.current;
+    cameraRecorderRef.current = null;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+      } catch {
+        // Best effort: a recorder that cannot stop must not block teardown.
+      }
+    }
+
+    const stream = cameraStreamRef.current;
+    cameraStreamRef.current = null;
+    releaseCameraTracks(stream);
+    if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
+    setCameraPhase("idle");
+  }, []);
+
+  /** Releases the camera before handing a chosen file to the one file
+   *  lifecycle owner, so a live stream can never outlive a file selection. */
+  const handleFileReleasingCamera = useCallback(
+    (f: File) => {
+      abandonCamera();
+      setCameraError(null);
+      handleFile(f);
+    },
+    [abandonCamera, handleFile],
+  );
+
+  /** The ONLY place this page calls getUserMedia. Reached exclusively from the
+   *  golfer tapping Record with Camera — never from an effect, a club change,
+   *  hydration, hover or focus. */
+  const startCameraCapture = useCallback(async () => {
+    setCameraError(null);
+
+    const mediaDevices =
+      typeof navigator === "undefined" ? undefined : navigator.mediaDevices;
+    const canOpenCamera = typeof mediaDevices?.getUserMedia === "function";
+    const canRecord = typeof MediaRecorder !== "undefined";
+
+    // Capability is settled BEFORE any request, so an unusable browser never
+    // prompts the golfer for a permission that could not be acted on.
+    if (!hasCameraRecordingCapability({ getUserMedia: canOpenCamera, mediaRecorder: canRecord })) {
+      setCameraError(
+        canOpenCamera ? CAMERA_RECORDING_UNAVAILABLE_MESSAGE : CAMERA_UNSUPPORTED_MESSAGE,
+      );
+      return;
+    }
+
+    setCameraPhase("starting");
+    const requestId = ++cameraRequestRef.current;
+    cameraDiscardRef.current = false;
+
+    let stream: MediaStream;
+    try {
+      stream = await mediaDevices!.getUserMedia(CAMERA_CAPTURE_CONSTRAINTS);
+    } catch (err) {
+      // Only the exception NAME is read. The message never reaches the golfer.
+      const rawName = (err as { name?: unknown } | null)?.name;
+      if (cameraRequestRef.current === requestId) {
+        setCameraError(
+          classifyCameraStartError(typeof rawName === "string" ? rawName : undefined),
+        );
+        setCameraPhase("idle");
+      }
+      return;
+    }
+
+    // The golfer may have cancelled or unmounted while the prompt was open.
+    if (cameraRequestRef.current !== requestId) {
+      releaseCameraTracks(stream);
+      return;
+    }
+
+    // isTypeSupported is itself feature-detected: calling it blindly would
+    // throw on a browser that exposes MediaRecorder without it.
+    if (typeof MediaRecorder.isTypeSupported !== "function") {
+      releaseCameraTracks(stream);
+      setCameraError(CAMERA_RECORDING_UNAVAILABLE_MESSAGE);
+      setCameraPhase("idle");
+      return;
+    }
+
+    const supportedMime = selectCameraRecorderMimeType(
+      MediaRecorder.isTypeSupported.bind(MediaRecorder),
+    );
+    if (supportedMime === null) {
+      releaseCameraTracks(stream);
+      setCameraError(CAMERA_RECORDING_UNAVAILABLE_MESSAGE);
+      setCameraPhase("idle");
+      return;
+    }
+
+    cameraStreamRef.current = stream;
+    setCameraPhase("ready");
+  }, []);
+
+  const startCameraRecording = useCallback(() => {
+    const stream = cameraStreamRef.current;
+    if (!stream) return;
+
+    const releaseAsUnrecordable = () => {
+      cameraStreamRef.current = null;
+      releaseCameraTracks(stream);
+      if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
+      setCameraError(CAMERA_RECORDING_UNAVAILABLE_MESSAGE);
+      setCameraPhase("idle");
+    };
+
+    if (
+      typeof MediaRecorder === "undefined" ||
+      typeof MediaRecorder.isTypeSupported !== "function"
+    ) {
+      releaseAsUnrecordable();
+      return;
+    }
+
+    const selectedMime = selectCameraRecorderMimeType(
+      MediaRecorder.isTypeSupported.bind(MediaRecorder),
+    );
+    if (selectedMime === null) {
+      releaseAsUnrecordable();
+      return;
+    }
+
+    const requestId = cameraRequestRef.current;
+    cameraDiscardRef.current = false;
+    const chunks: BlobPart[] = [];
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: selectedMime });
+    } catch {
+      releaseAsUnrecordable();
+      return;
+    }
+
+    // Handlers are registered before start() so no early chunk or failure can
+    // arrive unobserved.
+    recorder.ondataavailable = (e) => {
+      if (e.data?.size > 0) chunks.push(e.data);
+    };
+
+    recorder.onerror = () => {
+      if (cameraRequestRef.current !== requestId) return;
+      cameraRequestRef.current += 1;
+      cameraDiscardRef.current = true;
+      if (cameraRecorderRef.current === recorder) cameraRecorderRef.current = null;
+      const owned = cameraStreamRef.current;
+      cameraStreamRef.current = null;
+      releaseCameraTracks(owned);
+      if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
+      setCameraError(CAMERA_RECORDING_UNAVAILABLE_MESSAGE);
+      setCameraPhase("idle");
+    };
+
+    recorder.onstop = () => {
+      const stale =
+        cameraRequestRef.current !== requestId || cameraDiscardRef.current === true;
+      if (cameraRecorderRef.current === recorder) cameraRecorderRef.current = null;
+
+      // A cancelled or superseded recording must never reach handleFile, and
+      // must never disturb a newer camera session's state.
+      if (stale) return;
+
+      const owned = cameraStreamRef.current;
+      cameraStreamRef.current = null;
+      releaseCameraTracks(owned);
+      if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
+
+      if (chunks.length === 0) {
+        setCameraError(CAMERA_RECORDING_UNAVAILABLE_MESSAGE);
+        setCameraPhase("idle");
+        return;
+      }
+
+      const recordedMime = recorder.mimeType || selectedMime;
+      const blob = new Blob(chunks, { type: recordedMime });
+
+      // Checked here rather than in handleFile: handleFile's own rejection
+      // renders in the preview branch, which is not on screen yet.
+      if (blob.size > MAX_FILE_MB * 1024 * 1024) {
+        setCameraError(CAMERA_RECORDING_TOO_LARGE_MESSAGE);
+        setCameraPhase("idle");
+        return;
+      }
+
+      const extension = cameraFileExtensionForMime(recordedMime);
+      const recordedFile = new File(
+        [blob],
+        `swingpro-camera-${Date.now()}.${extension}`,
+        { type: recordedMime, lastModified: Date.now() },
+      );
+
+      setCameraError(null);
+      setCameraPhase("idle");
+      // The existing file lifecycle owner. No parallel preview, upload,
+      // database write or analysis call happens on stop.
+      handleFile(recordedFile);
+    };
+
+    // start() can throw synchronously — a track that ended between
+    // construction and here, or an invalid state. Ownership and the recording
+    // phase are therefore claimed only once it has actually returned, so a
+    // throw cannot strand a live stream behind a UI that says "Recording".
+    try {
+      recorder.start();
+    } catch {
+      cameraRequestRef.current += 1;
+      cameraDiscardRef.current = true;
+      if (cameraRecorderRef.current === recorder) cameraRecorderRef.current = null;
+      releaseAsUnrecordable();
+      return;
+    }
+
+    cameraRecorderRef.current = recorder;
+    setCameraPhase("recording");
+  }, [handleFile]);
+
+  const stopCameraRecording = useCallback(() => {
+    const recorder = cameraRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    try {
+      recorder.stop();
+    } catch {
+      // A stop() that throws may never fire onstop, so finalizing would stand
+      // forever. Fail closed here instead: discard first so any late callback
+      // from this recorder cannot hand off, then release and return to idle.
+      cameraRequestRef.current += 1;
+      cameraDiscardRef.current = true;
+      if (cameraRecorderRef.current === recorder) cameraRecorderRef.current = null;
+      const owned = cameraStreamRef.current;
+      cameraStreamRef.current = null;
+      releaseCameraTracks(owned);
+      if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
+      setCameraError(CAMERA_RECORDING_UNAVAILABLE_MESSAGE);
+      setCameraPhase("idle");
+      return;
+    }
+
+    // Only a stop() that actually returned may claim the finalizing phase.
+    setCameraPhase("finalizing");
+  }, []);
+
+  // Binds an ALREADY-OWNED stream once the camera <video> has actually
+  // rendered. Never requests permission and never creates a stream: the ref is
+  // not populated synchronously by setCameraPhase, so binding cannot be done
+  // inline in the start handler.
+  useEffect(() => {
+    const element = cameraPreviewRef.current;
+    if (!element) return;
+    if (cameraPhase === "idle") {
+      if (element.srcObject) element.srcObject = null;
+      return;
+    }
+    const stream = cameraStreamRef.current;
+    if (stream && element.srcObject !== stream) {
+      element.srcObject = stream;
+    }
+  }, [cameraPhase]);
+
+  // Unmount teardown. Acquires nothing; it only guarantees no camera survives
+  // the page, including a getUserMedia still resolving, which will find its
+  // generation stale and stop its own tracks.
+  useEffect(() => {
+    return () => {
+      cameraRequestRef.current += 1;
+      cameraDiscardRef.current = true;
+      const recorder = cameraRecorderRef.current;
+      cameraRecorderRef.current = null;
+      if (recorder && recorder.state !== "inactive") {
+        try {
+          recorder.stop();
+        } catch {
+          // Best effort during teardown.
+        }
+      }
+      const stream = cameraStreamRef.current;
+      cameraStreamRef.current = null;
+      releaseCameraTracks(stream);
+    };
+  }, []);
+
+  const cameraGuidance = isPuttingCapture
+    ? CAMERA_PUTTING_GUIDANCE
+    : CAMERA_FULL_SWING_GUIDANCE;
+
   // ─── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col lg:h-screen lg:flex-row lg:overflow-hidden">
@@ -582,6 +934,87 @@ export default function AnalyzePage() {
         </div>
 
         {!previewUrl ? (
+        <div className="flex-1 flex flex-col">
+
+          {/* ── EQ4-S2 Mobile camera capture ── */}
+          {/* Mobile-only. Sibling of the import label, never a descendant of
+              it: a button inside that label would be ambiguous markup and
+              could open the file picker instead of the camera. */}
+          <div className="lg:hidden border-b border-white/5 p-4">
+            {cameraError && (
+              <div className="mb-3 bg-red-500/10 border border-red-500/40 p-3 rounded-xl flex items-start gap-2">
+                <AlertCircle size={16} className="text-red-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-white">{cameraError}</p>
+              </div>
+            )}
+
+            {cameraPhase === "idle" ? (
+              <>
+                <button type="button" onClick={startCameraCapture}
+                  className="w-full min-h-11 bg-golf-green text-golf-dark rounded-2xl font-black uppercase tracking-widest text-sm flex items-center justify-center gap-2">
+                  <Camera size={16} />Record with Camera
+                </button>
+                <p className="text-[10px] text-gray-500 mt-2 text-center">
+                  Up to {MAX_FILE_MB}MB
+                </p>
+              </>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="relative bg-black rounded-2xl overflow-hidden aspect-video">
+                  <video ref={cameraPreviewRef} autoPlay muted playsInline
+                    className="w-full h-full object-cover" />
+                  {/* Presentation-only safe-frame marks. They infer nothing,
+                      classify nothing and persist nothing. */}
+                  <div className="absolute inset-4 border border-white/25 rounded-xl pointer-events-none" />
+                  {cameraPhase === "recording" && (
+                    <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/70 px-2.5 py-1 rounded-full">
+                      <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                      <span className="text-[10px] font-black uppercase tracking-widest text-white">Recording</span>
+                    </div>
+                  )}
+                  {(cameraPhase === "starting" || cameraPhase === "finalizing") && (
+                    <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2">
+                      <Loader2 className="w-8 h-8 animate-spin text-golf-green" />
+                      <p className="text-[10px] font-black uppercase tracking-widest text-white">
+                        {cameraPhase === "starting" ? "Starting Camera" : "Preparing Video"}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-[10px] text-gray-500 leading-relaxed">{cameraGuidance}</p>
+                <p className="text-[10px] text-gray-500">Up to {MAX_FILE_MB}MB</p>
+
+                <div className="flex flex-col gap-2">
+                  {cameraPhase === "ready" && (
+                    <button type="button" onClick={startCameraRecording}
+                      className="w-full min-h-11 bg-golf-green text-golf-dark rounded-2xl font-black uppercase tracking-widest text-sm flex items-center justify-center gap-2">
+                      <Camera size={16} />Start Recording
+                    </button>
+                  )}
+                  {cameraPhase === "recording" && (
+                    <button type="button" onClick={stopCameraRecording}
+                      className="w-full min-h-11 bg-red-500 text-white rounded-2xl font-black uppercase tracking-widest text-sm flex items-center justify-center gap-2">
+                      <Square size={14} />Stop Recording
+                    </button>
+                  )}
+                  <button type="button" onClick={abandonCamera}
+                    className="w-full min-h-11 bg-white/5 text-gray-300 border border-white/10 rounded-2xl font-black uppercase tracking-widest text-[11px] flex items-center justify-center gap-2">
+                    <X size={14} />{cameraPhase === "recording" || cameraPhase === "finalizing" ? "Cancel / Discard" : "Cancel"}
+                  </button>
+                  {/* Import stays reachable throughout. Choosing a file first
+                      abandons the camera, so no stream survives the handoff. */}
+                  <label className="w-full min-h-11 bg-white/5 text-gray-300 border border-white/10 rounded-2xl font-black uppercase tracking-widest text-[11px] flex items-center justify-center gap-2 cursor-pointer">
+                    <input type="file" accept="video/*" className="hidden"
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileReleasingCamera(f); }} />
+                    <Upload size={14} />Choose Video Instead
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {cameraPhase === "idle" && (
           <label className="flex-1 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors group p-8 text-center">
             <input type="file" accept="video/*" className="hidden"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
@@ -601,6 +1034,8 @@ export default function AnalyzePage() {
               </p>
             </div>
           </label>
+          )}
+        </div>
         ) : (
           <div className="flex-1 relative bg-[#050505] flex flex-col items-center justify-center overflow-hidden">
             <div className="relative max-h-[75%] max-w-full flex items-center justify-center"
