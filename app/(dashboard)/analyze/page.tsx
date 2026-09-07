@@ -937,10 +937,17 @@ export default function AnalyzePage() {
         <div className="flex-1 flex flex-col">
 
           {/* ── EQ4-S2 Mobile camera capture ── */}
-          {/* Mobile-only. Sibling of the import label, never a descendant of
-              it: a button inside that label would be ambiguous markup and
-              could open the file picker instead of the camera. */}
-          <div className="lg:hidden border-b border-white/5 p-4">
+          {/* Hidden by default; shown only where the primary pointer is coarse
+              and cannot hover. That is an input-capability test, not a width
+              test, so the first-party recorder stays available on the
+              touch-operated acceptance fixtures regardless of viewport width.
+              Ordinary fine/hovering pointer presentation stays camera-free.
+              No UA sniffing, JavaScript viewport detection, or device-specific
+              width exception is used.
+              Sibling of the import label, never a descendant of it: a button
+              inside that label would be ambiguous markup and could open the
+              file picker instead of the camera. */}
+          <div className="hidden [@media(hover:none)_and_(pointer:coarse)]:block border-b border-white/5 p-4">
             {cameraError && (
               <div className="mb-3 bg-red-500/10 border border-red-500/40 p-3 rounded-xl flex items-start gap-2">
                 <AlertCircle size={16} className="text-red-400 shrink-0 mt-0.5" />

@@ -231,8 +231,26 @@ describe("EQ4-S2 Analyze — camera surface source contract", () => {
     expect(analyzeSource.slice(labelIdx, labelEnd)).not.toContain("startCameraCapture");
   });
 
-  it("keeps the camera surface mobile-only and desktop import camera-free", () => {
-    expect(cameraSurfaceSource()).toContain("lg:hidden");
+  it("gates the camera surface on input capability, not viewport width", () => {
+    const surface = cameraSurfaceSource();
+    // A width breakpoint hid the first-party recorder on a touch iPad, which
+    // reaches the desktop layout width in both orientations. Visibility is
+    // therefore keyed to the primary pointer being coarse and unable to
+    // hover, which is orientation- and width-independent.
+    expect(surface).toContain(
+      'className="hidden [@media(hover:none)_and_(pointer:coarse)]:block border-b border-white/5 p-4"',
+    );
+    expect(surface).not.toContain("lg:hidden");
+    expect(surface).not.toContain("xl:hidden");
+    expect(surface).not.toContain("2xl:hidden");
+    // The CSS capability query must never become JavaScript device sniffing.
+    // The literal class text above is CSS, not a matchMedia() call.
+    expect(analyzeSource).not.toContain("navigator.userAgent");
+    expect(analyzeSource).not.toContain("userAgentData");
+    expect(analyzeSource).not.toContain("navigator.maxTouchPoints");
+    expect(analyzeSource).not.toContain("window.innerWidth");
+    expect(analyzeSource).not.toContain("screen.width");
+    expect(analyzeSource).not.toContain("matchMedia(");
     // The desktop results deck and its Club Context panel gain no camera.
     const deckIdx = analyzeSource.indexOf('<div className="flex-1 bg-[#12140F] overflow-y-auto">');
     expect(deckIdx).toBeGreaterThanOrEqual(0);
