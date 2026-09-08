@@ -459,9 +459,9 @@ describe("analyze-swing functional anchors", () => {
     expect(apiSource).toContain('{ message: "Analysis complete", data: updated }');
   });
 
-  it("leaves the EQ3-S1 equipment boundary out of the API", () => {
+  it("allows the database-authored analysis family without reopening the EQ3-S1 equipment boundary", () => {
     expect(apiSource).not.toContain("club_id");
-    expect(apiSource).not.toContain("analysis_family");
+    expect(apiSource).toContain("analysisRow.analysis_family");
     expect(apiSource).not.toContain("equipment_snapshot");
   });
 });

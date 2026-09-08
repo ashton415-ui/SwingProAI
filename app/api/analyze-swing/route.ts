@@ -25,12 +25,20 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
+import { classifyAnalysisFamilyRoute } from "@/lib/analysis-family-router";
 
 export const maxDuration = 300;
 
 // Inline video budget sent to Gemini. Videos larger than this are analysed
 // from metadata + MediaPipe numbers only — still high quality.
 const MAX_INLINE_VIDEO_BYTES = 20 * 1_048_576; // 20 MB
+
+// EQ5A. Server-owned copy, defined here rather than imported: the client
+// page constant lives in a "use client" module, and an API route must not
+// depend on one. The wording deliberately omits the club type, which is
+// database-derived equipment identity and does not belong in a response.
+const PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE =
+  "Putting analysis is coming soon. To avoid an incorrect full-swing report, this video can't be analyzed yet.";
 
 // ── Request body ──────────────────────────────────────────────────────────────
 
@@ -463,6 +471,29 @@ export async function POST(req: NextRequest) {
   if (fetchErr || !analysisRow) {
     console.error("[analyze-swing] analysis row fetch failed");
     return NextResponse.json({ error: "Analysis record not found." }, { status: 404 });
+  }
+
+  // ── EQ5A server analysis router ──────────────────────────────────────────
+  // Routed from the database-authored family on the owned row, never from the
+  // request. This sits before the row-status log, the complete-row rerun
+  // warning and the processing update, so a refused request leaves the row
+  // exactly as it was found and emits no claim that Gemini is being re-run.
+  const analysisRoute = classifyAnalysisFamilyRoute(analysisRow.analysis_family);
+
+  if (analysisRoute === "putting_unavailable") {
+    return NextResponse.json(
+      { error: PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE },
+      { status: 503 },
+    );
+  }
+
+  if (analysisRoute === "unsupported_family") {
+    // Fixed literal: the unrecognized value is never logged or returned.
+    console.error("[analyze-swing] unsupported analysis family");
+    return NextResponse.json(
+      { error: "Analysis failed. Please try again." },
+      { status: 500 },
+    );
   }
 
   console.log("[analyze-swing] row status:", analysisRow.status);

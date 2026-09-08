@@ -696,10 +696,10 @@ describe("EQ3-S1 — boundaries this slice must not cross", () => {
     expect(bagClientSource).toContain("router.push(`/analyze?club_id=${clubId}`)");
   });
 
-  it("leaves the analysis API free of any club contract", () => {
+  it("allows the database-authored analysis family without adding a client equipment contract", () => {
     expect(analyzeApiSource).toContain("analysisId: string;");
     expect(analyzeApiSource).not.toContain("club_id");
-    expect(analyzeApiSource).not.toContain("analysis_family");
+    expect(analyzeApiSource).toContain("analysisRow.analysis_family");
     expect(analyzeApiSource).not.toContain("equipment_snapshot");
   });
 
