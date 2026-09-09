@@ -696,11 +696,14 @@ describe("EQ3-S1 — boundaries this slice must not cross", () => {
     expect(bagClientSource).toContain("router.push(`/analyze?club_id=${clubId}`)");
   });
 
-  it("allows the database-authored analysis family without adding a client equipment contract", () => {
+  it("reads database-authored routing context without adding a client equipment contract", () => {
     expect(analyzeApiSource).toContain("analysisId: string;");
     expect(analyzeApiSource).not.toContain("club_id");
     expect(analyzeApiSource).toContain("analysisRow.analysis_family");
-    expect(analyzeApiSource).not.toContain("equipment_snapshot");
+    // EQ5B-S1 reads the immutable snapshot for the putting prompt. The route
+    // may read it; it may never author or write it.
+    expect(analyzeApiSource).toContain("analysisRow.equipment_snapshot");
+    expect(analyzeApiSource).not.toMatch(/\bequipment_snapshot\s*:/);
   });
 
   it("leaves DB0 as the database authority for the archive race", () => {

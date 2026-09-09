@@ -26,19 +26,27 @@ import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 import { classifyAnalysisFamilyRoute } from "@/lib/analysis-family-router";
+import {
+  PUTTING_RESPONSE_SCHEMA,
+  PUTTING_SYSTEM_INSTRUCTION,
+  buildPersistedPuttingAnalysis,
+  buildPuttingUserPrompt,
+  buildTrustedEquipmentContext,
+  isPersistedPuttingAnalysisV1,
+  validatePuttingModelResponse,
+} from "@/lib/putting-analysis-contract";
 
 export const maxDuration = 300;
+
+/** Single home of the credential precedence, so the putting branch cannot
+ *  drift from the full-swing path. Pure: it never logs the value. */
+function resolveGeminiKey(): string | undefined {
+  return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY;
+}
 
 // Inline video budget sent to Gemini. Videos larger than this are analysed
 // from metadata + MediaPipe numbers only — still high quality.
 const MAX_INLINE_VIDEO_BYTES = 20 * 1_048_576; // 20 MB
-
-// EQ5A. Server-owned copy, defined here rather than imported: the client
-// page constant lives in a "use client" module, and an API route must not
-// depend on one. The wording deliberately omits the club type, which is
-// database-derived equipment identity and does not belong in a response.
-const PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE =
-  "Putting analysis is coming soon. To avoid an incorrect full-swing report, this video can't be analyzed yet.";
 
 // ── Request body ──────────────────────────────────────────────────────────────
 
@@ -429,6 +437,157 @@ these values are computer-vision measurements and must be preserved verbatim. Yo
 is to INTERPRET and DIAGNOSE these numbers in your prose, not to recalculate them.
 `.trim();
 
+// ── EQ5B-S1 putting pipeline ─────────────────────────────────────────────────
+//
+// Reached only when the database-authored family on the owned row is "putting".
+// It shares infrastructure with full swing — auth, the owned row, the video
+// helper, the SDK — but none of its semantics: no client metrics, no MediaPipe,
+// no biomechanics, no score. An uncalibrated phone video supports qualitative
+// observation only, so nothing here writes the numeric putting columns.
+
+type RouteSupabaseClient = Awaited<ReturnType<typeof createClient>>;
+
+async function runPuttingAnalysis(
+  supabase: RouteSupabaseClient,
+  analysisRow: Record<string, unknown>,
+  analysisId: string,
+): Promise<NextResponse> {
+  // A complete row is only reusable when its stored payload still satisfies the
+  // current envelope AND the current safety rules, so a payload written by an
+  // older or looser validator can never be served from cache.
+  if (
+    analysisRow.status === "complete" &&
+    isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)
+  ) {
+    console.log("[analyze-swing] putting cache hit");
+    return NextResponse.json({ message: "Analysis complete", data: analysisRow });
+  }
+
+  console.log("[analyze-swing] putting analysis requested");
+
+  const markFailed = async (): Promise<void> => {
+    try {
+      await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+    } catch {
+      // Best effort. A failed status write must not change the response the
+      // golfer already earned from the originating condition.
+    }
+  };
+
+  const puttingApiKey = resolveGeminiKey();
+  if (!puttingApiKey) {
+    await markFailed();
+    return NextResponse.json(
+      { error: "AI analysis is temporarily unavailable. Please try again later." },
+      { status: 503 },
+    );
+  }
+
+  const { error: puttingProcessingError } = await supabase
+    .from("swing_analysis")
+    .update({ status: "processing" })
+    .eq("id", analysisId);
+
+  if (puttingProcessingError) {
+    // Full swing logs this and continues. Putting deliberately does not: if the
+    // server cannot record that work started, it must not spend a Gemini call on
+    // a row whose state it is unable to track.
+    await markFailed();
+    return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
+  }
+
+  const puttingVideo = analysisRow.swing_video as { storage_path?: string | null } | null;
+  const storagePath =
+    typeof puttingVideo?.storage_path === "string" ? puttingVideo.storage_path : null;
+
+  let inlineVideo: { inlineData: { mimeType: string; data: string } } | null = null;
+  if (storagePath) {
+    const { data: signed } = await supabase.storage
+      .from("swing-videos")
+      .createSignedUrl(storagePath, 3600);
+    if (signed?.signedUrl) {
+      const videoData = await fetchVideoBytes(signed.signedUrl, MAX_INLINE_VIDEO_BYTES);
+      if (videoData) {
+        inlineVideo = {
+          inlineData: {
+            mimeType: videoData.mimeType,
+            data: arrayBufferToBase64(videoData.buffer),
+          },
+        };
+      }
+    }
+  }
+
+  if (!inlineVideo) {
+    // There is no text-only putting fallback. Without the stroke itself, any
+    // observation would be invention from equipment identity alone.
+    console.error("[analyze-swing] putting requires video");
+    await markFailed();
+    return NextResponse.json(
+      { error: "We couldn't read your video. Please try again." },
+      { status: 500 },
+    );
+  }
+
+  let puttingParsed: unknown;
+  try {
+    const puttingModel = new GoogleGenerativeAI(puttingApiKey).getGenerativeModel({
+      model: "gemini-2.5-flash",
+      systemInstruction: PUTTING_SYSTEM_INSTRUCTION,
+    });
+    const equipmentContext = buildTrustedEquipmentContext(analysisRow.equipment_snapshot);
+    const puttingResult = await puttingModel.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [inlineVideo, { text: buildPuttingUserPrompt(equipmentContext) }],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: PUTTING_RESPONSE_SCHEMA,
+        temperature: 0.0,
+        maxOutputTokens: 4096,
+      },
+    });
+    // Deliberately not named rawText, and never logged.
+    const puttingRawText = puttingResult.response.text();
+    puttingParsed = JSON.parse(puttingRawText);
+  } catch {
+    await markFailed();
+    return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
+  }
+
+  const puttingValidated = validatePuttingModelResponse(puttingParsed);
+  if (!puttingValidated.ok) {
+    // The rejection reason is an internal diagnostic: never logged, never returned.
+    console.error("[analyze-swing] putting response rejected");
+    await markFailed();
+    return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
+  }
+
+  const { data: puttingUpdated, error: puttingSaveError } = await supabase
+    .from("swing_analysis")
+    .update({
+      status: "complete",
+      putting_analysis: buildPersistedPuttingAnalysis(puttingValidated.response),
+    })
+    .eq("id", analysisId)
+    .select()
+    .single();
+
+  if (puttingSaveError) {
+    await markFailed();
+    return NextResponse.json(
+      { error: "We couldn't save your analysis. Please try again." },
+      { status: 400 },
+    );
+  }
+
+  return NextResponse.json({ message: "Analysis complete", data: puttingUpdated });
+}
+
+
 // ── POST handler ──────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -480,11 +639,8 @@ export async function POST(req: NextRequest) {
   // exactly as it was found and emits no claim that Gemini is being re-run.
   const analysisRoute = classifyAnalysisFamilyRoute(analysisRow.analysis_family);
 
-  if (analysisRoute === "putting_unavailable") {
-    return NextResponse.json(
-      { error: PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE },
-      { status: 503 },
-    );
+  if (analysisRoute === "putting_pipeline") {
+    return await runPuttingAnalysis(supabase, analysisRow, analysisId);
   }
 
   if (analysisRoute === "unsupported_family") {
@@ -515,7 +671,7 @@ export async function POST(req: NextRequest) {
     console.error("[analyze-swing] mark-processing update failed");
   }
 
-  const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY;
+  const geminiKey = resolveGeminiKey();
   console.log("[analyze-swing] Gemini key configured:", !!geminiKey);
   if (!geminiKey) {
     console.error("[analyze-swing] FATAL: no Gemini API key — set GEMINI_API_KEY or GOOGLE_AI_API_KEY in Vercel env vars");

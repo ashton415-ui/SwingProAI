@@ -459,9 +459,14 @@ describe("analyze-swing functional anchors", () => {
     expect(apiSource).toContain('{ message: "Analysis complete", data: updated }');
   });
 
-  it("allows the database-authored analysis family without reopening the EQ3-S1 equipment boundary", () => {
+  it("reads the database-authored routing context without reopening the EQ3-S1 equipment boundary", () => {
     expect(apiSource).not.toContain("club_id");
     expect(apiSource).toContain("analysisRow.analysis_family");
-    expect(apiSource).not.toContain("equipment_snapshot");
+    // EQ5B-S1 supplies the putting prompt with the immutable snapshot. Reading
+    // it is required; authoring or writing it stays forbidden.
+    expect(apiSource).toContain("analysisRow.equipment_snapshot");
+    // A write would appear as an object property; the reads never do.
+    expect(apiSource).not.toMatch(/\bequipment_snapshot\s*:/);
+    expect(apiSource).not.toContain("analysis_family:");
   });
 });

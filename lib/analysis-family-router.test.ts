@@ -66,8 +66,7 @@ const consoleLines = apiSource
   .split("\n")
   .filter((line) => line.includes("console."));
 
-const PUTTING_COPY =
-  "Putting analysis is coming soon. To avoid an incorrect full-swing report, this video can't be analyzed yet.";
+const PUTTING_COPY = "Putting analysis is coming soon.";
 const UNSUPPORTED_COPY = "Analysis failed. Please try again.";
 
 // ─── PART A — the pure classifier ────────────────────────────────────────────
@@ -87,8 +86,8 @@ describe("EQ5A analysis-family router — pure classification", () => {
     expect(classifyAnalysisFamilyRoute(null)).toBe("full_swing_pipeline");
   });
 
-  it("routes a putting family to the pre-EQ5B unavailable branch", () => {
-    expect(classifyAnalysisFamilyRoute("putting")).toBe("putting_unavailable");
+  it("routes a putting family to the server putting pipeline", () => {
+    expect(classifyAnalysisFamilyRoute("putting")).toBe("putting_pipeline");
   });
 
   /**
@@ -192,12 +191,11 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
     );
   });
 
-  it("refuses putting with the fixed pre-EQ5B copy and a 503", () => {
-    const branch = anchor('analysisRoute === "putting_unavailable"');
+  it("hands a putting family to the server putting pipeline", () => {
+    const branch = anchor('analysisRoute === "putting_pipeline"');
     const rest = handlerSource.slice(branch);
-    expect(rest).toContain("{ error: PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE }");
-    expect(rest.slice(0, 400)).toContain("{ status: 503 }");
-    expect(apiSource).toContain(PUTTING_COPY);
+    expect(rest.slice(0, 200)).toContain("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    expect(apiSource).toContain("async function runPuttingAnalysis(");
   });
 
   it("refuses an unsupported family with the fixed generic copy and a 500", () => {
@@ -213,10 +211,12 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
    * URL, no video download, no model call.
    */
   it("refuses before every full-swing execution anchor", () => {
-    const putting = anchor('analysisRoute === "putting_unavailable"');
+    const putting = anchor('analysisRoute === "putting_pipeline"');
     const unsupported = anchor('analysisRoute === "unsupported_family"');
     for (const site of [
-      "process.env.GEMINI_API_KEY",
+      // The credential now resolves through a route-local getter at the same
+      // runtime position; the precedence itself is asserted separately.
+      "const geminiKey = resolveGeminiKey()",
       "extractSwingMetrics(",
       "createSignedUrl(",
       "await fetchVideoBytes(",
@@ -252,8 +252,10 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
 
   it("never writes the immutable equipment routing context", () => {
     expect(apiSource).not.toContain("club_id");
-    expect(apiSource).not.toContain("equipment_snapshot");
-    // A write would appear as an object property; the read never does.
+    // EQ5B-S1 reads the immutable snapshot for the putting prompt.
+    expect(apiSource).toContain("analysisRow.equipment_snapshot");
+    // A write would appear as an object property; the reads never do.
+    expect(apiSource).not.toMatch(/\bequipment_snapshot\s*:/);
     expect(apiSource).not.toContain("analysis_family:");
     expect(apiSource).toContain("analysisRow.analysis_family");
   });
@@ -274,12 +276,97 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
     for (const copy of [PUTTING_COPY, UNSUPPORTED_COPY]) {
       expect(copy).not.toContain("analysis_family");
       expect(copy).not.toContain("full_swing");
-      expect(copy).not.toContain("putting_unavailable");
+      expect(copy).not.toContain("putting_pipeline");
     }
     expect(apiSource).toContain('model: "gemini-2.5-flash"');
     expect(apiSource).toContain("SYSTEM_INSTRUCTION");
     expect(apiSource).toContain("RESPONSE_SCHEMA");
     expect(apiSource).toContain("temperature: 0.0");
     expect(apiSource).toContain("maxOutputTokens: 8192");
+  });
+});
+
+// ─── PART C — the EQ5B-S1 putting pipeline contract ──────────────────────────
+
+/** The route-local putting helper only. Ordering inside it must be judged
+ *  against its own body, not against the full-swing handler. */
+const puttingHelperSource = (() => {
+  const start = apiSource.indexOf("async function runPuttingAnalysis(");
+  if (start < 0) throw new Error("runPuttingAnalysis not found in the Analyze API route");
+  const end = apiSource.indexOf("export async function POST(", start);
+  if (end < 0) throw new Error("POST handler not found after the putting helper");
+  return apiSource.slice(start, end);
+})();
+
+function puttingAnchor(needle: string): number {
+  const index = puttingHelperSource.indexOf(needle);
+  expect(index, `missing putting anchor: ${needle}`).toBeGreaterThanOrEqual(0);
+  return index;
+}
+
+describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
+  it("checks the semantically valid cache before any mutation or model call", () => {
+    const cache = puttingAnchor("isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)");
+    expect(cache).toBeLessThan(puttingAnchor('status: "processing"'));
+    expect(cache).toBeLessThan(puttingAnchor("generateContent("));
+    expect(puttingHelperSource.slice(cache, cache + 400)).toContain(
+      '{ message: "Analysis complete", data: analysisRow }',
+    );
+  });
+
+  it("never reaches the model when the processing state cannot be recorded", () => {
+    const failure = puttingAnchor("if (puttingProcessingError) {");
+    expect(failure).toBeLessThan(puttingAnchor("generateContent("));
+    expect(puttingHelperSource.slice(failure, failure + 500)).toContain("await markFailed();");
+  });
+
+  it("requires usable video bytes before the model is called", () => {
+    expect(puttingAnchor("createSignedUrl(")).toBeLessThan(puttingAnchor("generateContent("));
+    expect(puttingAnchor("await fetchVideoBytes(")).toBeLessThan(puttingAnchor("generateContent("));
+    const noVideo = puttingAnchor("if (!inlineVideo) {");
+    expect(noVideo).toBeLessThan(puttingAnchor("generateContent("));
+    expect(puttingHelperSource.slice(noVideo, noVideo + 500)).toContain(
+      '"[analyze-swing] putting requires video"',
+    );
+  });
+
+  it("borrows no full-swing biomechanics or client metrics", () => {
+    for (const banned of ["clientMetrics", "extractSwingMetrics(", "buildMetricsContext(", "mediapipeMetrics"]) {
+      expect(puttingHelperSource, `putting must not use ${banned}`).not.toContain(banned);
+    }
+  });
+
+  it("writes exactly status and putting_analysis on success", () => {
+    const write = puttingAnchor("putting_analysis: buildPersistedPuttingAnalysis(");
+    const update = puttingHelperSource.lastIndexOf(".update({", write);
+    expect(update).toBeGreaterThanOrEqual(0);
+    const payload = puttingHelperSource.slice(update, write + 200);
+    expect(payload).toContain('status: "complete"');
+    for (const banned of [
+      "putt_analytics",
+      "putt_tempo_ratio",
+      "face_angle_at_impact_deg",
+      "path_deviation_mm",
+      "equipment_snapshot:",
+      "analysis_family:",
+      "club_id",
+      "analysis_mode",
+      "model_used",
+      "swing_highlights",
+      "mechanical_deficiencies",
+    ]) {
+      expect(payload, `putting success write must not contain ${banned}`).not.toContain(banned);
+    }
+  });
+
+  it("persists only after structural and semantic validation succeed", () => {
+    const validate = puttingAnchor("validatePuttingModelResponse(puttingParsed)");
+    const reject = puttingAnchor("if (!puttingValidated.ok) {");
+    const build = puttingAnchor("buildPersistedPuttingAnalysis(puttingValidated.response)");
+    expect(validate).toBeLessThan(reject);
+    expect(reject).toBeLessThan(build);
+    expect(puttingHelperSource.slice(reject, build)).toContain(
+      '"[analyze-swing] putting response rejected"',
+    );
   });
 });

@@ -14,7 +14,7 @@
 
 export type AnalysisFamilyRoute =
   | "full_swing_pipeline"
-  | "putting_unavailable"
+  | "putting_pipeline"
   | "unsupported_family";
 
 /**
@@ -48,7 +48,7 @@ export function classifyAnalysisFamilyRoute(
   }
 
   if (value === "putting") {
-    return "putting_unavailable";
+    return "putting_pipeline";
   }
 
   return "unsupported_family";
