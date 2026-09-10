@@ -191,11 +191,65 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
     );
   });
 
-  it("hands a putting family to the server putting pipeline", () => {
+  /**
+   * This test once required the pipeline call to appear within 200 characters
+   * of the putting branch. That was a way of saying "nothing runs in between",
+   * and it held only while nothing needed to. EQ5C-B puts the execution
+   * entitlement gate exactly there, so the character budget is retired and the
+   * ordering it stood for is asserted directly instead — which is the stronger
+   * statement, because it names what must run in between rather than forbidding
+   * everything.
+   */
+  it("hands a putting family to the server putting pipeline, behind the entitlement gate", () => {
     const branch = anchor('analysisRoute === "putting_pipeline"');
     const rest = handlerSource.slice(branch);
-    expect(rest.slice(0, 200)).toContain("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+
+    expect(rest).toContain("runPuttingAnalysis(supabase, analysisRow, analysisId)");
     expect(apiSource).toContain("async function runPuttingAnalysis(");
+
+    // Inside the branch, in this order: read the tier, narrow it, judge it,
+    // then run. Any reordering breaks one of these comparisons.
+    const tierQuery = rest.indexOf('.select("subscription_tier")');
+    const narrowing = rest.indexOf("isSubscriptionTier(");
+    const entitlement = rest.indexOf("canUsePuttingAnalysis(");
+    const pipeline = rest.indexOf("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+
+    expect(tierQuery, "the putting branch must read the current tier").toBeGreaterThanOrEqual(0);
+    expect(narrowing, "the stored tier must be narrowed before use").toBeGreaterThan(tierQuery);
+    expect(entitlement, "entitlement must be judged after narrowing").toBeGreaterThan(narrowing);
+    expect(pipeline, "the pipeline must run only after the gate").toBeGreaterThan(entitlement);
+  });
+
+  /**
+   * The gate has to sit outside runPuttingAnalysis, because every putting side
+   * effect — the cached-result early return first among them — lives inside it.
+   * A gate placed within the helper would run after the cache had already
+   * answered.
+   */
+  it("gates before the helper, so the putting cache cannot answer first", () => {
+    const gate = anchor("canUsePuttingAnalysis(");
+    const call = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    expect(gate).toBeLessThan(call);
+
+    expect(puttingHelperSource).not.toContain("canUsePuttingAnalysis");
+    expect(puttingHelperSource).not.toContain('.select("subscription_tier")');
+    expect(puttingHelperSource).toContain(
+      "isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)",
+    );
+  });
+
+  it("leaves the other two families free of the putting entitlement", () => {
+    // Scoped to each branch: only putting pays for putting.
+    const putting = anchor('analysisRoute === "putting_pipeline"');
+    const unsupported = anchor('analysisRoute === "unsupported_family"');
+    const puttingBranch = handlerSource.slice(putting, unsupported);
+    const afterPutting = handlerSource.slice(unsupported);
+
+    expect(puttingBranch).toContain("canUsePuttingAnalysis(");
+    expect(afterPutting, "full swing and unsupported must not consult it").not.toContain(
+      "canUsePuttingAnalysis(",
+    );
+    expect(afterPutting).not.toContain('.select("subscription_tier")');
   });
 
   it("refuses an unsupported family with the fixed generic copy and a 500", () => {

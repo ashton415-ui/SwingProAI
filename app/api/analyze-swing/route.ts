@@ -26,6 +26,7 @@ import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-
 import { createClient } from "@/utils/supabase/server";
 import { extractSwingMetrics } from "@/lib/biometrics";
 import { classifyAnalysisFamilyRoute } from "@/lib/analysis-family-router";
+import { canUsePuttingAnalysis, type SubscriptionTier } from "@/lib/entitlements";
 import {
   PUTTING_RESPONSE_SCHEMA,
   PUTTING_SYSTEM_INSTRUCTION,
@@ -437,6 +438,32 @@ these values are computer-vision measurements and must be preserved verbatim. Yo
 is to INTERPRET and DIAGNOSE these numbers in your prose, not to recalculate them.
 `.trim();
 
+// ── EQ5C-B subscription-tier narrowing ───────────────────────────────────────
+//
+// The tier arrives from a database column, so it is untrusted transport however
+// the type system describes it. It is recognised by a positive allow-list and
+// narrowed by a real type guard: an unknown, renamed or malformed value can
+// never reach canUsePuttingAnalysis, and there is no cast that could grant
+// access to one. A missing member here fails closed, which is the safe
+// direction.
+//
+// This lives above the putting pipeline rather than beside it because it is
+// POST-handler infrastructure, not part of runPuttingAnalysis — and the gate it
+// serves has to sit outside that helper to be worth anything.
+
+const SUBSCRIPTION_TIERS: readonly SubscriptionTier[] = [
+  "par",
+  "birdie",
+  "eagle",
+  "coach_starter",
+  "coach_pro",
+  "none",
+];
+
+function isSubscriptionTier(value: unknown): value is SubscriptionTier {
+  return typeof value === "string" && SUBSCRIPTION_TIERS.some((tier) => tier === value);
+}
+
 // ── EQ5B-S1 putting pipeline ─────────────────────────────────────────────────
 //
 // Reached only when the database-authored family on the owned row is "putting".
@@ -640,6 +667,57 @@ export async function POST(req: NextRequest) {
   const analysisRoute = classifyAnalysisFamilyRoute(analysisRow.analysis_family);
 
   if (analysisRoute === "putting_pipeline") {
+    // EQ5C-B execution entitlement. Putting analysis is a paid capability, and
+    // this is the boundary that decides whether the work may run at all — the
+    // result page's own check decides only what may be displayed.
+    //
+    // The tier is read here, from the authenticated user's own row, because the
+    // request cannot be trusted to describe what its sender has paid for. Only
+    // subscription_tier is selected: nothing else about the golfer is needed to
+    // answer this question.
+    //
+    // The gate sits outside runPuttingAnalysis on purpose. Every putting side
+    // effect lives inside that helper — the cached-result early return first of
+    // all — so refusing before the call is what stops an unentitled golfer from
+    // reading back a premium result that a paid period once produced.
+    let currentTier: SubscriptionTier | null = null;
+    try {
+      const { data: profile, error: tierError } = await supabase
+        .from("users")
+        .select("subscription_tier")
+        .eq("id", user.id)
+        .single();
+
+      const storedTier: unknown = profile?.subscription_tier;
+      if (!tierError && isSubscriptionTier(storedTier)) {
+        currentTier = storedTier;
+      }
+    } catch {
+      // A thrown query must not fall through into execution as an absent tier
+      // would; both land on the same fail-closed branch below.
+      currentTier = null;
+    }
+
+    if (currentTier === null) {
+      // Missing row, query error, or an unrecognised value. The golfer is told
+      // nothing about which: the reason is a server concern, and the copy is
+      // the route's existing generic failure text.
+      return NextResponse.json(
+        { error: "Analysis failed. Please try again." },
+        { status: 500 },
+      );
+    }
+
+    if (!canUsePuttingAnalysis(currentTier)) {
+      return NextResponse.json(
+        {
+          error:
+            "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
+        },
+        { status: 403 },
+      );
+    }
+
     return await runPuttingAnalysis(supabase, analysisRow, analysisId);
   }
 
