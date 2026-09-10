@@ -2,10 +2,15 @@ import { createClient, getServerSession } from "@/utils/supabase/server";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle, AlertTriangle, Zap, Clock } from "lucide-react";
-import { PuttingAnalysisPanel } from "@/components/putting/PuttingAnalysisPanel";
+import {
+  PuttingAnalysisPanel,
+  type PuttingResultState,
+} from "@/components/putting/PuttingAnalysisPanel";
 import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
 import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
 import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
+import { canUsePuttingAnalysis } from "@/lib/entitlements";
+import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
 
@@ -67,6 +72,47 @@ export default async function SwingDetailPage({
   // Database-owned analysis family for putting results
   const isPutt = swing.analysis_family === "putting";
 
+  const isAwaitingResult = swing.status === "processing" || swing.status === "pending";
+
+  // ── EQ5C-A putting result state — decided here, on the server ───────────────
+  //
+  // Entitlement and validity are both settled before any prop is built, because
+  // a prop handed to a Client Component is serialized into the RSC payload and
+  // reaches the browser whatever the component chooses to render. Hiding a
+  // premium narrative client-side would ship it anyway, so an unentitled tier is
+  // never given one: "locked" carries no analysis, and neither does
+  // "unavailable".
+  //
+  // The stored jsonb is untrusted transport. It is read as
+  // Record<string, unknown> | null and only becomes a typed contract by passing
+  // isPersistedPuttingAnalysisV1 — the same predicate the analysis pipeline uses
+  // for its cache, so a payload written by an older or looser validator can
+  // never be displayed. A ready state is unreachable without both checks.
+  //
+  // While the row is still processing or queued, no panel is rendered at all:
+  // the shared status banner already says so, and calling an unfinished
+  // analysis "unavailable" would be wrong rather than merely unhelpful.
+  //
+  // Success is then required positively. status is unconstrained text on
+  // swing_analysis -- there is no CHECK constraint and the TypeScript type is a
+  // bare string -- so "not processing and not pending" is a deny-list over a
+  // column that can hold anything, and every value nobody thought to exclude
+  // would fall through to a rendered result. It only takes "complete". A stored
+  // payload is never cleared when a later run fails, so a failed row can still
+  // carry a valid envelope; presenting that as a finished report would tell the
+  // golfer their analysis succeeded when it did not.
+  const rawPuttingAnalysis = (swing.putting_analysis ?? null) as Record<string, unknown> | null;
+
+  const puttingState: PuttingResultState | null = (() => {
+    if (!canUsePuttingAnalysis(tier)) return { status: "locked" };
+    if (isAwaitingResult) return null;
+    if (swing.status !== "complete") return { status: "unavailable" };
+    if (isPersistedPuttingAnalysisV1(rawPuttingAnalysis)) {
+      return { status: "ready", analysis: rawPuttingAnalysis };
+    }
+    return { status: "unavailable" };
+  })();
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
       <Link
@@ -97,125 +143,133 @@ export default async function SwingDetailPage({
         </div>
       </div>
 
-      {/* Metrics Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
-        {metricCards.map((m) => (
-          <div key={m.label} className="bg-golf-surface border border-white/5 rounded-4xl p-6">
-            <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-3">{m.label}</p>
-            <p className={`text-3xl font-mono font-black italic tracking-tighter ${
-              m.label === "Swing Score"
-                ? (m.value ?? 0) >= 80
-                  ? "text-golf-green"
-                  : (m.value ?? 0) >= 60
-                  ? "text-yellow-400"
-                  : "text-red-400"
-                : "text-white"
-            }`}>
-              {m.value != null ? `${m.value}${m.unit}` : "—"}
-            </p>
-            <p className="text-[9px] text-golf-green font-bold uppercase mt-2 tracking-widest">
-              Ideal: {m.ideal}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      {/* Scoring Math — chain-of-thought breakdown from the AI */}
-      {scoringBreakdown && (
-        <div className="bg-golf-surface border border-white/5 rounded-4xl px-6 py-4 mb-6">
-          <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-1">Scoring Math</p>
-          <p className="text-xs text-gray-400 font-mono leading-relaxed">{scoringBreakdown}</p>
-        </div>
-      )}
-
-      {/* AI Feedback */}
-      {swing.feedback && (
-        <div className="bg-black/40 border border-golf-green/20 rounded-5xl p-8 mb-6 relative overflow-hidden">
-          <div className="absolute top-0 right-0 p-6 opacity-5">
-            <Zap className="w-20 h-20 text-golf-green" />
-          </div>
-          <h3 className="text-[10px] font-black text-golf-green uppercase tracking-[0.2em] mb-5 flex items-center gap-2">
-            <Zap size={12} />
-            AI Coach Feedback
-          </h3>
-          <p className="text-gray-300 leading-relaxed text-sm">{swing.feedback}</p>
-        </div>
-      )}
-
-      {/* Deep prose summary */}
-      {detailedHtml && (
-        <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
-          <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-5 flex items-center gap-2">
-            <Zap size={12} className="text-golf-green" />
-            Deep Biomechanical Audit
-          </h3>
-          <div
-            className="prose-swing text-sm text-gray-300 leading-relaxed space-y-3 [&_h4]:text-white [&_h4]:font-black [&_h4]:uppercase [&_h4]:tracking-widest [&_h4]:text-[11px] [&_h4]:mt-4 [&_strong]:text-white [&_ul]:list-disc [&_ul]:pl-5 [&_li]:mt-1"
-            dangerouslySetInnerHTML={{ __html: detailedHtml }}
-          />
-        </div>
-      )}
-
-      {/* v4: Swing Highlights */}
-      <div className="mb-6">
-        <SwingHighlightsPanel tier={tier} highlights={highlights} />
-      </div>
-
-      {/* v4: Mechanical Deficiencies */}
-      <div className="mb-6">
-        <MechanicalDeficienciesPanel tier={tier} deficiencies={deficiencies} />
-      </div>
-
-      {/* Putting Analysis — existing panel (numeric metrics) */}
-      {isPutt && (
-        <PuttingAnalysisPanel
-          tier={tier}
-          metrics={{
-            puttTempoRatio: swing.putt_tempo_ratio ?? null,
-            faceAngleAtImpactDeg: swing.face_angle_at_impact_deg ?? null,
-            pathDeviationMm: swing.path_deviation_mm ?? null,
-          }}
-        />
-      )}
-
-      {/* v5: Equipment Recommendations — Birdie/Eagle gated */}
-      <div className="mb-6">
-        <EquipmentRecommendations
-          fitting={hasEquipmentFitting ? equipmentFitting : null}
-          tier={tier === "coach_starter" || tier === "coach_pro" ? "birdie" : tier === "none" ? "par" : tier}
-        />
-      </div>
-
-      {/* Suggestions */}
-      {suggestions && suggestions.length > 0 && (
-        <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
-          <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-6">
-            Improvement Protocols
-          </h3>
-          <ul className="space-y-4">
-            {suggestions.map((tip: string, i: number) => (
-              <li key={i} className="flex items-start gap-3 text-sm text-gray-300">
-                <CheckCircle size={16} className="text-golf-green mt-0.5 shrink-0" />
-                {tip}
-              </li>
+      {isPutt ? (
+        /* PUTTING RESULT REGION — the whole report for a putting row. The
+           full-swing report below is not rendered at all for this family: its
+           score, tempo, speed and biomechanics were never measured on a putt,
+           so showing those cards as dashes under full-swing ideal ranges would
+           claim six attempted measurements that do not exist. */
+        <>
+          {puttingState && (
+            <div className="mb-6">
+              <PuttingAnalysisPanel state={puttingState} />
+            </div>
+          )}
+        </>
+      ) : (
+        /* FULL SWING REPORT REGION — unchanged. Reached by analysis_family
+           "full_swing" and by a null family, which remains the established
+           full-swing compatibility path. */
+        <>
+          {/* Metrics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
+            {metricCards.map((m) => (
+              <div key={m.label} className="bg-golf-surface border border-white/5 rounded-4xl p-6">
+                <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-3">{m.label}</p>
+                <p className={`text-3xl font-mono font-black italic tracking-tighter ${
+                  m.label === "Swing Score"
+                    ? (m.value ?? 0) >= 80
+                      ? "text-golf-green"
+                      : (m.value ?? 0) >= 60
+                      ? "text-yellow-400"
+                      : "text-red-400"
+                    : "text-white"
+                }`}>
+                  {m.value != null ? `${m.value}${m.unit}` : "—"}
+                </p>
+                <p className="text-[9px] text-golf-green font-bold uppercase mt-2 tracking-widest">
+                  Ideal: {m.ideal}
+                </p>
+              </div>
             ))}
-          </ul>
-        </div>
+          </div>
+
+          {/* Scoring Math — chain-of-thought breakdown from the AI */}
+          {scoringBreakdown && (
+            <div className="bg-golf-surface border border-white/5 rounded-4xl px-6 py-4 mb-6">
+              <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-1">Scoring Math</p>
+              <p className="text-xs text-gray-400 font-mono leading-relaxed">{scoringBreakdown}</p>
+            </div>
+          )}
+
+          {/* AI Feedback */}
+          {swing.feedback && (
+            <div className="bg-black/40 border border-golf-green/20 rounded-5xl p-8 mb-6 relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-6 opacity-5">
+                <Zap className="w-20 h-20 text-golf-green" />
+              </div>
+              <h3 className="text-[10px] font-black text-golf-green uppercase tracking-[0.2em] mb-5 flex items-center gap-2">
+                <Zap size={12} />
+                AI Coach Feedback
+              </h3>
+              <p className="text-gray-300 leading-relaxed text-sm">{swing.feedback}</p>
+            </div>
+          )}
+
+          {/* Deep prose summary */}
+          {detailedHtml && (
+            <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
+              <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-5 flex items-center gap-2">
+                <Zap size={12} className="text-golf-green" />
+                Deep Biomechanical Audit
+              </h3>
+              <div
+                className="prose-swing text-sm text-gray-300 leading-relaxed space-y-3 [&_h4]:text-white [&_h4]:font-black [&_h4]:uppercase [&_h4]:tracking-widest [&_h4]:text-[11px] [&_h4]:mt-4 [&_strong]:text-white [&_ul]:list-disc [&_ul]:pl-5 [&_li]:mt-1"
+                dangerouslySetInnerHTML={{ __html: detailedHtml }}
+              />
+            </div>
+          )}
+
+          {/* v4: Swing Highlights */}
+          <div className="mb-6">
+            <SwingHighlightsPanel tier={tier} highlights={highlights} />
+          </div>
+
+          {/* v4: Mechanical Deficiencies */}
+          <div className="mb-6">
+            <MechanicalDeficienciesPanel tier={tier} deficiencies={deficiencies} />
+          </div>
+
+          {/* v5: Equipment Recommendations — Birdie/Eagle gated */}
+          <div className="mb-6">
+            <EquipmentRecommendations
+              fitting={hasEquipmentFitting ? equipmentFitting : null}
+              tier={tier === "coach_starter" || tier === "coach_pro" ? "birdie" : tier === "none" ? "par" : tier}
+            />
+          </div>
+
+          {/* Suggestions */}
+          {suggestions && suggestions.length > 0 && (
+            <div className="bg-golf-surface border border-white/5 rounded-5xl p-8 mb-6">
+              <h3 className="text-[10px] font-black text-white uppercase tracking-widest mb-6">
+                Improvement Protocols
+              </h3>
+              <ul className="space-y-4">
+                {suggestions.map((tip: string, i: number) => (
+                  <li key={i} className="flex items-start gap-3 text-sm text-gray-300">
+                    <CheckCircle size={16} className="text-golf-green mt-0.5 shrink-0" />
+                    {tip}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Raw metrics dump */}
+          {metrics && Object.keys(metrics).length > 0 && !suggestions && (
+            <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 mb-6">
+              <h3 className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-4">
+                Raw Telemetry
+              </h3>
+              <pre className="text-[10px] font-mono text-gray-500 overflow-x-auto">
+                {JSON.stringify(metrics, null, 2)}
+              </pre>
+            </div>
+          )}
+        </>
       )}
 
-      {/* Raw metrics dump */}
-      {metrics && Object.keys(metrics).length > 0 && !suggestions && (
-        <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 mb-6">
-          <h3 className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-4">
-            Raw Telemetry
-          </h3>
-          <pre className="text-[10px] font-mono text-gray-500 overflow-x-auto">
-            {JSON.stringify(metrics, null, 2)}
-          </pre>
-        </div>
-      )}
-
-      {/* Status banners */}
+      {/* SHARED STATUS REGION — family-neutral, and identical for both. */}
       {swing.status === "processing" && (
         <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-yellow-400 shrink-0" />

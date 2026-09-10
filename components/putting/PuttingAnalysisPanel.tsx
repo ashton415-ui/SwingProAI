@@ -1,296 +1,268 @@
 "use client";
 
 import Link from "next/link";
-import { Lock, Activity, Target, BarChart2, Zap, TrendingUp } from "lucide-react";
-import type { SubscriptionTier } from "@/lib/entitlements";
-import { canUseLaunchMonitor } from "@/lib/entitlements";
+import { Lock, Activity, Zap, Info } from "lucide-react";
+import type {
+  PersistedPuttingAnalysisV1,
+  PuttingSection,
+} from "@/lib/putting-analysis-contract";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+// ─── Presentation contract (EQ5C-A) ───────────────────────────────────────────
+//
+// This component renders one server-decided state and nothing else. It holds no
+// tier, performs no entitlement calculation, and reads no putting column: the
+// swing-detail Server Component decides entitlement and validity, and only the
+// "ready" state carries a payload.
+//
+// That split is the security boundary, not a stylistic one. Props crossing a
+// Server -> Client boundary are serialized into the RSC flight payload and are
+// readable in the browser whatever the component renders, so an unentitled
+// golfer must never be handed the narrative to hide. "locked" and "unavailable"
+// carry no analysis at all.
+//
+// The payload type is imported with `import type` so this client bundle never
+// pulls in the contract module's Gemini SDK dependency.
 
-interface PuttingMetrics {
-  puttTempoRatio: number | null;        // backswing:through ratio (ideal ~2.0)
-  faceAngleAtImpactDeg: number | null;  // degrees open(+) or closed(-) at impact
-  pathDeviationMm: number | null;       // mm offline at 10 feet (lower = better)
-}
-
-interface GreenReading {
-  narrativeSummary?: string;
-  slopeDirection?: string;
-  recommendedEntry?: string;
-}
+export type PuttingResultState =
+  | { status: "locked" }
+  | { status: "unavailable" }
+  | { status: "ready"; analysis: PersistedPuttingAnalysisV1 };
 
 interface PuttingAnalysisPanelProps {
-  tier: SubscriptionTier;
-  metrics?: PuttingMetrics;
-  greenReading?: GreenReading;
-  isLoading?: boolean;
+  state: PuttingResultState;
 }
 
-// ─── Metric grades ─────────────────────────────────────────────────────────────
+// ─── Labels ───────────────────────────────────────────────────────────────────
 
-function gradeTempo(ratio: number): { label: string; color: string } {
-  if (ratio >= 1.8 && ratio <= 2.2) return { label: "Tour-ideal", color: "text-golf-green" };
-  if (ratio >= 1.5 && ratio < 1.8) return { label: "Slightly fast", color: "text-amber-400" };
-  if (ratio > 2.2 && ratio <= 2.5) return { label: "Slightly slow", color: "text-amber-400" };
-  return { label: "Out of rhythm", color: "text-red-400" };
-}
+/** Display order. Typed against the contract, so the Records below stop
+ *  compiling if the canonical section set ever changes. */
+const SECTION_ORDER: readonly PuttingSection[] = [
+  "setup_alignment",
+  "stroke_path",
+  "face_at_impact",
+  "tempo_rhythm",
+  "stroke_symmetry",
+  "stability",
+] as const;
 
-function gradeFaceAngle(deg: number): { label: string; color: string } {
-  const abs = Math.abs(deg);
-  if (abs < 1) return { label: "Square", color: "text-golf-green" };
-  if (abs < 2) return { label: deg > 0 ? "Slightly open" : "Slightly closed", color: "text-amber-400" };
-  return { label: deg > 0 ? "Open" : "Closed", color: "text-red-400" };
-}
+const SECTION_TITLES: Record<PuttingSection, string> = {
+  setup_alignment: "Setup & Alignment",
+  stroke_path: "Stroke Path",
+  face_at_impact: "Face at Impact",
+  tempo_rhythm: "Tempo & Rhythm",
+  stroke_symmetry: "Stroke Symmetry",
+  stability: "Stability",
+};
 
-function gradePathDeviation(mm: number): { label: string; color: string } {
-  if (mm <= 10) return { label: "Excellent", color: "text-golf-green" };
-  if (mm <= 20) return { label: "Good", color: "text-golf-green" };
-  if (mm <= 35) return { label: "Moderate drift", color: "text-amber-400" };
-  return { label: "Significant drift", color: "text-red-400" };
-}
+/**
+ * Every assessment value in the canonical vocabulary, mapped to golfer-facing
+ * copy. Two rules govern this table and neither is cosmetic:
+ *
+ *   1. The "appears_*" hedge survives into the label. The camera is
+ *      uncalibrated, so "Appears Open" is what the evidence supports and
+ *      "Open" is not.
+ *   2. "unclear" and "unavailable" are honest answers, not failures. They read
+ *      as "Unclear" and "Not Assessable" everywhere.
+ */
+const ASSESSMENT_LABELS: Record<PuttingSection, Readonly<Record<string, string>>> = {
+  setup_alignment: {
+    sound: "Sound",
+    needs_attention: "Needs Attention",
+    unclear: "Unclear",
+    unavailable: "Not Assessable",
+  },
+  stroke_path: {
+    straight: "Straight",
+    in_to_out: "In-to-Out",
+    out_to_in: "Out-to-In",
+    arc: "Arcing",
+    unclear: "Unclear",
+    unavailable: "Not Assessable",
+  },
+  face_at_impact: {
+    appears_square: "Appears Square",
+    appears_open: "Appears Open",
+    appears_closed: "Appears Closed",
+    unclear: "Unclear",
+    unavailable: "Not Assessable",
+  },
+  tempo_rhythm: {
+    smooth: "Smooth",
+    rushed: "Rushed",
+    decelerating: "Decelerating",
+    uneven: "Uneven",
+    unclear: "Unclear",
+    unavailable: "Not Assessable",
+  },
+  stroke_symmetry: {
+    balanced: "Balanced",
+    backswing_dominant: "Backswing-Dominant",
+    through_stroke_dominant: "Through-Stroke-Dominant",
+    uneven: "Uneven",
+    unclear: "Unclear",
+    unavailable: "Not Assessable",
+  },
+  stability: {
+    stable: "Stable",
+    head_motion: "Head Motion",
+    lower_body_motion: "Lower-Body Motion",
+    mixed_motion: "Mixed Motion",
+    unclear: "Unclear",
+    unavailable: "Not Assessable",
+  },
+};
 
-// ─── Topography grid (visual only) ─────────────────────────────────────────────
+/** Fixed copy for a section the video could not support. The absence of an
+ *  observation is reported as itself — never filled with substitute analysis. */
+const NOT_ASSESSABLE_NOTE = "This section could not be assessed from the video.";
 
-function UndulationGrid({ summary }: { summary?: string }) {
-  // 5×5 visual representation of green tilt
-  const cells = [
-    [0, 1, 2, 1, 0],
-    [1, 2, 3, 2, 1],
-    [2, 3, 4, 3, 2],
-    [1, 2, 3, 2, 1],
-    [0, 1, 2, 1, 0],
-  ];
+/**
+ * The evidence basis in product language. The stored token is an internal
+ * value and is deliberately not surfaced; what a golfer needs is the meaning.
+ * It is context, not an error.
+ */
+const EVIDENCE_NOTE = "Qualitative observations from video — not calibrated measurements.";
 
-  const colors = [
-    "bg-blue-900/40",
-    "bg-blue-700/40",
-    "bg-golf-green/20",
-    "bg-amber-500/30",
-    "bg-red-500/30",
-  ];
+/** What the qualitative contract actually delivers. Nothing here promises a
+ *  measurement, a green read or a prescribed drill, because none is produced. */
+const LOCKED_CAPABILITIES: readonly string[] = [
+  "AI putting stroke analysis",
+  "Setup & alignment observations",
+  "Stroke-path tendencies",
+  "Face appearance at impact",
+  "Tempo & rhythm",
+  "Stroke symmetry",
+  "Stability",
+  "Primary finding",
+  "Practice focus",
+] as const;
 
+// ─── Shared chrome ────────────────────────────────────────────────────────────
+
+function PanelHeading() {
   return (
-    <div>
-      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">
-        Green Topography
+    <div className="flex items-center gap-2">
+      <Activity size={16} className="text-golf-green" />
+      <p className="text-[10px] font-black uppercase tracking-widest text-white">
+        Putting Analysis
       </p>
-      <div className="grid grid-cols-5 gap-0.5 mb-3 w-full max-w-[180px]">
-        {cells.flatMap((row, r) =>
-          row.map((val, c) => (
-            <div
-              key={`${r}-${c}`}
-              className={`h-6 rounded-sm ${colors[val]} border border-white/5`}
-              title={`Elevation ${val}`}
-            />
-          ))
-        )}
-      </div>
-      {summary && (
-        <p className="text-[10px] text-gray-400 leading-relaxed italic">{summary}</p>
-      )}
     </div>
   );
 }
 
-// ─── Component ─────────────────────────────────────────────────────────────────
+function SectionCard({
+  section,
+  value,
+}: {
+  section: PuttingSection;
+  value: { assessment: string; observation: string };
+}) {
+  const label = ASSESSMENT_LABELS[section][value.assessment] ?? "Not Assessable";
+  const observation = value.observation.trim();
 
-export function PuttingAnalysisPanel({
-  tier,
-  metrics,
-  greenReading,
-  isLoading = false,
-}: PuttingAnalysisPanelProps) {
-  const hasAccess = canUseLaunchMonitor(tier); // Birdie+ unlocks putting analysis
+  return (
+    <div className="bg-black/30 border border-white/5 rounded-2xl p-4">
+      <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">
+        {SECTION_TITLES[section]}
+      </p>
+      <p className="text-sm font-bold text-white mb-2">{label}</p>
+      <p className="text-xs text-gray-400 leading-relaxed">
+        {observation.length > 0 ? observation : NOT_ASSESSABLE_NOTE}
+      </p>
+    </div>
+  );
+}
 
-  // ── Locked preview (Par / none) ──
-  if (!hasAccess) {
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export function PuttingAnalysisPanel({ state }: PuttingAnalysisPanelProps) {
+  // ── Locked: no analysis reaches this branch at all ──
+  if (state.status === "locked") {
     return (
-      <div className="bg-black/40 border border-white/5 rounded-4xl overflow-hidden relative">
-        {/* Blurred preview */}
-        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-black/60 to-black/90 z-10" />
-        <div className="p-6 blur-sm pointer-events-none select-none">
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            {["Putt Tempo", "Face Angle", "Path Drift"].map((label) => (
-              <div key={label} className="bg-golf-surface rounded-2xl p-4 border border-white/5">
-                <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">{label}</p>
-                <p className="text-2xl font-mono font-black text-white">—</p>
-              </div>
-            ))}
-          </div>
-          <div className="bg-golf-surface rounded-2xl p-4 border border-white/5">
-            <div className="grid grid-cols-5 gap-0.5 mb-2">
-              {Array.from({ length: 25 }).map((_, i) => (
-                <div key={i} className="h-5 rounded-sm bg-white/5" />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Lock overlay */}
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center p-6 text-center">
+      <div className="bg-golf-surface border border-white/5 rounded-4xl p-6">
+        <div className="flex flex-col items-center text-center">
           <div className="w-12 h-12 bg-golf-green/10 border border-golf-green/20 rounded-2xl flex items-center justify-center mb-4">
             <Lock size={20} className="text-golf-green" />
           </div>
           <p className="font-black italic tracking-tighter text-white uppercase text-lg mb-1">
             Putting Analysis
           </p>
-          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-4">
-            Birdie & Eagle
-          </p>
           <p className="text-xs text-gray-500 max-w-xs leading-relaxed mb-5">
-            Unlock putt tempo ratios, face angle at impact, path deviation tracking, and AI green-reading topography.
+            Upgrade your plan to read the AI review of this putting stroke.
           </p>
           <div className="space-y-1.5 mb-6 w-full max-w-xs">
-            {["Putt stroke tempo ratio", "Face angle at impact (±°)", "Path deviation at 10ft", "AI green topography maps", "AI caddy aim-line suggestions"].map((f) => (
-              <div key={f} className="flex items-center gap-2 text-left">
+            {LOCKED_CAPABILITIES.map((capability) => (
+              <div key={capability} className="flex items-center gap-2 text-left">
                 <Zap size={10} className="text-golf-green shrink-0" fill="currentColor" />
-                <span className="text-[10px] text-gray-400">{f}</span>
+                <span className="text-[10px] text-gray-400">{capability}</span>
               </div>
             ))}
           </div>
-          <Link href="/upgrade"
-            className="px-6 py-3 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl text-[10px] hover:bg-[#22C55E] transition-all">
-            Upgrade to Birdie
+          <p className="text-[10px] text-gray-600 max-w-xs leading-relaxed mb-5">
+            {EVIDENCE_NOTE}
+          </p>
+          <Link
+            href="/upgrade"
+            className="px-6 py-3 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl text-[10px] hover:bg-[#22C55E] transition-all"
+          >
+            View Plans
           </Link>
         </div>
       </div>
     );
   }
 
-  // ── Loading state ──
-  if (isLoading) {
-    return (
-      <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 animate-pulse">
-        <div className="h-4 bg-white/5 rounded w-32 mb-4" />
-        <div className="grid grid-cols-3 gap-3">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="h-20 bg-white/5 rounded-2xl" />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // ── No data yet ──
-  if (!metrics?.puttTempoRatio && !metrics?.faceAngleAtImpactDeg && !metrics?.pathDeviationMm) {
+  // ── Unavailable: entitled, but there is no result this panel may trust ──
+  if (state.status === "unavailable") {
     return (
       <div className="bg-golf-surface border border-white/5 rounded-4xl p-6">
-        <div className="flex items-center gap-2 mb-4">
-          <Activity size={16} className="text-golf-green" />
-          <p className="text-[10px] font-black uppercase tracking-widest text-white">Putting Analysis</p>
+        <div className="mb-4">
+          <PanelHeading />
         </div>
-        <div className="text-center py-8">
-          <BarChart2 size={28} className="text-gray-700 mx-auto mb-3" />
-          <p className="text-[10px] font-mono uppercase tracking-widest text-gray-600">
-            Putting data will appear after AI processing
-          </p>
-          <p className="text-[10px] text-gray-700 mt-1">
-            Use the putting module in the mobile app to capture stroke data
+        <div className="flex items-start gap-3">
+          <Info size={16} className="text-gray-600 shrink-0 mt-0.5" />
+          <p className="text-xs text-gray-500 leading-relaxed">
+            This putting analysis isn&apos;t available to display. Record the stroke again to
+            get a fresh review.
           </p>
         </div>
       </div>
     );
   }
 
-  // ── Full paid view ──
-  const tempo = metrics.puttTempoRatio;
-  const face = metrics.faceAngleAtImpactDeg;
-  const path = metrics.pathDeviationMm;
-
-  const tempoGrade = tempo ? gradeTempo(tempo) : null;
-  const faceGrade = face !== null && face !== undefined ? gradeFaceAngle(face) : null;
-  const pathGrade = path ? gradePathDeviation(path) : null;
+  // ── Ready: a validated canonical payload ──
+  const { analysis } = state;
 
   return (
     <div className="bg-golf-surface border border-white/5 rounded-4xl p-6 space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Activity size={16} className="text-golf-green" />
-          <p className="text-[10px] font-black uppercase tracking-widest text-white">Putting Analysis</p>
-        </div>
-        <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${
-          tier === "eagle" ? "text-amber-400 bg-amber-400/10 border-amber-400/20" :
-          "text-blue-400 bg-blue-500/10 border-blue-500/20"
-        }`}>
-          {tier === "eagle" ? "Eagle Deep" : "Birdie AI"}
-        </span>
+      <PanelHeading />
+
+      <p className="text-sm text-gray-300 leading-relaxed">{analysis.summary}</p>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {SECTION_ORDER.map((section) => (
+          <SectionCard key={section} section={section} value={analysis[section]} />
+        ))}
       </div>
 
-      {/* Metric grid */}
-      <div className="grid grid-cols-3 gap-3">
-        {/* Tempo */}
-        <div className="bg-black/30 border border-white/5 rounded-2xl p-4">
-          <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2 flex items-center gap-1">
-            <TrendingUp size={10} /> Tempo
-          </p>
-          <p className={`text-2xl font-mono font-black italic ${tempoGrade?.color ?? "text-gray-500"}`}>
-            {tempo?.toFixed(1) ?? "—"}
-            <span className="text-[9px] text-gray-600 ml-1">:1</span>
-          </p>
-          <p className={`text-[9px] font-bold uppercase mt-1 ${tempoGrade?.color ?? "text-gray-600"}`}>
-            {tempoGrade?.label ?? "No data"}
-          </p>
-          <p className="text-[9px] text-gray-700 mt-0.5">Ideal: 2.0 : 1</p>
-        </div>
-
-        {/* Face angle */}
-        <div className="bg-black/30 border border-white/5 rounded-2xl p-4">
-          <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2 flex items-center gap-1">
-            <Target size={10} /> Face Angle
-          </p>
-          <p className={`text-2xl font-mono font-black italic ${faceGrade?.color ?? "text-gray-500"}`}>
-            {face !== null && face !== undefined
-              ? `${face > 0 ? "+" : ""}${face.toFixed(1)}°`
-              : "—"}
-          </p>
-          <p className={`text-[9px] font-bold uppercase mt-1 ${faceGrade?.color ?? "text-gray-600"}`}>
-            {faceGrade?.label ?? "No data"}
-          </p>
-          <p className="text-[9px] text-gray-700 mt-0.5">Ideal: ±0.5°</p>
-        </div>
-
-        {/* Path deviation */}
-        <div className="bg-black/30 border border-white/5 rounded-2xl p-4">
-          <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2 flex items-center gap-1">
-            <BarChart2 size={10} /> Path Drift
-          </p>
-          <p className={`text-2xl font-mono font-black italic ${pathGrade?.color ?? "text-gray-500"}`}>
-            {path?.toFixed(0) ?? "—"}
-            <span className="text-[9px] text-gray-600 ml-1">mm</span>
-          </p>
-          <p className={`text-[9px] font-bold uppercase mt-1 ${pathGrade?.color ?? "text-gray-600"}`}>
-            {pathGrade?.label ?? "No data"}
-          </p>
-          <p className="text-[9px] text-gray-700 mt-0.5">At 10 feet</p>
-        </div>
+      <div className="bg-black/30 border border-white/5 rounded-2xl p-4">
+        <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">
+          Primary Finding
+        </p>
+        <p className="text-sm text-gray-300 leading-relaxed">{analysis.primary_finding}</p>
       </div>
 
-      {/* Green topography — Eagle only */}
-      {(tier === "eagle" || tier === "coach_pro") && greenReading && (
-        <div className="bg-black/30 border border-white/5 rounded-2xl p-4">
-          <UndulationGrid summary={greenReading.narrativeSummary} />
-          {greenReading.recommendedEntry && (
-            <div className="mt-3 flex items-start gap-2 bg-golf-green/5 border border-golf-green/20 rounded-xl px-3 py-2">
-              <Target size={12} className="text-golf-green shrink-0 mt-0.5" />
-              <p className="text-[10px] text-gray-300">{greenReading.recommendedEntry}</p>
-            </div>
-          )}
-        </div>
-      )}
+      <div className="bg-black/30 border border-golf-green/20 rounded-2xl p-4">
+        <p className="text-[9px] font-black uppercase tracking-widest text-golf-green mb-2">
+          Practice Focus
+        </p>
+        <p className="text-sm text-gray-300 leading-relaxed">{analysis.practice_focus}</p>
+      </div>
 
-      {/* Birdie upsell for Eagle features */}
-      {tier === "birdie" && (
-        <div className="flex items-center justify-between bg-amber-400/5 border border-amber-400/20 rounded-2xl px-4 py-3">
-          <p className="text-[10px] text-gray-400">
-            <span className="text-amber-400 font-black">Eagle</span> — Green topography maps & AI caddy aim lines
-          </p>
-          <Link href="/upgrade"
-            className="text-[9px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300 whitespace-nowrap ml-3">
-            Upgrade →
-          </Link>
-        </div>
-      )}
+      <div className="flex items-start gap-2">
+        <Info size={12} className="text-gray-700 shrink-0 mt-0.5" />
+        <p className="text-[10px] text-gray-600 leading-relaxed">{EVIDENCE_NOTE}</p>
+      </div>
     </div>
   );
 }

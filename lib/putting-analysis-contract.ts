@@ -565,8 +565,16 @@ const NUMERIC_MEASUREMENT_KEYS: readonly string[] = [
  * earlier or looser validator would otherwise be served forever. The envelope is
  * checked exactly, then the embedded model content is run through the SAME
  * semantic core used on fresh output.
+ *
+ * The return type is a type predicate rather than a bare boolean. The runtime
+ * body is unchanged — every path still returns a boolean — but the annotation
+ * lets the EQ5C-A result consumer narrow untrusted `Record<string, unknown>`
+ * jsonb to this contract without a cast, so a ready putting result cannot be
+ * assembled from a payload that was never validated.
  */
-export function isPersistedPuttingAnalysisV1(value: unknown): boolean {
+export function isPersistedPuttingAnalysisV1(
+  value: unknown,
+): value is PersistedPuttingAnalysisV1 {
   if (!isPlainObject(value)) return false;
   for (const key of Object.keys(value)) {
     if (!PERSISTED_TOP_LEVEL_KEYS.includes(key)) return false;

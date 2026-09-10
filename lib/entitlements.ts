@@ -40,6 +40,33 @@ export function canUseLaunchMonitor(tier: SubscriptionTier): boolean {
   return ["birdie", "eagle", "coach_starter", "coach_pro"].includes(tier);
 }
 
+/**
+ * Premium putting analysis — its own product contract (EQ5C-A).
+ *
+ * Deliberately independent of every other helper in this file. It happens to
+ * grant the same four tiers as the launch-monitor capability today, and that
+ * is a coincidence of the current price sheet, not a relationship: putting
+ * access must be free to move without dragging launch-monitor access with it.
+ * So this never calls, aliases, wraps or derives from another helper, and the
+ * tier list is written out in full even though it currently repeats.
+ *
+ * The allow-list is positive on purpose. `tier` is typed, but it originates in
+ * a database column, so an unrecognised value can reach here at runtime; a
+ * deny-list would grant such a value access. Anything not named below is
+ * refused.
+ *
+ * Result visibility only. Server-side enforcement of putting *execution* is a
+ * separate boundary in the analysis API and is not implied by this helper.
+ */
+export function canUsePuttingAnalysis(tier: SubscriptionTier): boolean {
+  return (
+    tier === "birdie" ||
+    tier === "eagle" ||
+    tier === "coach_starter" ||
+    tier === "coach_pro"
+  );
+}
+
 /** Ultra-deep biomechanical report (Eagle / Coach Pro only) */
 export function canUseUltraDeepAnalysis(tier: SubscriptionTier): boolean {
   return tier === "eagle" || tier === "coach_pro";
