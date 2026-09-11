@@ -687,7 +687,7 @@ export default async function TelemetryPage() {
     supabase
       .from("swing_analysis")
       .select(`
-        id, status, score, feedback, created_at,
+        id, status, score, feedback, created_at, analysis_family,
         spine_angle, hip_rotation, shoulder_rotation,
         metrics, swing_highlights, mechanical_deficiencies,
         swing_video:swing_videos(club, original_filename)
@@ -711,7 +711,25 @@ export default async function TelemetryPage() {
   type RawHL    = { positive_movement?: unknown };
   type RawDF    = { fault_description?: unknown };
 
-  const swingLogs: SwingLog[] = (swingResult.data ?? []).map((r) => {
+  // EQ5C-C. Putting analyses leave the pipeline here, before anything
+  // downstream of them exists. This page is a full-swing analytical portal: it
+  // reads full-swing biomechanics, interprets a full-swing score and derives
+  // shaft, driver and ball recommendations from them. A putt produces none of
+  // those inputs, so letting one through would not merely look wrong — it
+  // would generate fitting advice from measurements that were never taken.
+  //
+  // Compatibility is a positive allow-list. Legacy rows written before the
+  // family column exists carry null and remain part of the established
+  // full-swing population; an unforeseen family value is excluded rather than
+  // admitted by default. The test is written in application code on purpose:
+  // a PostgREST predicate such as .neq("analysis_family", "putting") compares
+  // in SQL, where NULL <> 'putting' is unknown rather than true, and would
+  // silently discard every legacy row.
+  const fullSwingRows = (swingResult.data ?? []).filter(
+    (r) => r.analysis_family === null || r.analysis_family === "full_swing",
+  );
+
+  const swingLogs: SwingLog[] = fullSwingRows.map((r) => {
     const vid    = r.swing_video as unknown as RawVideo | RawVideo[];
     const video  = Array.isArray(vid) ? (vid[0] ?? null) : vid;
     const raw    = (r.metrics as Record<string, unknown> | null) ?? {};
@@ -785,9 +803,15 @@ export default async function TelemetryPage() {
     ...rangeLogs.map((d) => ({ kind: "range" as const, created_at: d.created_at, data: d })),
   ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-  const completedSwings  = swingLogs.filter((s) => s.status === "complete").length;
-  const avgScore = completedSwings > 0
-    ? Math.round(swingLogs.filter((s) => s.score != null).reduce((a, s) => a + (s.score ?? 0), 0) / completedSwings)
+  // EQ5C-C. Numerator and denominator must describe the same observations.
+  // The previous form summed only rows that carried a score but divided by
+  // every completed row, so a completed analysis with no score quietly pulled
+  // the average down. An absent score is not a zero.
+  const scoreObservations = swingLogs.flatMap((s) =>
+    typeof s.score === "number" && Number.isFinite(s.score) ? [s.score] : [],
+  );
+  const avgScore = scoreObservations.length
+    ? Math.round(scoreObservations.reduce((total, value) => total + value, 0) / scoreObservations.length)
     : null;
 
   return (

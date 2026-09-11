@@ -6,6 +6,55 @@ import Link from "next/link";
 import type { SwingAnalysis } from "@/types/database";
 import { Target, TrendingUp, Trophy, Calendar, ChevronRight, Zap, Filter, Activity } from "lucide-react";
 
+/**
+ * EQ5C-C — Progress Hub family safety.
+ *
+ * `analysis_family` is written by the database from the validated club at
+ * insert and is immutable afterwards. Three states exist: "putting",
+ * "full_swing", and null for the legacy rows that predate the column.
+ *
+ * Full-swing-derived numbers test for compatibility as a positive allow-list
+ * rather than as "not putting", so an unforeseen family value is left out of
+ * the averages instead of quietly counted into them. Legacy null rows remain
+ * inside the established full-swing population.
+ */
+function isFullSwingCompatible(swing: SwingAnalysis): boolean {
+  return swing.analysis_family === null || swing.analysis_family === "full_swing";
+}
+
+/**
+ * An observation exists only where the column holds a real finite number.
+ * This rejects null, NaN and Infinity alike — each would otherwise either
+ * poison an average or be substituted with a zero the golfer never produced.
+ */
+function isNumericObservation(value: number | null): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * The row's full-swing score, or null when it has none. A putting analysis
+ * has no full-swing score, so this is null for a putt even if the full-swing
+ * column somehow carries a value: a putt's mechanics are not scored on the
+ * full-swing scale, and showing that number would misdescribe the stroke.
+ */
+function fullSwingScore(swing: SwingAnalysis): number | null {
+  if (!isFullSwingCompatible(swing)) return null;
+  return isNumericObservation(swing.score) ? swing.score : null;
+}
+
+/**
+ * Score badge colour. Absent data renders neutral, never the red "poor" band —
+ * a measurement that does not exist is not a bad measurement. Real scores keep
+ * the established thresholds unchanged.
+ */
+function scoreBandClassName(swing: SwingAnalysis): string {
+  const score = fullSwingScore(swing);
+  if (score === null) return "text-gray-600 border-white/5";
+  if (score >= 80) return "text-golf-green border-golf-green/20";
+  if (score >= 60) return "text-yellow-400 border-yellow-400/20";
+  return "text-red-400 border-red-500/20";
+}
+
 export default async function DashboardPage() {
   const supabase = await createClient();
   const session = await getServerSession();
@@ -20,11 +69,24 @@ export default async function DashboardPage() {
     .limit(10) as { data: SwingAnalysis[] | null };
 
   const totalSwings = swings?.length ?? 0;
-  const avgTempo = swings?.length
-    ? (swings.reduce((s, a) => s + (a.tempo_ratio ?? 0), 0) / swings.length).toFixed(1)
+
+  // Each average owns its own eligibility set. score and tempo_ratio are
+  // independently nullable, so a shared denominator would let one metric's
+  // gaps depress the other. A row that is not full-swing-compatible, or that
+  // carries no real observation for this metric, contributes neither a value
+  // nor a denominator slot — it is absent, not zero.
+  const scoreObservations = (swings ?? []).flatMap((a) =>
+    isFullSwingCompatible(a) && isNumericObservation(a.score) ? [a.score] : [],
+  );
+  const tempoObservations = (swings ?? []).flatMap((a) =>
+    isFullSwingCompatible(a) && isNumericObservation(a.tempo_ratio) ? [a.tempo_ratio] : [],
+  );
+
+  const avgTempo = tempoObservations.length
+    ? (tempoObservations.reduce((total, value) => total + value, 0) / tempoObservations.length).toFixed(1)
     : null;
-  const avgScore = swings?.length
-    ? (swings.reduce((s, a) => s + (a.score ?? 0), 0) / swings.length).toFixed(0)
+  const avgScore = scoreObservations.length
+    ? (scoreObservations.reduce((total, value) => total + value, 0) / scoreObservations.length).toFixed(0)
     : null;
 
   return (
@@ -155,20 +217,14 @@ export default async function DashboardPage() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Score</p>
-                      <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${
-                        (swing.score ?? 0) >= 80
-                          ? "text-golf-green border-golf-green/20"
-                          : (swing.score ?? 0) >= 60
-                          ? "text-yellow-400 border-yellow-400/20"
-                          : "text-red-400 border-red-500/20"
-                      }`}>
-                        {swing.score != null ? `${swing.score} pts` : "—"}
+                      <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${scoreBandClassName(swing)}`}>
+                        {fullSwingScore(swing) !== null ? `${swing.score} pts` : "—"}
                       </div>
                     </div>
                     <div className="min-w-0">
                       <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Tempo</p>
                       <p className="text-xs font-mono font-black text-white">
-                        {swing.tempo_ratio?.toFixed(1) ?? "—"}
+                        {swing.analysis_family === "putting" ? "—" : swing.tempo_ratio?.toFixed(1) ?? "—"}
                       </p>
                     </div>
                   </div>
@@ -209,19 +265,13 @@ export default async function DashboardPage() {
                       </span>
                     </td>
                     <td className="px-8 py-5">
-                      <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${
-                        (swing.score ?? 0) >= 80
-                          ? "text-golf-green border-golf-green/20"
-                          : (swing.score ?? 0) >= 60
-                          ? "text-yellow-400 border-yellow-400/20"
-                          : "text-red-400 border-red-500/20"
-                      }`}>
-                        {swing.score != null ? `${swing.score} pts` : "—"}
+                      <div className={`inline-flex items-center justify-center px-3 py-1 rounded-lg bg-black/40 text-xs font-mono font-black border ${scoreBandClassName(swing)}`}>
+                        {fullSwingScore(swing) !== null ? `${swing.score} pts` : "—"}
                       </div>
                     </td>
                     <td className="px-8 py-5">
                       <span className="text-xs font-mono font-black text-white">
-                        {swing.tempo_ratio?.toFixed(1) ?? "—"}
+                        {swing.analysis_family === "putting" ? "—" : swing.tempo_ratio?.toFixed(1) ?? "—"}
                       </span>
                     </td>
                     <td className="px-8 py-5">

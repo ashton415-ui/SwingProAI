@@ -32,7 +32,7 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
   const { data: row, error } = await supabase
     .from("swing_analysis")
     .select(`
-      id, status, score, feedback,
+      id, status, score, feedback, analysis_family,
       swing_highlights, mechanical_deficiencies, metrics,
       swing_video:swing_videos (
         id, video_url, storage_path, original_filename, club, created_at
@@ -43,6 +43,24 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
     .single();
 
   if (error || !row) notFound();
+
+  // EQ5C-C. This is the legacy full-swing report route. A putting analysis has
+  // no full-swing score, no full-swing biomechanics and no full-swing report to
+  // render, so it is sent to the canonical family-aware result page rather than
+  // dressed up as a swing report here.
+  //
+  // The redirect sits immediately after the owned-row boundary and ahead of
+  // everything else on purpose: no signed video URL is minted and no legacy
+  // AnalysisData payload is built for a putt. The canonical page at
+  // /swings/[id] already owns putting result rendering and its entitlement, so
+  // nothing about a putt is re-implemented here.
+  //
+  // Strict equality on purpose. Only "putting" leaves this route; null (legacy
+  // rows written before the family column existed) and "full_swing" both keep
+  // the established behaviour exactly.
+  if (row.analysis_family === "putting") {
+    redirect(`/swings/${row.id}`);
+  }
 
   // Supabase infers the nested join as array — cast through unknown to the real shape
   const video = (row.swing_video as unknown as SwingVideoRow | SwingVideoRow[] | null);

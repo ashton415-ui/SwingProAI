@@ -469,6 +469,25 @@ describe("SEC1F — telemetry reads only canonical columns", () => {
 // ============================================================================
 // 9. Runtime validation of the untrusted exercise_data blob
 // ============================================================================
+/**
+ * The production `parseRangeMetrics` validator, isolated from its signature to
+ * its column-0 closing brace.
+ *
+ * SEC1F's contract is about this validator specifically: `exercise_data` is an
+ * untrusted jsonb blob, so each of its three metrics must be finite-checked
+ * rather than asserted. Counting `Number.isFinite(` across the whole telemetry
+ * page would instead impose a file-wide budget, so an unrelated and perfectly
+ * safe finite check elsewhere in an 880-line page would read as a SEC1F
+ * failure. Scoping the count to the validator keeps the security property
+ * exact while letting the rest of the page evolve.
+ */
+const parseRangeMetricsSource = (() => {
+  const start = telemetrySrc.indexOf("function parseRangeMetrics(");
+  if (start === -1) return null;
+  const end = telemetrySrc.indexOf("\n}", start);
+  return end === -1 ? null : telemetrySrc.slice(start, end + 2);
+})();
+
 describe("SEC1F — exercise_data is validated, never asserted", () => {
   it("routes the blob through a narrow validator", () => {
     expect(telemetrySrc).toContain("function parseRangeMetrics(");
@@ -486,9 +505,48 @@ describe("SEC1F — exercise_data is validated, never asserted", () => {
     }
   );
 
+  it("isolates the validator without absorbing neighbouring telemetry logic", () => {
+    expect(parseRangeMetricsSource, "parseRangeMetrics could not be isolated").not.toBeNull();
+    expect(parseRangeMetricsSource).toContain("function parseRangeMetrics(");
+    expect(parseRangeMetricsSource).toContain("raw.shots_total");
+    for (const neighbour of [
+      "parseTempoNum",
+      "computeEquipmentInsight",
+      "TelemetryPage",
+      "scoreObservations",
+    ]) {
+      expect(
+        parseRangeMetricsSource,
+        `the isolated validator must not reach into ${neighbour}`
+      ).not.toContain(neighbour);
+    }
+  });
+
   it("rejects NaN and Infinity by using Number.isFinite on every metric", () => {
-    const finiteChecks = telemetrySrc.match(/Number\.isFinite\(/g) ?? [];
+    const finiteChecks = (parseRangeMetricsSource ?? "").match(/Number\.isFinite\(/g) ?? [];
     expect(finiteChecks.length).toBe(3);
+  });
+
+  it("counts finite checks strictly enough to catch a missing or stray one", () => {
+    const countIn = (source: string) => (source.match(/Number\.isFinite\(/g) ?? []).length;
+    const validator = parseRangeMetricsSource ?? "";
+
+    // Dropping one metric's finite check must break the count. Simulated in
+    // memory — the production validator is never written to.
+    const dropped = validator.replace(
+      'if (typeof rate     !== "number" || !Number.isFinite(rate))     return null;',
+      'if (typeof rate     !== "number") return null;'
+    );
+    expect(dropped, "the drop simulation matched nothing").not.toBe(validator);
+    expect(countIn(dropped), "a removed finite check must fail the count").not.toBe(3);
+
+    // So must an unintended fourth check appearing inside the validator.
+    const added = validator.replace(
+      "  return { shots_total: total,",
+      "  if (!Number.isFinite(total + executed)) return null;\n  return { shots_total: total,"
+    );
+    expect(added, "the insertion simulation matched nothing").not.toBe(validator);
+    expect(countIn(added), "a stray fourth finite check must fail the count").not.toBe(3);
   });
 
   it("uses no unchecked numeric type assertion", () => {
