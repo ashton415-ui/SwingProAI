@@ -76,6 +76,39 @@ function submissionBody(): string {
 
 const submissionSource = submissionBody();
 
+/** The client-authored `swing_analysis` INSERT object, isolated. */
+function analysisInsertSource(): string {
+  const start = submissionSource.indexOf('.from("swing_analysis")');
+  expect(start, "expected startAnalysis to insert swing_analysis").toBeGreaterThan(-1);
+  const end = submissionSource.indexOf("}).select(", start);
+  expect(end, "expected the swing_analysis insert to close").toBeGreaterThan(start);
+  return submissionSource.slice(start, end);
+}
+
+/** The `/api/analyze-swing` request, isolated. */
+function analysisRequestSource(): string {
+  const start = submissionSource.indexOf('fetch("/api/analyze-swing"');
+  expect(start, "expected startAnalysis to call the analysis API").toBeGreaterThan(-1);
+  const end = submissionSource.indexOf("});", start);
+  expect(end, "expected the analysis request to close").toBeGreaterThan(start);
+  return submissionSource.slice(start, end);
+}
+
+/**
+ * The two client surfaces that could carry a database-owned value outward: the
+ * row the client writes, and the request it sends. EQ5C-D narrowed the old
+ * whole-file string bans to these, because the client now legitimately *reads*
+ * the family the server returned on a completed row. Reading what the database
+ * decided is the opposite of claiming authority over it; authoring one, or
+ * sending one, is still forbidden.
+ */
+function clientAuthoredSurfaces(): { label: string; source: string }[] {
+  return [
+    { label: "swing_analysis insert", source: analysisInsertSource() },
+    { label: "analysis API request", source: analysisRequestSource() },
+  ];
+}
+
 /** Everything before startAnalysis: imports, state and the selector load. */
 function initializationSource(): string {
   const endIdx = analyzeSource.indexOf("const startAnalysis");
@@ -234,7 +267,11 @@ describe("EQ3-S1 Analyze — reuses the shared saved-club foundations", () => {
   });
 
   it("reads the club_id hint through the App Router search params", () => {
-    expect(analyzeSource).toContain('import { useSearchParams } from "next/navigation"');
+    // EQ5C-D added useRouter to the same import. What this protects is that the
+    // hint is read through App Router search params — not the exact member list.
+    expect(analyzeSource).toMatch(
+      /import \{[^}]*\buseSearchParams\b[^}]*\} from "next[/]navigation"/,
+    );
     expect(analyzeSource).toContain('searchParams.get("club_id")');
   });
 });
@@ -387,8 +424,21 @@ describe("EQ3-S1 Analyze — the client writes club_id and nothing else the DB o
   });
 
   it("never writes the DB-authored equipment fields", () => {
-    expect(analyzeSource).not.toContain("analysis_family");
+    // The property is that the client must not AUTHOR or SEND these, not that
+    // it may never name them. An `analysis_family:` property is the authoring
+    // shape, in an object literal or a request body alike.
+    expect(analyzeSource).not.toMatch(/[\b]?analysis_family[ ]*:/);
+    for (const { label, source } of clientAuthoredSurfaces()) {
+      expect(source, `${label} must not carry analysis_family`).not.toContain("analysis_family");
+      expect(source, `${label} must not carry equipment_snapshot`).not.toContain("equipment_snapshot");
+    }
     expect(analyzeSource).not.toContain("equipment_snapshot");
+  });
+
+  it("names analysis_family only to read what the server returned", () => {
+    const uses = analyzeSource.match(/analysis_family/g) ?? [];
+    expect(uses, "the client should reference the family exactly once").toHaveLength(1);
+    expect(analyzeSource).toContain('updatedRow.analysis_family === "putting"');
   });
 
   it("does not send club_id to the analysis API", () => {
@@ -567,7 +617,7 @@ describe("EQ3-S2 Analyze — putting capture presentation is derived, never rout
       "Use the trim handles in the timeline to isolate one complete putting stroke.",
     );
     expect(analyzeSource).toContain(
-      "Upload your putting stroke video and trim to one complete stroke. AI putting analysis is coming soon.",
+      "Upload your putting stroke video and trim to one complete stroke. Putting analysis is available on eligible plans.",
     );
   });
 
@@ -583,14 +633,42 @@ describe("EQ3-S2 Analyze — putting capture presentation is derived, never rout
     expect(analyzeSource).toContain("canUseLaunchMonitor(userTier) ? (");
   });
 
-  it("offers a Putter no executable analyzer action", () => {
-    const branchIdx = analyzeSource.indexOf("isPuttingCapture ? (");
-    expect(branchIdx).toBeGreaterThanOrEqual(0);
+  it("offers an unentitled Putter no executable analyzer action", () => {
+    // EQ5C-D superseded the universal form of this test. The permanent property
+    // is that a golfer whose plan excludes putting gets an inert control; what
+    // changed is that an entitled golfer now gets a real one.
+    const branchIdx = analyzeSource.indexOf(
+      "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
+    );
+    expect(branchIdx, "expected the locked-Putter action branch").toBeGreaterThanOrEqual(0);
     const branch = analyzeSource.slice(branchIdx, analyzeSource.indexOf(") : (", branchIdx));
-    expect(branch).toContain("PUTTING ANALYSIS COMING SOON");
+    expect(branch).toContain("UPGRADE TO UNLOCK PUTTING");
     expect(branch).toContain("disabled");
     expect(branch).not.toContain("onClick");
     expect(branch).not.toContain("startAnalysis");
+  });
+
+  it("gives an entitled Putter the same executable action as a full swing", () => {
+    const branchIdx = analyzeSource.indexOf(
+      "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
+    );
+    const executable = analyzeSource.slice(analyzeSource.indexOf(") : (", branchIdx));
+    expect(executable).toContain("onClick={startAnalysis}");
+    expect(executable).toContain("RUN PUTTING ANALYSIS");
+    expect(executable).toContain("RUN ANALYZER");
+  });
+
+  it("decides the locked action through the central entitlement helper", () => {
+    expect(analyzeSource).toContain(
+      'import {\n  canUseLaunchMonitor,\n  canUsePuttingAnalysis,',
+    );
+    const branchIdx = analyzeSource.indexOf(
+      "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
+    );
+    const branch = analyzeSource.slice(branchIdx, analyzeSource.indexOf(") : (", branchIdx));
+    for (const tier of ["birdie", "eagle", "coach_starter", "coach_pro"]) {
+      expect(branch, `the action branch must not restate the ${tier} plan`).not.toContain(tier);
+    }
   });
 
   it("leaves the full-swing analyzer action executable", () => {
@@ -610,7 +688,13 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
 
   it("refuses inside startAnalysis, not only in the rendered action", () => {
     expect(submissionSource).toContain(guard);
-    expect(submissionSource).toContain("setError(PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE)");
+    expect(submissionSource).toContain("setError(PUTTING_ANALYSIS_LOCKED_MESSAGE)");
+    // The refusal is now conditional: entitlement, asked through the central
+    // helper, is what separates a refused putt from an accepted one.
+    expect(submissionSource).toContain("!canUsePuttingAnalysis(userTier)");
+    for (const tier of ["birdie", "eagle", "coach_starter", "coach_pro"]) {
+      expect(submissionSource, `the guard must not restate the ${tier} plan`).not.toContain(tier);
+    }
   });
 
   it("refuses before preprocessing", () => {
@@ -631,16 +715,25 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
   });
 
   it("uses fixed golfer-facing copy that explains rather than blames", () => {
+    // EQ5C-D replaced the coming-soon refusal: the pipeline exists now, so the
+    // only honest reason to refuse is the plan. The wording matches the server
+    // 403 exactly so the two boundaries never appear to disagree about why.
     expect(analyzeSource).toContain(
-      "Putting analysis is coming soon. To avoid an incorrect full-swing report, this putter video can't be analyzed yet.",
+      "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
     );
+    expect(analyzeSource).not.toContain("PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE");
   });
 });
 // ─── Structural: EQ3-S2 boundaries this slice must not cross ─────────────────
 
 describe("EQ3-S2 — presentation only, no routing and no new surfaces", () => {
   it("never writes a routing field from the client", () => {
-    expect(analyzeSource).not.toContain("analysis_family");
+    // Narrowed with EQ5C-D to the authoring shape; swing_category stays banned
+    // outright because the client has no reason to name it at all.
+    expect(analyzeSource).not.toMatch(/[\b]?analysis_family[ ]*:/);
+    for (const { label, source } of clientAuthoredSurfaces()) {
+      expect(source, `${label} must not carry analysis_family`).not.toContain("analysis_family");
+    }
     expect(analyzeSource).not.toContain("swing_category");
   });
 
@@ -828,9 +921,11 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
     expect(analyzeSource).toContain(
       "Use the trim handles in the timeline to isolate one complete putting stroke.",
     );
-    expect(analyzeSource).toContain("PUTTING ANALYSIS COMING SOON");
+    expect(analyzeSource).toContain("UPGRADE TO UNLOCK PUTTING");
 
-    const puttingBranchIdx = analyzeSource.indexOf("isPuttingCapture ? (");
+    const puttingBranchIdx = analyzeSource.indexOf(
+      "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
+    );
     expect(puttingBranchIdx).toBeGreaterThanOrEqual(0);
     const puttingBranchEnd = analyzeSource.indexOf(") : (", puttingBranchIdx);
     expect(puttingBranchEnd).toBeGreaterThan(puttingBranchIdx);
@@ -862,7 +957,10 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
     // The camera bans that used to live here retired with EQ4-S2. These two
     // did not: analysis_family and equipment_snapshot are database-authored,
     // and a client write would silently claim authority it does not have.
-    expect(analyzeSource).not.toContain("analysis_family");
+    expect(analyzeSource).not.toMatch(/[\b]?analysis_family[ ]*:/);
+    for (const { label, source } of clientAuthoredSurfaces()) {
+      expect(source, `${label} must not carry analysis_family`).not.toContain("analysis_family");
+    }
     expect(analyzeSource).not.toContain("equipment_snapshot");
   });
 });

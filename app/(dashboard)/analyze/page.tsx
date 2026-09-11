@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Upload, Target, CheckCircle2, AlertCircle, Loader2,
   Play, Info, Maximize2, X, Activity, Zap, Trophy,
@@ -11,6 +11,7 @@ import {
 import { createClient } from "@/utils/supabase/client";
 import {
   canUseLaunchMonitor,
+  canUsePuttingAnalysis,
   getAnalysisModeForTier,
   getTierDisplayName,
   getUpsellTier,
@@ -73,13 +74,20 @@ const CLUB_UNAVAILABLE_MESSAGE =
 // logged for diagnosis instead of being rendered.
 const ANALYSIS_CREATE_FAILED_MESSAGE =
   "We couldn't create this analysis. Please try again.";
-// EQ3-S2. Putting analysis has no pipeline yet: server routing on the
-// database-derived analysis family is EQ5A and the putting prompt/response
-// work is EQ5B. Sending a putt through the full-swing analyzer would return a
-// confident report about the wrong motion, so the submission is refused with
-// fixed copy that says what is happening rather than what failed.
-const PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE =
-  "Putting analysis is coming soon. To avoid an incorrect full-swing report, this putter video can't be analyzed yet.";
+// EQ5C-D. Putting analysis exists and runs on the server; what it is not is
+// free. A golfer whose plan does not include it is told so here rather than
+// being walked through a preprocess-upload-insert sequence the server will
+// refuse anyway.
+//
+// This is client UX and defence in depth — it is NOT the authorization. The
+// tier this page holds came from the server layout at page load and can be
+// stale by the time the golfer presses the button. Before any putting work
+// runs, the analysis route rereads the current subscription_tier from the
+// golfer's own database row and decides again. The copy is deliberately
+// identical to that server refusal so the two boundaries never appear to
+// disagree about why.
+const PUTTING_ANALYSIS_LOCKED_MESSAGE =
+  "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
@@ -191,6 +199,7 @@ export default function AnalyzePage() {
   }
   const supabase = supabaseRef.current;
 
+  const router = useRouter();
   const searchParams = useSearchParams();
 
   // null means "still loading". Every other state is a real SavedClubsResult,
@@ -483,13 +492,23 @@ export default function AnalyzePage() {
   // ── Analysis flow ──────────────────────────────────────────────────────────
   const startAnalysis = async () => {
     if (!file) return;
-    // EQ3-S2 defence in depth. A selected Putter is not given an executable
-    // action, but a stale handler or a programmatic call must not reach the
-    // full-swing pipeline either. Refuse here — before trim validation, before
-    // preprocessing, before session resolution, before Storage, before both
-    // database inserts and before /api/analyze-swing — so nothing is mutated.
-    if (isPuttingCapturePresentation(savedClubs, selectedClubId)) {
-      setError(PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE);
+    // EQ5C-D defence in depth. An unentitled Putter is not given an executable
+    // action, but a stale handler or a programmatic call must not spend the
+    // golfer's bandwidth and a database row on work the server will refuse.
+    // Refuse here — before trim validation, before preprocessing, before
+    // session resolution, before Storage, before both database inserts and
+    // before /api/analyze-swing — so nothing is mutated.
+    //
+    // The entitlement question is asked through the one central helper, so this
+    // page never carries its own copy of the plan matrix. `userTier` is the
+    // value the server layout rendered at page load: good enough to keep an
+    // unentitled golfer out of a pointless upload, and never the authority. The
+    // route rereads the live tier before it executes anything.
+    if (
+      isPuttingCapturePresentation(savedClubs, selectedClubId) &&
+      !canUsePuttingAnalysis(userTier)
+    ) {
+      setError(PUTTING_ANALYSIS_LOCKED_MESSAGE);
       return;
     }
     if (trimEnd - trimStart > MAX_SEGMENT_SECONDS) {
@@ -588,6 +607,21 @@ export default function AnalyzePage() {
       }
 
       const { data: updatedRow } = await analysisRes.json() as { data: Record<string, unknown> };
+
+      // EQ5C-D. Which report this is was decided by the database at insert and
+      // returned by the server on the completed row — not by the selector the
+      // golfer was looking at, not by their tier, and not by anything this page
+      // inferred before submitting. A putt has no full-swing score, no
+      // biomechanics and no drills, so it must never be poured into the
+      // full-swing mapper below. It goes instead to the canonical family-aware
+      // result page, which already owns putting rendering and its own
+      // entitlement check. Strict equality: every other family keeps the
+      // inline flow exactly as it was.
+      if (updatedRow.analysis_family === "putting") {
+        router.push(`/swings/${analysisRow.id}`);
+        return;
+      }
+
       setResult(dbRowToResult(updatedRow));
 
     } catch (err: unknown) {
@@ -1127,18 +1161,22 @@ export default function AnalyzePage() {
             {!isAnalyzing && !isTrimming && (
               <div className="absolute bottom-4 left-4 right-4 z-40">
                 {!result ? (
-                  isPuttingCapture ? (
+                  isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (
                     /* Deliberately inert: no click handler, no alternative execution
-                       path, no navigation. EQ5A/EQ5B must ship before a putt can
-                       be analyzed at all. */
+                       path, no navigation. Putting analysis exists — this golfer's
+                       plan does not include it, and the server would refuse the
+                       same request for the same reason. */
                     <button type="button" disabled
                       className="w-full py-4 bg-white/5 text-gray-500 border border-white/10 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 cursor-not-allowed">
-                      <Lock size={18} />PUTTING ANALYSIS COMING SOON
+                      <Lock size={18} />UPGRADE TO UNLOCK PUTTING
                     </button>
                   ) : (
+                    /* One executable action for an entitled putt and for a full
+                       swing alike: the same submission, the same server, the same
+                       database-authored routing. Only the label differs. */
                     <button onClick={startAnalysis}
                       className="w-full py-4 bg-golf-green text-golf-dark rounded-2xl font-black uppercase tracking-widest hover:bg-[#22C55E] transition-all flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(74,222,128,0.3)]">
-                      <Target size={18} />RUN ANALYZER
+                      <Target size={18} />{isPuttingCapture ? "RUN PUTTING ANALYSIS" : "RUN ANALYZER"}
                     </button>
                   )
                 ) : (
@@ -1315,7 +1353,7 @@ export default function AnalyzePage() {
             <h3 className="text-xl font-black italic tracking-tighter text-white uppercase mb-2">Awaiting Session</h3>
             <p className="text-gray-600 text-sm max-w-xs">
               {isPuttingCapture
-                ? "Upload your putting stroke video and trim to one complete stroke. AI putting analysis is coming soon."
+                ? "Upload your putting stroke video and trim to one complete stroke. Putting analysis is available on eligible plans."
                 : "Upload your swing video, trim to the impact zone, then hit Run Analyzer."}
             </p>
           </div>

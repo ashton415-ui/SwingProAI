@@ -495,12 +495,35 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
   });
 
   it("keeps the Putter analyzer action disabled", () => {
-    const branchIdx = analyzeSource.indexOf("isPuttingCapture ? (");
-    expect(branchIdx).toBeGreaterThanOrEqual(0);
+    const branchIdx = analyzeSource.indexOf(
+      "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
+    );
+    expect(branchIdx, "expected the locked-Putter action branch").toBeGreaterThanOrEqual(0);
     const branch = analyzeSource.slice(branchIdx, analyzeSource.indexOf(") : (", branchIdx));
-    expect(branch).toContain("PUTTING ANALYSIS COMING SOON");
+    expect(branch).toContain("UPGRADE TO UNLOCK PUTTING");
     expect(branch).toContain("disabled");
     expect(branch).not.toContain("onClick");
+  });
+
+  it("gives an entitled Putter an executable analyzer action", () => {
+    // EQ5C-D. Camera capture never depended on this and still does not: what
+    // changed is only whether the analyzer action exists once a clip is ready.
+    const branchIdx = analyzeSource.indexOf(
+      "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
+    );
+    const executable = analyzeSource.slice(analyzeSource.indexOf(") : (", branchIdx));
+    expect(executable).toContain("onClick={startAnalysis}");
+    expect(executable).toContain("RUN PUTTING ANALYSIS");
+  });
+
+  it("keeps camera capture available to a Putter whatever the plan says", () => {
+    // Preparation is not execution. A golfer whose plan excludes putting may
+    // still record and trim a putt; only the analyzer action is locked.
+    const lifecycle = cameraLifecycleSource();
+    expect(lifecycle).not.toContain("canUsePuttingAnalysis");
+    expect(lifecycle).not.toContain("isPuttingCapturePresentation(");
+    expect(cameraSurfaceSource()).not.toContain("canUsePuttingAnalysis");
+    expect(cameraSurfaceSource()).not.toContain("disabled={isPuttingCapture}");
   });
 
   it("keeps the Putter submission guard before preprocessing Storage database and API", () => {
@@ -527,7 +550,18 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
   });
 
   it("never writes analysis_family from the client", () => {
-    expect(analyzeSource).not.toContain("analysis_family");
+    // EQ5C-D narrowed this from a whole-file ban to the authoring shape: the
+    // client may read the family the server returned on a completed row, but it
+    // may never author one or send one.
+    expect(analyzeSource).not.toMatch(/[\b]?analysis_family[ ]*:/);
+    const insertIdx = analyzeSource.indexOf('.from("swing_analysis")');
+    expect(insertIdx).toBeGreaterThan(-1);
+    const insert = analyzeSource.slice(insertIdx, analyzeSource.indexOf("}).select(", insertIdx));
+    expect(insert).not.toContain("analysis_family");
+    expect(insert).toContain("club_id:");
+    const uses = analyzeSource.match(/analysis_family/g) ?? [];
+    expect(uses, "the client should reference the family exactly once").toHaveLength(1);
+    expect(analyzeSource).toContain('updatedRow.analysis_family === "putting"');
   });
 
   it("never writes equipment_snapshot from the client", () => {
