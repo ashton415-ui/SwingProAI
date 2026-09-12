@@ -42,7 +42,7 @@ const PROTECTED_DIGESTS: Record<string, string> = {
   "lib/equipment-catalog-schema.test.ts":
     "7fff61c8005d0517b942344180cbd68a12e640767132213c942dc6101cca59d9",
   "types/database.ts":
-    "7f3e5525a792b6ab494e36c0769dee44d8dd5ae3c8f04679bd166bb93d3c0810",
+    "4fc6245be78817213aa7f923dfd0a6a66d1fcb41c57fe5a373da8e49dd60b35d",
 };
 
 // Slice 2 is permitted exactly one change to the Slice-1 query layer: the stale

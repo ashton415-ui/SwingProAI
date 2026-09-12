@@ -46,6 +46,12 @@ export type AnalysisDepth = "basic" | "advanced" | "ultra";
 
 export type AnalysisFamily = "full_swing" | "putting";
 
+// The mechanical family of golf motion a canonical public.drills row trains.
+// Deliberately its own type, not an alias of AnalysisFamily: that records the
+// pipeline one uploaded swing was routed to, this is static catalog metadata.
+// The two share a value vocabulary because they partition the same domain.
+export type DrillFamily = "full_swing" | "putting";
+
 // ─── Coach Marketplace Enums (CM1 — foundation only) ──────────────────────────
 // These types back an inactive, additive schema foundation (see
 // supabase-schema-v6.sql). No route, page, or component uses them until a

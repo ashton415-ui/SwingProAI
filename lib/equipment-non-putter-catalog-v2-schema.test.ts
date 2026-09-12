@@ -63,7 +63,7 @@ const PROTECTED_DIGESTS: Record<string, string> = {
   "supabase/migrations/20260820132900_equipment_non_putter_catalog_v1.sql":
     "9c11181dc15066228d8a04fedc07872adf0e5847404eee4a4540b528b16e4dcd",
   "lib/equipment-non-putter-catalog-schema.test.ts":
-    "452c1b0289679ffa7639c8a4b426134e9f371a9d99988ad7a1460ac2a046aaec",
+    "09b790d25b15c453c17b3cfceee31b815bbdb544a2755e375bdc3ef0e53305a4",
   "data/equipment-catalog-putters-v1.json":
     "0a73e9460d1f416b8af04838dc983df5bcb40ea9f4fa169b9975e50a2b502029",
   "scripts/generate-equipment-catalog-putters-v1.mjs":
@@ -73,7 +73,7 @@ const PROTECTED_DIGESTS: Record<string, string> = {
   "lib/equipment-catalog-schema.test.ts":
     "7fff61c8005d0517b942344180cbd68a12e640767132213c942dc6101cca59d9",
   "types/database.ts":
-    "7f3e5525a792b6ab494e36c0769dee44d8dd5ae3c8f04679bd166bb93d3c0810",
+    "4fc6245be78817213aa7f923dfd0a6a66d1fcb41c57fe5a373da8e49dd60b35d",
   "supabase/migrations/20260903213417_equipment_model_source_category_provenance.sql":
     "34d8d1854523ef8516d89f796eddf7ef383dbe0dccb66a24fc5885318c9b93ae",
   [DATA_FILE]: "26c8fae856c53bc8c3e034a2306b9bc2f028e3029476bfcbcde0fb5aefd87c56",
@@ -1142,7 +1142,7 @@ describe("EQ-S2-C v2 — materialized migration", () => {
 
   it("sorts strictly after every migration authored before it", () => {
     const earlier = migrationsAuthoredBefore(EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME);
-    expect(earlier).toHaveLength(APPROVED_MIGRATIONS.length - 1);
+    expect(earlier).toHaveLength(30);
     expect(sortsAfterAll(EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME, earlier)).toBe(true);
   });
 
@@ -1184,10 +1184,9 @@ describe("EQ-S2-C v2 — materialized migration", () => {
     expect(new Set(APPROVED_MIGRATIONS).size).toBe(APPROVED_MIGRATIONS.length);
   });
 
-  it("derives the expected migration count as 31", () => {
+  it("derives the expected migration count from the approved inventory", () => {
     expect(EXPECTED_MIGRATION_COUNT).toBe(APPROVED_MIGRATIONS.length);
-    expect(EXPECTED_MIGRATION_COUNT).toBe(31);
-    expect(migrationFilenames).toHaveLength(31);
+    expect(migrationFilenames).toHaveLength(EXPECTED_MIGRATION_COUNT);
   });
 
   it("remains data-only in its executable SQL", () => {

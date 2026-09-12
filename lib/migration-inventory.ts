@@ -103,6 +103,17 @@ export const EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME =
   "20260905023640_equipment_non_putter_catalog_v2.sql";
 
 /**
+ * The migration that gives the canonical drill catalog an authoritative
+ * mechanical family. public.drills gains drill_family (text, NOT NULL, no
+ * default, CHECK full_swing | putting), and the drills that already exist are
+ * classified from a frozen list of known legacy full-swing name/target_metric
+ * pairs rather than from any convention. Schema and classification only: it
+ * inserts no drill, seeds no putting row, and changes no policy or grant.
+ */
+export const DRILLS_DRILL_FAMILY_FOUNDATION_FILENAME =
+  "20260912042450_drills_drill_family_foundation.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -124,6 +135,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   EQUIPMENT_SNAPSHOT_ACTIVE_GUARD_DB0_FILENAME,
   EQUIPMENT_MODEL_SOURCE_CATEGORY_PROVENANCE_FILENAME,
   EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME,
+  DRILLS_DRILL_FAMILY_FOUNDATION_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
