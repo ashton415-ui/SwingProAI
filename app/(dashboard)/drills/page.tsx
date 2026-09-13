@@ -94,7 +94,7 @@ export default function DrillsPage() {
       const supabase = getAuthClient();
 
       const [drillsRes, userDrillsRes] = await Promise.all([
-        supabase.from("drills").select("id, name, target_metric, the_why, the_how, the_feel").order("name"),
+        supabase.from("drills").select("id, name, target_metric, the_why, the_how, the_feel").eq("drill_family", "full_swing").order("name"),
         supabase.from("user_drills").select("drill_id, status, latest_ai_feedback"),
       ]);
 

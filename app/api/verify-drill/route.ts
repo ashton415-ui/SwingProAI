@@ -75,6 +75,7 @@ export async function POST(req: NextRequest) {
     .from("drills")
     .select("name, ai_verification_prompt")
     .eq("id", drillId)
+    .eq("drill_family", "full_swing")
     .single();
 
   if (drillErr || !drill) {
