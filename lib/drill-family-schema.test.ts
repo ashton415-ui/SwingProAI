@@ -151,7 +151,7 @@ describe("drill-family migration — identity and registration", () => {
 
   it("sorts after every migration that existed when it was authored", () => {
     const earlier = migrationsAuthoredBefore(MIGRATION_FILENAME);
-    expect(earlier).toHaveLength(APPROVED_MIGRATIONS.length - 1);
+    expect(earlier).toHaveLength(31);
     expect(sortsAfterAll(MIGRATION_FILENAME, earlier)).toBe(true);
   });
 

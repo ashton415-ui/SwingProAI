@@ -114,6 +114,16 @@ export const DRILLS_DRILL_FAMILY_FOUNDATION_FILENAME =
   "20260912042450_drills_drill_family_foundation.sql";
 
 /**
+ * The EQ5D migration that seeds the first seven canonical putting drills into
+ * public.drills. Data only and insert only: every row states drill_family
+ * 'putting' explicitly, ids are deterministic UUID literals so staging and
+ * production agree, and created_at is left to the database. It rewrites no
+ * existing full-swing row and changes no schema, policy or grant.
+ */
+export const PUTTING_DRILL_CATALOG_SEED_FILENAME =
+  "20260914034708_putting_drill_catalog_seed.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -136,6 +146,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   EQUIPMENT_MODEL_SOURCE_CATEGORY_PROVENANCE_FILENAME,
   EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME,
   DRILLS_DRILL_FAMILY_FOUNDATION_FILENAME,
+  PUTTING_DRILL_CATALOG_SEED_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
