@@ -974,6 +974,40 @@ function productionImportersOf(specifier: string, files: readonly RepoFile[]): s
     .map((file) => file.filePath);
 }
 
+/** Every file that names the module, tests included, excluding the module itself. */
+function directImportersOf(specifier: string, files: readonly RepoFile[]): string[] {
+  return files
+    .filter((file) => file.filePath !== CONTRACT)
+    .filter((file) => file.content.includes(specifier))
+    .map((file) => file.filePath);
+}
+
+/**
+ * The one production module allowed to consume this rule set.
+ *
+ * Being depended on and being switched on are different things, and the first
+ * version of this suite conflated them: it required zero production importers
+ * of any kind, which was true while nothing downstream existed and became
+ * false the moment the authority layer was authorized to call the ranker.
+ * That layer is itself dormant — nothing in the application imports it — so
+ * this rule set is still not reachable from any route, page or component.
+ *
+ * The list stays exact rather than becoming a pattern. An allowance for
+ * "anything under lib/", or for any name that looks like a later unit, would
+ * let an unreviewed consumer appear without this suite noticing, which is the
+ * one thing it exists to prevent.
+ */
+const AUTHORIZED_PRODUCTION_IMPORTERS: readonly string[] = [
+  "lib/putting-recommendation-authority-eq5e-c.ts",
+];
+
+/** The authorized production importer, plus the two suites that exercise it. */
+const AUTHORIZED_DIRECT_IMPORTERS: readonly string[] = [
+  "lib/putting-drill-recommendation-eq5e-b.test.ts",
+  "lib/putting-recommendation-authority-eq5e-c.test.ts",
+  "lib/putting-recommendation-authority-eq5e-c.ts",
+];
+
 describe("EQ5E-B activation — dormant", () => {
   const repoFiles = collectSourceFiles(["app", "lib", "components"]);
 
@@ -982,16 +1016,23 @@ describe("EQ5E-B activation — dormant", () => {
     expect(repoFiles.some((file) => file.filePath === CONTRACT)).toBe(true);
   });
 
-  it("has no production importer", () => {
-    expect(productionImportersOf(EQ5E_B_MODULE, repoFiles)).toEqual([]);
+  it("has exactly the authorized dormant authority importer", () => {
+    expect(sorted(productionImportersOf(EQ5E_B_MODULE, repoFiles))).toEqual(
+      sorted(AUTHORIZED_PRODUCTION_IMPORTERS),
+    );
   });
 
-  it("is imported by its own test only", () => {
-    const importers = repoFiles
-      .filter((file) => file.filePath !== CONTRACT)
-      .filter((file) => file.content.includes(EQ5E_B_MODULE))
-      .map((file) => file.filePath);
-    expect(importers).toEqual(["lib/putting-drill-recommendation-eq5e-b.test.ts"]);
+  it("has exactly the authorized direct importer set", () => {
+    expect(sorted(directImportersOf(EQ5E_B_MODULE, repoFiles))).toEqual(
+      sorted(AUTHORIZED_DIRECT_IMPORTERS),
+    );
+  });
+
+  it("is still unreachable from any route, page or component", () => {
+    const reachable = productionImportersOf(EQ5E_B_MODULE, repoFiles).filter(
+      (filePath) => filePath.startsWith("app/") || filePath.startsWith("components/"),
+    );
+    expect(reachable).toEqual([]);
   });
 
   it("would notice a production importer if one appeared", () => {
@@ -1002,6 +1043,18 @@ describe("EQ5E-B activation — dormant", () => {
     expect(productionImportersOf(EQ5E_B_MODULE, synthetic)).toEqual([
       "app/api/example/route.ts",
     ]);
+  });
+
+  it("an unauthorized importer breaks the exact allowed set", () => {
+    const intruder: RepoFile = {
+      filePath: "app/api/example/route.ts",
+      content: `import x from "${EQ5E_B_MODULE}";`,
+    };
+    const withIntruder = sorted(
+      productionImportersOf(EQ5E_B_MODULE, [...repoFiles, intruder]),
+    );
+    expect(withIntruder).not.toEqual(sorted(AUTHORIZED_PRODUCTION_IMPORTERS));
+    expect(withIntruder).toContain("app/api/example/route.ts");
   });
 });
 

@@ -67,6 +67,37 @@ export function canUsePuttingAnalysis(tier: SubscriptionTier): boolean {
   );
 }
 
+/**
+ * Putting drill recommendations — its own product contract (EQ5E-C).
+ *
+ * Being told what your stroke did and being told what to practise about it are
+ * two things a golfer can be sold separately, so they are gated separately.
+ * This grants the same four tiers as putting analysis today, and as with the
+ * launch-monitor coincidence above that is the current price sheet rather than
+ * a relationship: either capability must be free to move without dragging the
+ * other with it. So this never calls, aliases, wraps or derives from
+ * canUsePuttingAnalysis or from any other helper here, and the tier list is
+ * written out in full even though it currently repeats one.
+ *
+ * The allow-list is positive for the same reason as above: `tier` is typed but
+ * originates in a database column, so an unrecognised value can reach here at
+ * runtime, and a deny-list would hand it access. Anything not named below is
+ * refused.
+ *
+ * Eligibility only. It says who may be shown a recommendation, not whether one
+ * exists — ownership, analysis family, completion and canonical catalog
+ * agreement are all a separate server authority boundary, and none of them is
+ * implied by this helper.
+ */
+export function canUsePuttingRecommendations(tier: SubscriptionTier): boolean {
+  return (
+    tier === "birdie" ||
+    tier === "eagle" ||
+    tier === "coach_starter" ||
+    tier === "coach_pro"
+  );
+}
+
 /** Ultra-deep biomechanical report (Eagle / Coach Pro only) */
 export function canUseUltraDeepAnalysis(tier: SubscriptionTier): boolean {
   return tier === "eagle" || tier === "coach_pro";
