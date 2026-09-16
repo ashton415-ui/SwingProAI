@@ -901,13 +901,48 @@ describe("EQ5E-C contract — structural boundary", () => {
 });
 
 // ============================================================================
-// H. Dormancy
+// H. Activation — the canonical putting result page, and nothing else
 // ============================================================================
+//
+// EQ5E-C shipped dormant, and this section used to require exactly that: no
+// production file anywhere could name the module. EQ5E-D is the slice that
+// intentionally ends that dormancy, on one surface only, so the requirement is
+// now an exact allow-list rather than an empty one.
+//
+// Two kinds of reference are kept apart because they carry different risk. A
+// runtime import executes this module — it opens queries and carries the
+// server-only boundary with it — and exactly one file may do that: the swing
+// detail Server Component, which already owns the authenticated client, the
+// tier and the owned row. A type-only import is erased by the compiler and
+// executes nothing, so the presentation component may use one to describe the
+// result it renders without becoming a second consumer.
+//
+// Classification fails safe. A file counts as type-only only when every code
+// occurrence of the module specifier sits inside an `import type { ... } from`
+// statement. Anything else — a value import, an inline `type` modifier (which
+// can still leave a side-effect import behind), a dynamic import, a re-export,
+// a bare side-effect import — makes it a runtime importer.
+//
+// The lists stay exact. A directory, naming-pattern or "any page" allowance
+// would let an unreviewed consumer appear without this suite noticing, which is
+// the one thing it exists to prevent.
 
-describe("EQ5E-C activation — dormant", () => {
+describe("EQ5E-C activation — canonical putting result page only", () => {
   const SPECIFIER = "putting-recommendation-authority-eq5e-c";
+  const RESULT_PAGE = "app/(dashboard)/swings/[id]/page.tsx";
+  const PRESENTATION = "components/putting/PuttingRecommendationsPanel.tsx";
 
-  function productionImportersOf(files: readonly { filePath: string; content: string }[]): string[] {
+  const AUTHORIZED_RUNTIME_IMPORTERS: readonly string[] = [RESULT_PAGE];
+  const AUTHORIZED_TYPE_ONLY_REFERENCES: readonly string[] = [PRESENTATION];
+  const AUTHORIZED_REFERENCES: readonly string[] = [RESULT_PAGE, PRESENTATION];
+
+  interface SourceFile {
+    filePath: string;
+    content: string;
+  }
+
+  /** Every non-test file, other than the module itself, that names it at all. */
+  function referencesOf(files: readonly SourceFile[]): string[] {
     return files
       .filter((file) => !file.filePath.includes(".test."))
       .filter((file) => file.filePath !== CONTRACT)
@@ -915,8 +950,34 @@ describe("EQ5E-C activation — dormant", () => {
       .map((file) => file.filePath);
   }
 
-  function collect(dirs: readonly string[]): { filePath: string; content: string }[] {
-    const out: { filePath: string; content: string }[] = [];
+  /** True only when every code occurrence of the specifier is an `import type { ... }`. */
+  function isTypeOnlyReference(content: string): boolean {
+    const code = stripComments(content);
+    const occurrences = code.split(SPECIFIER).length - 1;
+    const typeOnlyImports = Array.from(
+      code.matchAll(
+        new RegExp(`^import\\s+type\\s*\\{[^}]*\\}\\s*from\\s*["'][^"']*${SPECIFIER}["'];?`, "gm"),
+      ),
+    ).length;
+    return occurrences > 0 && occurrences === typeOnlyImports;
+  }
+
+  function runtimeImportersOf(files: readonly SourceFile[]): string[] {
+    const referencing = new Set(referencesOf(files));
+    return files
+      .filter((file) => referencing.has(file.filePath) && !isTypeOnlyReference(file.content))
+      .map((file) => file.filePath);
+  }
+
+  function typeOnlyReferencesOf(files: readonly SourceFile[]): string[] {
+    const referencing = new Set(referencesOf(files));
+    return files
+      .filter((file) => referencing.has(file.filePath) && isTypeOnlyReference(file.content))
+      .map((file) => file.filePath);
+  }
+
+  function collect(dirs: readonly string[]): SourceFile[] {
+    const out: SourceFile[] = [];
     for (const dir of dirs) {
       const absolute = path.join(repoRoot, dir);
       if (!existsSync(absolute)) continue;
@@ -936,28 +997,111 @@ describe("EQ5E-C activation — dormant", () => {
   it("scanned a plausible number of source files", () => {
     expect(files.length).toBeGreaterThan(50);
     expect(files.some((f) => f.filePath === CONTRACT)).toBe(true);
+    expect(files.some((f) => f.filePath === RESULT_PAGE)).toBe(true);
+    expect(files.some((f) => f.filePath === PRESENTATION)).toBe(true);
   });
 
-  it("has no production importer", () => {
-    expect(productionImportersOf(files)).toEqual([]);
+  it("is named by exactly the two authorized files", () => {
+    expect(sorted(referencesOf(files))).toEqual(sorted(AUTHORIZED_REFERENCES));
   });
 
-  it("would notice a production importer if one appeared", () => {
+  it("has exactly one runtime importer: the canonical putting result page", () => {
+    expect(sorted(runtimeImportersOf(files))).toEqual(sorted(AUTHORIZED_RUNTIME_IMPORTERS));
+  });
+
+  it("has exactly one type-only reference: the presentation component", () => {
+    expect(sorted(typeOnlyReferencesOf(files))).toEqual(sorted(AUTHORIZED_TYPE_ONLY_REFERENCES));
+  });
+
+  it("classifies every reference as exactly one kind", () => {
+    const runtime = runtimeImportersOf(files);
+    const typeOnly = typeOnlyReferencesOf(files);
+    expect(runtime.filter((filePath) => typeOnly.includes(filePath))).toEqual([]);
+    expect(sorted([...runtime, ...typeOnly])).toEqual(sorted(referencesOf(files)));
+  });
+
+  it("is executed from the page through its exported entry point", () => {
+    const page = files.find((file) => file.filePath === RESULT_PAGE);
+    expect(page?.content).toContain(
+      `import { resolvePuttingDrillRecommendations } from "@/lib/${SPECIFIER}";`,
+    );
+  });
+
+  it("counts a type-only import as type-only, and everything else as runtime", () => {
+    const cases: readonly { content: string; typeOnly: boolean }[] = [
+      { content: `import type { PuttingRecommendationResultV1 } from "@/lib/${SPECIFIER}";`, typeOnly: true },
+      { content: `import type {\n  A,\n  B,\n} from "@/lib/${SPECIFIER}";`, typeOnly: true },
+      { content: `import { resolvePuttingDrillRecommendations } from "@/lib/${SPECIFIER}";`, typeOnly: false },
+      // An inline type modifier still emits a module specifier in some
+      // configurations, so it is not accepted as erased.
+      { content: `import { type PuttingRecommendationResultV1 } from "@/lib/${SPECIFIER}";`, typeOnly: false },
+      { content: `import type { A } from "@/lib/${SPECIFIER}";\nconst m = await import("@/lib/${SPECIFIER}");`, typeOnly: false },
+      { content: `export { resolvePuttingDrillRecommendations } from "@/lib/${SPECIFIER}";`, typeOnly: false },
+      { content: `import "@/lib/${SPECIFIER}";`, typeOnly: false },
+      { content: `const m = require("@/lib/${SPECIFIER}");`, typeOnly: false },
+      { content: `// only a mention of @/lib/${SPECIFIER} in prose`, typeOnly: false },
+    ];
+    for (const { content, typeOnly } of cases) {
+      expect(isTypeOnlyReference(content), content).toBe(typeOnly);
+    }
+  });
+
+  it("would notice a production reference if one appeared", () => {
     expect(
-      productionImportersOf([
+      referencesOf([
         { filePath: "app/api/example/route.ts", content: `import x from "@/lib/${SPECIFIER}";` },
         { filePath: "lib/other.test.ts", content: `import x from "@/lib/${SPECIFIER}";` },
       ]),
     ).toEqual(["app/api/example/route.ts"]);
   });
 
-  it("modifies no route, page or component", () => {
-    const touched = files.filter(
-      (f) =>
-        (f.filePath.startsWith("app/") || f.filePath.startsWith("components/")) &&
-        f.content.includes(SPECIFIER),
+  it("an injected unauthorized importer breaks the exact reference set", () => {
+    const intruder: SourceFile = {
+      filePath: "app/api/example/route.ts",
+      content: `import { resolvePuttingDrillRecommendations } from "@/lib/${SPECIFIER}";`,
+    };
+    const withIntruder = [...files, intruder];
+    expect(sorted(referencesOf(withIntruder))).not.toEqual(sorted(AUTHORIZED_REFERENCES));
+    expect(runtimeImportersOf(withIntruder)).toContain(intruder.filePath);
+  });
+
+  it("an injected second runtime importer breaks the exact runtime allow-list", () => {
+    const second: SourceFile = {
+      filePath: "components/putting/InjectedRecommendationConsumer.tsx",
+      content: `import { resolvePuttingDrillRecommendations } from "@/lib/${SPECIFIER}";`,
+    };
+    const runtime = sorted(runtimeImportersOf([...files, second]));
+    expect(runtime).not.toEqual(sorted(AUTHORIZED_RUNTIME_IMPORTERS));
+    expect(runtime).toContain(second.filePath);
+  });
+
+  it("the presentation component becoming a runtime importer breaks both allow-lists", () => {
+    const presentation = files.find((file) => file.filePath === PRESENTATION);
+    expect(presentation, "the presentation component was not scanned").toBeDefined();
+    const mutated = files.map((file) =>
+      file.filePath === PRESENTATION
+        ? { ...file, content: file.content.replace("import type {", "import {") }
+        : file,
     );
-    expect(touched).toEqual([]);
+    expect(mutated.find((file) => file.filePath === PRESENTATION)?.content).not.toBe(
+      presentation?.content,
+    );
+    expect(sorted(runtimeImportersOf(mutated))).not.toEqual(sorted(AUTHORIZED_RUNTIME_IMPORTERS));
+    expect(sorted(typeOnlyReferencesOf(mutated))).not.toEqual(
+      sorted(AUTHORIZED_TYPE_ONLY_REFERENCES),
+    );
+  });
+
+  it("reaches no route handler, and no page or component beyond the authorized pair", () => {
+    const surfaced = files
+      .filter(
+        (file) =>
+          (file.filePath.startsWith("app/") || file.filePath.startsWith("components/")) &&
+          file.content.includes(SPECIFIER),
+      )
+      .map((file) => file.filePath);
+    expect(sorted(surfaced)).toEqual(sorted(AUTHORIZED_REFERENCES));
+    expect(surfaced.some((filePath) => filePath.startsWith("app/api/"))).toBe(false);
   });
 });
 

@@ -97,8 +97,20 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^[ \t]*\/\/.*$/gm, " ");
 }
 
-/** Panel plus the page's putting region: everything a putting row can render. */
-function activePuttingSurfaces(): { label: string; source: string }[] {
+/**
+ * The putting ANALYSIS surface: PuttingAnalysisPanel plus the page's putting
+ * region.
+ *
+ * Deliberately no longer described as everything a putting row can render. The
+ * region also mounts the EQ5E-D practice-suggestion presentation
+ * (components/putting/PuttingRecommendationsPanel.tsx), which renders canonical
+ * catalog drills by design and carries its own evidence, assignment and
+ * ordering contract in lib/putting-recommendation-consumer-eq5e-d.test.ts. Only
+ * its mount point is visible from here, so the bans below keep protecting the
+ * qualitative analysis without reaching into a surface they were not written
+ * for.
+ */
+function puttingAnalysisSurfaces(): { label: string; source: string }[] {
   return [
     { label: PANEL, source: panelSource },
     { label: `${RESULT_PAGE} (putting region)`, source: puttingRegion() },
@@ -106,8 +118,8 @@ function activePuttingSurfaces(): { label: string; source: string }[] {
 }
 
 /** The same two surfaces, reduced to code and rendered copy. */
-function activePuttingCode(): { label: string; source: string }[] {
-  return activePuttingSurfaces().map(({ label, source }) => ({
+function puttingAnalysisCode(): { label: string; source: string }[] {
+  return puttingAnalysisSurfaces().map(({ label, source }) => ({
     label,
     source: stripComments(source),
   }));
@@ -573,8 +585,8 @@ describe("an unassessable section is reported as itself", () => {
 // ─── 8 — the legacy numeric columns are gone from the read path ───────────────
 
 describe("the putting result reads none of the legacy numeric columns", () => {
-  it("consumes no legacy putting column anywhere on an active putting surface", () => {
-    for (const { label, source } of activePuttingSurfaces()) {
+  it("consumes no legacy putting column anywhere on the putting analysis surface", () => {
+    for (const { label, source } of puttingAnalysisSurfaces()) {
       for (const column of [
         "putt_tempo_ratio",
         "face_angle_at_impact_deg",
@@ -622,9 +634,9 @@ const FORBIDDEN_CLAIMS: readonly { pattern: RegExp; why: string }[] = [
   { pattern: /\bgrain\b/i, why: "grain is out of scope" },
 ];
 
-describe("the active putting result makes no unsupported claim", () => {
+describe("the putting analysis surface makes no unsupported claim", () => {
   it.each(FORBIDDEN_CLAIMS)("rejects $why", ({ pattern, why }) => {
-    for (const { label, source } of activePuttingCode()) {
+    for (const { label, source } of puttingAnalysisCode()) {
       expect(pattern.test(source), `${label}: ${why} (matched ${pattern})`).toBe(false);
     }
   });
@@ -636,7 +648,7 @@ describe("the active putting result makes no unsupported claim", () => {
   });
 
   it("does not surface the raw internal evidence token", () => {
-    for (const { label, source } of activePuttingCode()) {
+    for (const { label, source } of puttingAnalysisCode()) {
       expect(source, `${label} must not print the internal token`).not.toContain(
         "ai_video_analysis_uncalibrated"
       );
@@ -646,7 +658,7 @@ describe("the active putting result makes no unsupported claim", () => {
   it("carries no tier-depth claim", () => {
     // All entitled tiers consume the same qualitative payload in EQ5C, so a
     // depth badge would advertise an analysis the server does not produce.
-    for (const { label, source } of activePuttingCode()) {
+    for (const { label, source } of puttingAnalysisCode()) {
       for (const badge of ["Eagle Deep", "Birdie AI", "Ultra", "deeper"]) {
         expect(source, `${label} must not claim ${badge}`).not.toContain(badge);
       }
@@ -676,7 +688,13 @@ describe("the canonical payload is never rendered raw", () => {
   });
 });
 
-// ─── 12 — practice focus is not an EQ5D drill ─────────────────────────────────
+// ─── 12 — practice focus is not a drill prescription ──────────────────────────
+//
+// The analysis produces one line of practice-focus prose. EQ5E-D separately
+// presents rule-set-selected catalog drills in its own component, which these
+// bans do not scan. They exist so the two never merge: the focus line must not
+// be relabelled as a prescribed drill, and the analysis surface must not start
+// prescribing quantities of its own.
 
 describe("practice focus stays focus text", () => {
   it("is labelled Practice Focus", () => {
@@ -685,7 +703,7 @@ describe("practice focus stays focus text", () => {
 
   it("is never relabelled as a drill or a programme", () => {
     for (const word of ["Drill", "Exercise", "Protocol", "Routine", "Program"]) {
-      for (const { label, source } of activePuttingCode()) {
+      for (const { label, source } of puttingAnalysisCode()) {
         expect(source, `${label} must not present focus text as a ${word}`).not.toContain(word);
       }
     }
@@ -693,7 +711,7 @@ describe("practice focus stays focus text", () => {
 
   it("prescribes no repetitions, sets or timings", () => {
     for (const pattern of [/\breps?\b/i, /\brepetitions?\b/i, /\bsets\b/i, /\bseconds?\b/i, /\bminutes?\b/i]) {
-      for (const { label, source } of activePuttingCode()) {
+      for (const { label, source } of puttingAnalysisCode()) {
         expect(pattern.test(source), `${label} must not prescribe ${pattern}`).toBe(false);
       }
     }

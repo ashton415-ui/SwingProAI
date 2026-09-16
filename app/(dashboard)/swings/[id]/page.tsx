@@ -6,11 +6,13 @@ import {
   PuttingAnalysisPanel,
   type PuttingResultState,
 } from "@/components/putting/PuttingAnalysisPanel";
+import { PuttingRecommendationsPanel } from "@/components/putting/PuttingRecommendationsPanel";
 import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
 import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
 import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
 import { canUsePuttingAnalysis } from "@/lib/entitlements";
 import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
+import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
 import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
 
@@ -113,6 +115,31 @@ export default async function SwingDetailPage({
     return { status: "unavailable" };
   })();
 
+  // ── EQ5E-D putting practice suggestions — resolved here, on the server ──────
+  //
+  // The resolver above decided what this golfer may see of the analysis. This
+  // asks a second, separate question — what the rule set suggests practising —
+  // and asks it only when the analysis itself resolved to a payload the page is
+  // already showing. `"analysis" in puttingState` is that test: it is the one
+  // variant of the union carrying a validated envelope, so the check reuses the
+  // union's own discriminator instead of restating the readiness rule.
+  //
+  // Everything else belongs to the authority. It re-reads the row it was asked
+  // about, re-proves ownership, family, completion and payload validity, asks
+  // its own entitlement question before any read, and reconciles every
+  // candidate against the canonical catalog. Nothing here re-validates,
+  // re-ranks, filters or reshapes what comes back: the result is handed to the
+  // presentation component exactly as received, and a refusal is one of its
+  // states rather than an exception to survive.
+  const puttingRecommendationResult =
+    isPutt && puttingState !== null && "analysis" in puttingState
+      ? await resolvePuttingDrillRecommendations(supabase, {
+          userId: user.id,
+          tier,
+          sourceAnalysisId: swing.id,
+        })
+      : null;
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
       <Link
@@ -153,6 +180,12 @@ export default async function SwingDetailPage({
           {puttingState && (
             <div className="mb-6">
               <PuttingAnalysisPanel state={puttingState} />
+            </div>
+          )}
+
+          {puttingRecommendationResult !== null && (
+            <div className="mb-6">
+              <PuttingRecommendationsPanel result={puttingRecommendationResult} />
             </div>
           )}
         </>
