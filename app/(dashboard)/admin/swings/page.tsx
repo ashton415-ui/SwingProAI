@@ -2,8 +2,25 @@ import { getServerSession } from "@/utils/supabase/server";
 import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import { Calendar, Video } from "lucide-react";
+import { getHistoricalEquipmentDisplayNameConsensus } from "@/lib/equipment/historical-equipment-display-name";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * EQ5F-A. The equipment snapshots of every analysis associated with one video.
+ *
+ * This page lists videos, but the historical equipment record lives on the
+ * analysis, and the database does not make swing_analysis.swing_video_id
+ * unique — so the embed returns 0..N rows and is read as a set, never as a
+ * single row. Anything that is not an array of rows yields no snapshots, which
+ * leaves the legacy club value in place.
+ */
+function analysisSnapshotsOf(video: { analyses?: unknown }): unknown[] {
+  if (!Array.isArray(video.analyses)) return [];
+  return video.analyses.map(
+    (row) => (row as { equipment_snapshot?: unknown } | null)?.equipment_snapshot ?? null,
+  );
+}
 
 export default async function AdminSwingsPage() {
   const session = await getServerSession();
@@ -14,7 +31,7 @@ export default async function AdminSwingsPage() {
 
   const { data: videos } = await supabase
     .from("swing_videos")
-    .select("id, user_id, status, original_filename, file_size, created_at, club")
+    .select("id, user_id, status, original_filename, file_size, created_at, club, analyses:swing_analysis(equipment_snapshot)")
     .order("created_at", { ascending: false })
     .limit(100);
 
@@ -46,7 +63,7 @@ export default async function AdminSwingsPage() {
                         <span className="text-sm text-gray-300 truncate max-w-[200px]">{v.original_filename ?? "—"}</span>
                       </div>
                     </td>
-                    <td className="px-6 py-4"><span className="text-xs text-gray-400 capitalize">{v.club ?? "—"}</span></td>
+                    <td className="px-6 py-4"><span className="text-xs text-gray-400 capitalize">{getHistoricalEquipmentDisplayNameConsensus(analysisSnapshotsOf(v)) ?? v.club ?? "—"}</span></td>
                     <td className="px-6 py-4">
                       <span className="text-xs font-mono text-gray-500">
                         {v.file_size ? `${(v.file_size / (1024 * 1024)).toFixed(1)} MB` : "—"}

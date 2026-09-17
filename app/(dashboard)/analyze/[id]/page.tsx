@@ -1,5 +1,6 @@
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
+import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import AnalysisReport, { type AnalysisData } from "./AnalysisReport";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
@@ -32,7 +33,7 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
   const { data: row, error } = await supabase
     .from("swing_analysis")
     .select(`
-      id, status, score, feedback, analysis_family,
+      id, status, score, feedback, analysis_family, equipment_snapshot,
       swing_highlights, mechanical_deficiencies, metrics,
       swing_video:swing_videos (
         id, video_url, storage_path, original_filename, club, created_at
@@ -95,6 +96,13 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
       })
     : null;
 
+  // EQ5F-A. Resolved once on the server, from the immutable equipment snapshot
+  // written when this analysis was inserted, and handed to the report as a
+  // finished string. The legacy swing_videos.club value remains the fallback for
+  // rows captured before the snapshot existed.
+  const clubDisplayName =
+    getHistoricalEquipmentDisplayName(row.equipment_snapshot) ?? videoRow?.club ?? null;
+
   return (
     <div className="p-6 lg:p-8 max-w-6xl">
       {/* Header */}
@@ -109,12 +117,16 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Swing Analysis</h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            {[videoRow?.club, formattedDate].filter(Boolean).join(" · ")}
+            {[clubDisplayName, formattedDate].filter(Boolean).join(" · ")}
           </p>
         </div>
       </div>
 
-      <AnalysisReport analysis={analysis} videoSignedUrl={videoSignedUrl} />
+      <AnalysisReport
+        analysis={analysis}
+        videoSignedUrl={videoSignedUrl}
+        clubDisplayName={clubDisplayName}
+      />
     </div>
   );
 }

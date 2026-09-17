@@ -1,6 +1,7 @@
 import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
+import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import {
   Video, Target, CheckCircle2, Clock, AlertCircle, Loader2, Calendar,
   Activity, ArrowUpRight, AlertTriangle, Crosshair, Zap, ChevronRight,
@@ -687,7 +688,7 @@ export default async function TelemetryPage() {
     supabase
       .from("swing_analysis")
       .select(`
-        id, status, score, feedback, created_at, analysis_family,
+        id, status, score, feedback, created_at, analysis_family, equipment_snapshot,
         spine_angle, hip_rotation, shoulder_rotation,
         metrics, swing_highlights, mechanical_deficiencies,
         swing_video:swing_videos(club, original_filename)
@@ -763,7 +764,11 @@ export default async function TelemetryPage() {
       status:       r.status,
       score:        r.score ?? null,
       feedback:     r.feedback ?? null,
-      club:         video?.club ?? null,
+      // EQ5F-A. The immutable equipment snapshot names the club this analysis
+      // was taken with; the legacy video string remains the fallback for rows
+      // recorded before snapshots existed. The card's own filename/"Untitled
+      // Swing" floor below is unchanged.
+      club:         getHistoricalEquipmentDisplayName(r.equipment_snapshot) ?? video?.club ?? null,
       filename:     video?.original_filename ?? null,
       bio,
       highlights:   rawHL.map((h) => typeof h.positive_movement === "string" ? h.positive_movement : "").filter(Boolean),

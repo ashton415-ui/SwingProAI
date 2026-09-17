@@ -60,6 +60,13 @@ export interface AnalysisData {
 interface Props {
   analysis: AnalysisData;
   videoSignedUrl: string | null;
+  /**
+   * EQ5F-A. The historical club name, already resolved on the server from the
+   * immutable equipment snapshot. This component does not read the snapshot
+   * itself: the authority for what a swing was taken with is server-side, and a
+   * client component re-deriving it would be a second opinion.
+   */
+  clubDisplayName: string | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -470,7 +477,7 @@ function VideoPlayer({ signedUrl, filename }: { signedUrl: string | null; filena
 
 // ── Root component ────────────────────────────────────────────────────────────
 
-export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl }: Props) {
+export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl, clubDisplayName }: Props) {
   const [analysis, setAnalysis] = useState<AnalysisData>(initialAnalysis);
   // When true, force the ProcessingState even if the DB row is already "complete"
   const [forceReanalyze, setForceReanalyze] = useState(false);
@@ -496,7 +503,7 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
           <div>
             <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-0.5">Club</p>
             <p className="text-sm font-bold text-white capitalize">
-              {analysis.swing_video?.club ?? "Unknown"}
+              {clubDisplayName ?? "Unknown"}
             </p>
           </div>
           <div className="text-right">

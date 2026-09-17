@@ -4,6 +4,7 @@ export const dynamic = "force-dynamic";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import type { SwingAnalysis } from "@/types/database";
+import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { Target, TrendingUp, Trophy, Calendar, ChevronRight, Zap, Filter, Activity } from "lucide-react";
 
 /**
@@ -212,7 +213,7 @@ export default async function DashboardPage() {
                     <div className="min-w-0">
                       <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Club</p>
                       <p className="text-sm font-bold text-gray-200 capitalize break-words">
-                        {swing.swing_video?.club ?? "Unknown"}
+                        {getHistoricalEquipmentDisplayName(swing.equipment_snapshot) ?? swing.swing_video?.club ?? "Unknown"}
                       </p>
                     </div>
                     <div className="min-w-0">
@@ -261,7 +262,7 @@ export default async function DashboardPage() {
                     </td>
                     <td className="px-8 py-5">
                       <span className="text-sm font-bold text-gray-200 capitalize">
-                        {swing.swing_video?.club ?? "Unknown"}
+                        {getHistoricalEquipmentDisplayName(swing.equipment_snapshot) ?? swing.swing_video?.club ?? "Unknown"}
                       </span>
                     </td>
                     <td className="px-8 py-5">

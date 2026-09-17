@@ -1188,7 +1188,14 @@ describe("Progress Hub — phone telemetry renderer and desktop table", () => {
   it("phone renderer preserves the desktop value and fallback semantics", () => {
     const list = isolateProgressHubMobileList(readSource(PROGRESS_HUB_FILE));
     expect(list, "Timestamp must come from the same created_at value").toContain("swing.created_at");
-    expect(list, "Club fallback must be unchanged").toContain('swing.swing_video?.club ?? "Unknown"');
+    // EQ5F-A. The club identity now comes from the immutable equipment snapshot
+    // first, with the legacy video string and the "Unknown" floor unchanged
+    // beneath it. Asserting the whole expression keeps both halves pinned: the
+    // phone renderer cannot quietly drop back to the legacy value alone, and it
+    // cannot lose the final fallback either.
+    expect(list, "Club identity must read the equipment snapshot before the legacy video club").toContain(
+      'getHistoricalEquipmentDisplayName(swing.equipment_snapshot) ?? swing.swing_video?.club ?? "Unknown"',
+    );
     expect(list, "Score must come from the same score value").toContain("swing.score");
     expect(list, "Tempo formatting/fallback must be unchanged").toContain('swing.tempo_ratio?.toFixed(1) ?? "—"');
     expect(list, "Status fallback must be unchanged").toContain('swing.status ?? "pending"');

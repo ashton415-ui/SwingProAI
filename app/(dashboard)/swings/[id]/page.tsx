@@ -12,6 +12,7 @@ import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDefici
 import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
 import { canUsePuttingAnalysis } from "@/lib/entitlements";
 import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
+import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
 import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
@@ -70,6 +71,13 @@ export default async function SwingDetailPage({
 
   // Entitlement check for equipment fitting
   const hasEquipmentFitting = tier === "birdie" || tier === "eagle";
+
+  // EQ5F-A. The club this analysis was taken with, read from the immutable
+  // equipment snapshot the database wrote at insert. The legacy
+  // swing_videos.club string stays as the fallback beneath it: it is still the
+  // only identity older rows have, but where a snapshot exists it is the
+  // historical record and the video string is not.
+  const historicalClubName = getHistoricalEquipmentDisplayName(swing.equipment_snapshot);
 
   // Database-owned analysis family for putting results
   const isPutt = swing.analysis_family === "putting";
@@ -153,7 +161,7 @@ export default async function SwingDetailPage({
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-4xl md:text-5xl font-black italic tracking-tighter text-white uppercase capitalize">
-          {swing.swing_video?.club ?? swing.swing_video?.title ?? "Swing"} Analysis
+          {historicalClubName ?? swing.swing_video?.club ?? swing.swing_video?.title ?? "Swing"} Analysis
         </h1>
         <div className="flex items-center gap-3 mt-2">
           <Clock size={12} className="text-gray-600" />
