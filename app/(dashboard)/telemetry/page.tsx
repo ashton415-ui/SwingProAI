@@ -838,6 +838,9 @@ export default async function TelemetryPage() {
             {swingLogs.length} swing{swingLogs.length !== 1 ? "s" : ""} · {rangeLogs.length} range session{rangeLogs.length !== 1 ? "s" : ""}
             {avgScore != null && ` · Avg score ${avgScore}`}
           </p>
+          <p className="text-[10px] text-gray-600 mt-1.5 leading-relaxed">
+            Full-swing telemetry only. Putting analyses remain available in Progress Hub.
+          </p>
         </div>
 
         <div className="flex gap-2 mt-1">

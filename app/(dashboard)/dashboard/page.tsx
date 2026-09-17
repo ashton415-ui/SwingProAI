@@ -56,6 +56,26 @@ function scoreBandClassName(swing: SwingAnalysis): string {
   return "text-red-400 border-red-500/20";
 }
 
+/**
+ * EQ5F-C — the golfer-facing name of an analysis family.
+ *
+ * Presentation only. `analysis_family` is written by the database at insert and
+ * is immutable afterwards; this reads that value and names it. Nothing here
+ * derives, repairs, persists or infers a family.
+ *
+ * The null mapping is deliberate rather than a leftover. A literal null is not
+ * merely a legacy row: the shipping router treats it as the valid "no club
+ * selected" full-swing capability, so such a row really did receive a
+ * full-swing analysis and really is counted in the full-swing averages above.
+ * A third golfer-facing label would name a distinction the product does not
+ * have, and would misdescribe a null row recorded today.
+ */
+function analysisFamilyLabel(family: SwingAnalysis["analysis_family"]): "Putting" | "Full Swing" {
+  if (family === "putting") return "Putting";
+  if (family === "full_swing") return "Full Swing";
+  return "Full Swing";
+}
+
 export default async function DashboardPage() {
   const supabase = await createClient();
   const session = await getServerSession();
@@ -200,6 +220,9 @@ export default async function DashboardPage() {
                           })}
                         </span>
                       </div>
+                      <span className="mt-1.5 inline-block px-2 py-0.5 rounded-full bg-white/5 border border-white/5 text-[9px] font-black uppercase tracking-widest text-gray-400">
+                        {analysisFamilyLabel(swing.analysis_family)}
+                      </span>
                     </div>
                     <div className="shrink-0 text-right">
                       <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Status</p>
@@ -259,6 +282,9 @@ export default async function DashboardPage() {
                           })}
                         </span>
                       </div>
+                      <span className="mt-1.5 inline-block px-2 py-0.5 rounded-full bg-white/5 border border-white/5 text-[9px] font-black uppercase tracking-widest text-gray-400">
+                        {analysisFamilyLabel(swing.analysis_family)}
+                      </span>
                     </td>
                     <td className="px-8 py-5">
                       <span className="text-sm font-bold text-gray-200 capitalize">
