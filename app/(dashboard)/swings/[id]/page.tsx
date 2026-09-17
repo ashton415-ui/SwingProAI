@@ -17,6 +17,9 @@ import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation
 import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
 
+/** The private bucket every swing video is uploaded to. Never made public. */
+const VIDEO_BUCKET = "swing-videos";
+
 export default async function SwingDetailPage({
   params,
 }: {
@@ -38,12 +41,46 @@ export default async function SwingDetailPage({
 
   const { data: swing } = await supabase
     .from("swing_analysis")
-    .select("*, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename)")
+    .select("*, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")
     .eq("id", params.id)
     .eq("user_id", user.id)
     .single();
 
   if (!swing) notFound();
+
+  // ── EQ5F-B analysis video replay — resolved here, on the server ─────────────
+  //
+  // Everything above is the permission to be here: the row was filtered by both
+  // id and user_id, and notFound() has already run, so private playback access
+  // is never minted for a row this golfer does not own. The bucket stays
+  // private and the browser receives only a time-limited signed URL — never a
+  // credential, and never the storage path itself.
+  //
+  // storage_path leads because it names the durable private object this
+  // analysis actually read. video_url stays beneath it as the compatibility
+  // fallback for rows recorded before signed playback existed; promoting it
+  // would prefer a stale URL over the object of record.
+  //
+  // A signing failure is not an analysis failure. It resolves to null, the
+  // replay simply does not render, and the result below is untouched.
+  const joinedVideo = swing.swing_video as
+    | { storage_path?: string | null; video_url?: string | null }
+    | { storage_path?: string | null; video_url?: string | null }[]
+    | null;
+  const videoRow = Array.isArray(joinedVideo) ? (joinedVideo[0] ?? null) : joinedVideo;
+
+  let playbackUrl: string | null = null;
+
+  if (typeof videoRow?.storage_path === "string" && videoRow.storage_path.trim().length > 0) {
+    const { data: signed } = await supabase.storage
+      .from(VIDEO_BUCKET)
+      .createSignedUrl(videoRow.storage_path, 3600);
+    playbackUrl = signed?.signedUrl ?? null;
+  }
+
+  if (playbackUrl === null && typeof videoRow?.video_url === "string" && videoRow.video_url.trim().length > 0) {
+    playbackUrl = videoRow.video_url;
+  }
 
   // Extract individual metrics from the jsonb metrics field
   const metrics = swing.metrics as Record<string, unknown> | null;
@@ -177,6 +214,27 @@ export default async function SwingDetailPage({
           )}
         </div>
       </div>
+
+      {/* ANALYSIS VIDEO REGION — family-neutral, and deliberately above the
+          split below. One replay serves a putt and a full swing alike, so
+          neither result contract owns a player, and nothing here reads the
+          family, the tier or the analysis payload. Rendered only when a
+          playback URL survived signing: an absent video is silent rather than
+          advertised, because a golfer cannot act on a permanent placeholder. */}
+      {playbackUrl && (
+        <section aria-label="Analysis video" className="mb-8">
+          <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-3">
+            Analysis Video
+          </p>
+          <video
+            src={playbackUrl}
+            controls
+            playsInline
+            preload="metadata"
+            className="w-full max-h-[70vh] aspect-video object-contain bg-black rounded-4xl border border-white/5"
+          />
+        </section>
+      )}
 
       {isPutt ? (
         /* PUTTING RESULT REGION — the whole report for a putting row. The
