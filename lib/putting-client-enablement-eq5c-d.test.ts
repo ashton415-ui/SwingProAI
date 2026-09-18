@@ -356,7 +356,7 @@ const GUARDS: Guard[] = [
       const family = code.indexOf("classifyAnalysisFamilyRoute(analysisRow.analysis_family)");
       const tier = code.indexOf('.select("subscription_tier")');
       const gate = code.indexOf("canUsePuttingAnalysis(currentTier)");
-      const run = code.indexOf("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+      const run = code.indexOf("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)");
       return (
         family >= 0 &&
         tier > family &&

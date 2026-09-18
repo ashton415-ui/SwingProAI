@@ -63,7 +63,7 @@ const PROTECTED_DIGESTS: Record<string, string> = {
   "supabase/migrations/20260820132900_equipment_non_putter_catalog_v1.sql":
     "9c11181dc15066228d8a04fedc07872adf0e5847404eee4a4540b528b16e4dcd",
   "lib/equipment-non-putter-catalog-schema.test.ts":
-    "09b790d25b15c453c17b3cfceee31b815bbdb544a2755e375bdc3ef0e53305a4",
+    "0da12c4c5fff39ce4af3a7d6d379525e7345487b059ed1eea3d0205516ec9f4e",
   "data/equipment-catalog-putters-v1.json":
     "0a73e9460d1f416b8af04838dc983df5bcb40ea9f4fa169b9975e50a2b502029",
   "scripts/generate-equipment-catalog-putters-v1.mjs":
@@ -73,7 +73,7 @@ const PROTECTED_DIGESTS: Record<string, string> = {
   "lib/equipment-catalog-schema.test.ts":
     "7fff61c8005d0517b942344180cbd68a12e640767132213c942dc6101cca59d9",
   "types/database.ts":
-    "4fc6245be78817213aa7f923dfd0a6a66d1fcb41c57fe5a373da8e49dd60b35d",
+    "661d2f072f7e3b0531352350b67b80c3c9432e86dab1c0850d44a349f28f577e",
   "supabase/migrations/20260903213417_equipment_model_source_category_provenance.sql":
     "34d8d1854523ef8516d89f796eddf7ef383dbe0dccb66a24fc5885318c9b93ae",
   [DATA_FILE]: "26c8fae856c53bc8c3e034a2306b9bc2f028e3029476bfcbcde0fb5aefd87c56",

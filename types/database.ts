@@ -236,6 +236,8 @@ export interface SwingAnalysis {
   path_deviation_mm: number | null;
   putt_analytics: Record<string, unknown> | null;
   putting_analysis: Record<string, unknown> | null;
+  /** Server-authored, write-once versioned putting score envelope — see lib/putting-score-eq5f-d.ts. Null for every analysis scored before EQ5F-E. */
+  putting_score: Record<string, unknown> | null;
   ai_equipment_recommendations: Record<string, unknown> | null;
   spine_angle: number | null;
   hip_rotation: number | null;

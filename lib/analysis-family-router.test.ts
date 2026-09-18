@@ -204,7 +204,7 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
     const branch = anchor('analysisRoute === "putting_pipeline"');
     const rest = handlerSource.slice(branch);
 
-    expect(rest).toContain("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    expect(rest).toContain("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)");
     expect(apiSource).toContain("async function runPuttingAnalysis(");
 
     // Inside the branch, in this order: read the tier, narrow it, judge it,
@@ -212,7 +212,7 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
     const tierQuery = rest.indexOf('.select("subscription_tier")');
     const narrowing = rest.indexOf("isSubscriptionTier(");
     const entitlement = rest.indexOf("canUsePuttingAnalysis(");
-    const pipeline = rest.indexOf("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    const pipeline = rest.indexOf("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)");
 
     expect(tierQuery, "the putting branch must read the current tier").toBeGreaterThanOrEqual(0);
     expect(narrowing, "the stored tier must be narrowed before use").toBeGreaterThan(tierQuery);
@@ -228,7 +228,7 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
    */
   it("gates before the helper, so the putting cache cannot answer first", () => {
     const gate = anchor("canUsePuttingAnalysis(");
-    const call = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    const call = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)");
     expect(gate).toBeLessThan(call);
 
     expect(puttingHelperSource).not.toContain("canUsePuttingAnalysis");
@@ -390,12 +390,31 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
     }
   });
 
-  it("writes exactly status and putting_analysis on success", () => {
-    const write = puttingAnchor("putting_analysis: buildPersistedPuttingAnalysis(");
+  it("writes exactly status, putting_analysis and putting_score on success", () => {
+    // EQ5F-E widened this write from two fields to three. The envelope and the
+    // score are stored in one statement, so a completed putting analysis can
+    // never exist without its score; the ban list below is unchanged, because
+    // widening the contract must not quietly admit anything else.
+    const write = puttingAnchor("putting_score: puttingScore,");
     const update = puttingHelperSource.lastIndexOf(".update({", write);
     expect(update).toBeGreaterThanOrEqual(0);
-    const payload = puttingHelperSource.slice(update, write + 200);
+    const objectEnd = puttingHelperSource.indexOf("})", write);
+    expect(objectEnd).toBeGreaterThan(write);
+    const payload = puttingHelperSource.slice(update, objectEnd + 2);
+
     expect(payload).toContain('status: "complete"');
+    expect(payload).toContain("putting_analysis: persistedPuttingAnalysis,");
+    expect(payload).toContain("putting_score: puttingScore,");
+
+    const assignedKeys = (payload.match(/^\s{8}([a-z_]+):/gm) ?? []).map((line) =>
+      line.trim().replace(":", ""),
+    );
+    expect(assignedKeys.slice().sort()).toEqual([
+      "putting_analysis",
+      "putting_score",
+      "status",
+    ]);
+
     for (const banned of [
       "putt_analytics",
       "putt_tempo_ratio",
@@ -411,6 +430,55 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
     ]) {
       expect(payload, `putting success write must not contain ${banned}`).not.toContain(banned);
     }
+  });
+
+  it("derives the score from the persisted envelope before persisting either", () => {
+    const build = puttingAnchor("buildPersistedPuttingAnalysis(puttingValidated.response)");
+    const score = puttingAnchor("computePuttingScoreFromAnalysisV1(persistedPuttingAnalysis");
+    const admin = puttingAnchor("createAdminClient()");
+    const write = puttingAnchor("putting_score: puttingScore,");
+
+    expect(puttingAnchor("validatePuttingModelResponse(puttingParsed)")).toBeLessThan(build);
+    expect(build).toBeLessThan(score);
+    expect(score).toBeLessThan(admin);
+    expect(admin).toBeLessThan(write);
+  });
+
+  it("bounds the privileged completion write and proves exactly one affected row", () => {
+    const write = puttingAnchor("putting_score: puttingScore,");
+    const region = puttingHelperSource.slice(write, write + 600);
+
+    for (const filter of [
+      '.eq("id", analysisId)',
+      '.eq("user_id", authenticatedUserId)',
+      '.eq("analysis_family", "putting")',
+      '.is("putting_score", null)',
+      ".select()",
+    ]) {
+      expect(region, `privileged write must carry ${filter}`).toContain(filter);
+    }
+
+    expect(puttingHelperSource).toContain("puttingUpdatedRows.length !== 1");
+    expect(puttingHelperSource).toContain("await markFailed();");
+    // A single-row helper would collapse "no row matched" into the same shape
+    // as "one row updated", which is the distinction this contract exists for.
+    expect(region).not.toContain(".single()");
+  });
+
+  it("fails closed when the deterministic score is unavailable", () => {
+    const guard = puttingAnchor("if (puttingScore === null) {");
+    const admin = puttingAnchor("createAdminClient()");
+    expect(guard).toBeLessThan(admin);
+    expect(puttingHelperSource.slice(guard, admin)).toContain("await markFailed();");
+  });
+
+  it("keeps the elevated client to the completion write alone", () => {
+    expect(
+      (puttingHelperSource.match(/createAdminClient\(\)/g) ?? []).length,
+      "the admin client must be constructed exactly once",
+    ).toBe(1);
+    // Every read on this route stays with the golfer's own session.
+    expect(puttingHelperSource).toContain('await supabase\n    .from("swing_analysis")');
   });
 
   it("persists only after structural and semantic validation succeed", () => {

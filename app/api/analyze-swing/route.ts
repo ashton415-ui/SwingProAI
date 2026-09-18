@@ -24,7 +24,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
+import { createAdminClient } from "@/utils/supabase/admin";
 import { extractSwingMetrics } from "@/lib/biometrics";
+import { computePuttingScoreFromAnalysisV1 } from "@/lib/putting-score-from-analysis-eq5f-e";
 import { classifyAnalysisFamilyRoute } from "@/lib/analysis-family-router";
 import { canUsePuttingAnalysis, type SubscriptionTier } from "@/lib/entitlements";
 import {
@@ -478,6 +480,7 @@ async function runPuttingAnalysis(
   supabase: RouteSupabaseClient,
   analysisRow: Record<string, unknown>,
   analysisId: string,
+  authenticatedUserId: string,
 ): Promise<NextResponse> {
   // A complete row is only reusable when its stored payload still satisfies the
   // current envelope AND the current safety rules, so a payload written by an
@@ -593,17 +596,64 @@ async function runPuttingAnalysis(
     return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
   }
 
-  const { data: puttingUpdated, error: puttingSaveError } = await supabase
-    .from("swing_analysis")
-    .update({
-      status: "complete",
-      putting_analysis: buildPersistedPuttingAnalysis(puttingValidated.response),
-    })
-    .eq("id", analysisId)
-    .select()
-    .single();
+  const persistedPuttingAnalysis = buildPersistedPuttingAnalysis(puttingValidated.response);
 
-  if (puttingSaveError) {
+  // EQ5F-E. The score is derived from the envelope that is about to be stored,
+  // by composing the existing deterministic authorities. A null here means the
+  // pipeline refused its own input — a failure, and a different fact from a
+  // valid envelope whose score is null because no section was scorable. The
+  // reason stays internal, like every other putting rejection on this route.
+  const puttingScore = computePuttingScoreFromAnalysisV1(persistedPuttingAnalysis, analysisId);
+
+  if (puttingScore === null) {
+    console.error("[analyze-swing] putting score unavailable");
+    await markFailed();
+    return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
+  }
+
+  // EQ5F-E. The completion write is the one privileged step on this route. The
+  // score is a server statement about the stroke, and the database refuses a
+  // first write that did not come from the trusted server role — so this single
+  // UPDATE runs as service_role while everything above it (auth, ownership,
+  // family, entitlement, validation) has already been decided by the golfer's
+  // own client. The filters restate every one of those facts rather than trust
+  // the elevated client: this row, this owner, this family, and only while no
+  // score has been recorded yet.
+  let puttingUpdatedRows: unknown = null;
+  let puttingSaveFailed = false;
+
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("swing_analysis")
+      .update({
+        status: "complete",
+        putting_analysis: persistedPuttingAnalysis,
+        putting_score: puttingScore,
+      })
+      .eq("id", analysisId)
+      .eq("user_id", authenticatedUserId)
+      .eq("analysis_family", "putting")
+      .is("putting_score", null)
+      .select();
+
+    puttingUpdatedRows = data;
+    puttingSaveFailed = Boolean(error);
+  } catch {
+    // A missing service-role configuration throws on construction. That is a
+    // failure to complete, never a silent success.
+    puttingSaveFailed = true;
+  }
+
+  // Exactly one row, proved rather than assumed. Zero rows is the interesting
+  // case: it means the row moved, was never this golfer's, was not a putt, or
+  // already carries a score — none of which may be reported as a completion.
+  if (
+    puttingSaveFailed ||
+    !Array.isArray(puttingUpdatedRows) ||
+    puttingUpdatedRows.length !== 1
+  ) {
+    console.error("[analyze-swing] putting completion write did not affect exactly one row");
     await markFailed();
     return NextResponse.json(
       { error: "We couldn't save your analysis. Please try again." },
@@ -611,7 +661,7 @@ async function runPuttingAnalysis(
     );
   }
 
-  return NextResponse.json({ message: "Analysis complete", data: puttingUpdated });
+  return NextResponse.json({ message: "Analysis complete", data: puttingUpdatedRows[0] });
 }
 
 
@@ -718,7 +768,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return await runPuttingAnalysis(supabase, analysisRow, analysisId);
+    return await runPuttingAnalysis(supabase, analysisRow, analysisId, user.id);
   }
 
   if (analysisRoute === "unsupported_family") {

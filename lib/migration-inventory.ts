@@ -124,6 +124,14 @@ export const PUTTING_DRILL_CATALOG_SEED_FILENAME =
   "20260914034708_putting_drill_catalog_seed.sql";
 
 /**
+ * The EQ5F-E migration that adds public.swing_analysis.putting_score and the
+ * guard protecting it. Schema and guard only: the column is nullable with no
+ * default, every existing row keeps a NULL score, and nothing is backfilled.
+ */
+export const PUTTING_SCORE_EQ5F_E_FILENAME =
+  "20260918154500_putting_score_eq5f_e.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -147,6 +155,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   EQUIPMENT_NON_PUTTER_CATALOG_V2_FILENAME,
   DRILLS_DRILL_FAMILY_FOUNDATION_FILENAME,
   PUTTING_DRILL_CATALOG_SEED_FILENAME,
+  PUTTING_SCORE_EQ5F_E_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

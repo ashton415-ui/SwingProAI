@@ -300,7 +300,7 @@ describe("nothing putting-specific happens before the gate", () => {
     const lookup = anchor('.select("subscription_tier")');
     const narrow = anchor("isSubscriptionTier(storedTier)");
     const judge = anchor("canUsePuttingAnalysis(currentTier)");
-    const run = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    const run = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)");
 
     expect(family).toBeLessThan(branch);
     expect(branch).toBeLessThan(lookup);
@@ -312,7 +312,7 @@ describe("nothing putting-specific happens before the gate", () => {
   it("refuses before the pipeline is ever called", () => {
     const refusal500 = anchor("{ status: 500 }");
     const refusal403 = anchor("{ status: 403 }");
-    const run = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId)");
+    const run = anchor("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)");
     expect(refusal500).toBeLessThan(run);
     expect(refusal403).toBeLessThan(run);
   });
@@ -386,7 +386,12 @@ describe("nothing putting-specific happens before the gate", () => {
       ".createSignedUrl(storagePath, 3600)",
       "await fetchVideoBytes(",
       "puttingModel.generateContent({",
-      "putting_analysis: buildPersistedPuttingAnalysis(",
+      // EQ5F-E builds the envelope into a local before deriving the score from
+      // it, so the inline form is gone. The property this line stands for is
+      // unchanged: constructing the persisted analysis, and persisting the
+      // completed result, both remain side effects of the guarded helper.
+      "buildPersistedPuttingAnalysis(puttingValidated.response)",
+      "putting_score: puttingScore,",
       '.update({ status: "failed" })',
     ]) {
       expect(
@@ -405,13 +410,13 @@ describe("nothing putting-specific happens before the gate", () => {
     const cache = puttingHelperSource.indexOf("isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)");
     expect(cache).toBeGreaterThanOrEqual(0);
     expect(anchor("canUsePuttingAnalysis(currentTier)")).toBeLessThan(
-      anchor("runPuttingAnalysis(supabase, analysisRow, analysisId)"),
+      anchor("runPuttingAnalysis(supabase, analysisRow, analysisId, user.id)"),
     );
   });
 
   it("reaches the existing pipeline unchanged when entitled", () => {
     expect(puttingBranchSource).toContain(
-      "return await runPuttingAnalysis(supabase, analysisRow, analysisId);",
+      "return await runPuttingAnalysis(supabase, analysisRow, analysisId, user.id);",
     );
     expect(apiSource).toContain("async function runPuttingAnalysis(");
   });
