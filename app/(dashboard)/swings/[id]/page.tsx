@@ -7,6 +7,7 @@ import {
   type PuttingResultState,
 } from "@/components/putting/PuttingAnalysisPanel";
 import { PuttingRecommendationsPanel } from "@/components/putting/PuttingRecommendationsPanel";
+import { PuttingScoreCard } from "@/components/putting/PuttingScoreCard";
 import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
 import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
 import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
@@ -14,6 +15,7 @@ import { canUsePuttingAnalysis } from "@/lib/entitlements";
 import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
+import { resolvePuttingScorePresentation } from "@/lib/putting-score-presentation-eq5f-f";
 import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
 
@@ -185,6 +187,37 @@ export default async function SwingDetailPage({
         })
       : null;
 
+  // ── EQ5F-F putting stroke index — resolved here, on the server ──────────────
+  //
+  // The score is read, never derived. EQ5F-E wrote it once from validated
+  // evidence and shipped with no backfill, so a row recorded before that
+  // release carries NULL and must keep carrying it: recomputing one here would
+  // undo that decision for every historical analysis at read time, silently and
+  // all at once. Nothing below consumes putting_analysis.
+  //
+  // Readiness is borrowed rather than restated. `"analysis" in puttingState` is
+  // the union's own discriminator for the one variant that survived entitlement,
+  // completion and payload validation above, so the index cannot appear for a
+  // locked golfer, an unfinished row or a payload the page would not otherwise
+  // display. A second readiness rule here would be a second way to be wrong.
+  //
+  // The stored jsonb is untrusted transport, exactly as the analysis payload is.
+  // It becomes a typed contract only by passing the strict v1 validator, and a
+  // malformed or future envelope resolves to null — no card, rather than a
+  // number whose meaning this page cannot vouch for. Only three primitives cross
+  // into the component; the stored object never does.
+  const rawPuttingScore = (swing.putting_score ?? null) as Record<string, unknown> | null;
+
+  // The readiness test is written in its own order rather than copied verbatim
+  // from the recommendation gate above. Both ask the same question, but the
+  // published EQ5E-D and EQ5F-B suites break their gates by replacing that exact
+  // expression once; a second identical copy on this page would silently absorb
+  // the mutation and leave those guards proving nothing.
+  const puttingScoreState =
+    puttingState !== null && "analysis" in puttingState && isPutt
+      ? resolvePuttingScorePresentation(rawPuttingScore)
+      : null;
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-10">
       <Link
@@ -243,6 +276,12 @@ export default async function SwingDetailPage({
            so showing those cards as dashes under full-swing ideal ranges would
            claim six attempted measurements that do not exist. */
         <>
+          {puttingScoreState && (
+            <div className="mb-6">
+              <PuttingScoreCard state={puttingScoreState} />
+            </div>
+          )}
+
           {puttingState && (
             <div className="mb-6">
               <PuttingAnalysisPanel state={puttingState} />

@@ -711,10 +711,16 @@ describe("EQ5F-E — untouched boundaries", () => {
     expect(authority).not.toContain("computePuttingScore");
   });
 
-  it("no consumer surface renders a score", () => {
-    for (const surface of [CANONICAL_PAGE, PROGRESS_HUB, TELEMETRY]) {
+  it("out-of-scope consumer surfaces still do not render a putting score", () => {
+    // EQ5F-F made the canonical swing-detail page the one authorized
+    // golfer-facing consumer, and lib/putting-score-presentation-eq5f-f.test.ts
+    // proves that positively. The ban is not deleted here, only narrowed to the
+    // surfaces that remain deliberately score-free: history and telemetry
+    // trends are their own later slices, and a score arriving on either of them
+    // by accident is exactly what this guard still exists to catch.
+    for (const surface of [PROGRESS_HUB, TELEMETRY]) {
       const code = readSource(surface);
-      expect(code, `${surface} must not consume the score yet`).not.toContain("putting_score");
+      expect(code, `${surface} must not consume the score`).not.toContain("putting_score");
       expect(code, `${surface} must not import the scorer`).not.toContain("putting-score-");
     }
   });
