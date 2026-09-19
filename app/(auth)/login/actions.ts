@@ -14,7 +14,5 @@ export async function setSessionAction(access_token: string, refresh_token: stri
     httpOnly: false,
   });
 
-  console.log("Cookie set attempt. access_token length:", access_token.length);
-
   return { success: true };
 }

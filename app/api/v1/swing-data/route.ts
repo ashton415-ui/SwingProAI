@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/utils/supabase/server";
+import { resolveRouteAuth } from "@/utils/supabase/server";
 import type { SwingTelemetryPayload } from "@/types/database";
 
 const VALID_VIEW_ANGLES = ["face_on", "down_the_line"] as const;
@@ -21,17 +21,33 @@ function isValidPayload(body: unknown): body is SwingTelemetryPayload {
 
 /**
  * POST /api/v1/swing-data
- * Receives SwingTelemetryPayload from the C# client.
- * Requires: Authorization: Bearer <supabase-jwt>
+ * Receives SwingTelemetryPayload from a non-browser client.
+ * Accepts: Authorization: Bearer <supabase-jwt>, or the browser session cookie.
  */
 export async function POST(req: NextRequest) {
-  // 1. Authenticate via Supabase JWT
-  const supabase = await createClient();
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
+  // 1. Authenticate. An Authorization header selects header mode outright —
+  //    the cookie is never consulted as a fallback, so a bad explicit
+  //    credential cannot land the caller on someone else's browser session.
+  //    This route is the only Bearer-capable surface in this slice.
+  const auth = await resolveRouteAuth();
 
-  if (authError || !user) {
+  if (auth.status === "verification_unavailable") {
+    // Auth could not be reached. That is an outage, not a bad credential, and
+    // answering 401 would tell a correctly-authenticated caller to sign in
+    // again over a problem that is not theirs.
+    return NextResponse.json(
+      { error: "Authentication temporarily unavailable" },
+      { status: 503 },
+    );
+  }
+
+  if (auth.status !== "authenticated") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // Scoped to the verified caller's own token: RLS remains the authority for
+  // every statement below.
+  const supabase = auth.client;
 
   // 2. Parse and validate payload
   let body: unknown;
@@ -48,8 +64,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 3. Ensure userId matches authenticated user
-  if (body.userId !== user.id) {
+  // 3. Ensure userId matches the verified user
+  if (body.userId !== auth.userId) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -57,7 +73,7 @@ export async function POST(req: NextRequest) {
   const { data: video, error: videoError } = await supabase
     .from("swing_videos")
     .insert({
-      user_id: user.id,
+      user_id: auth.userId,
       storage_path: "", // populated later when video upload completes
       status: "processing",
     })
@@ -74,7 +90,7 @@ export async function POST(req: NextRequest) {
     .from("swing_analysis")
     .insert({
       swing_video_id: video.id,
-      user_id: user.id,
+      user_id: auth.userId,
       spine_angle_deg: body.biomechanics.spineAngleDegree,
       tempo_ratio: body.biomechanics.tempoRatio,
       raw_result: {

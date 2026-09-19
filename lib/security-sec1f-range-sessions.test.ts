@@ -576,10 +576,6 @@ describe("SEC1F — out-of-scope files are untouched", () => {
       "1fd36582ed43a74c1011ce3aa5e0aa9b6453645cfa043c0a87f24e013347826d",
     ],
     [
-      path.join("utils", "supabase", "server.ts"),
-      "be01ba41db7284a4d30d9cac25041b03c9976a83adfca0a82e0be5a74cac31fd",
-    ],
-    [
       path.join("supabase", "migrations", "20260721220000_swingproai_production_baseline.sql"),
       "33a599f07cd6aba5761ce7feea811ed3c096bb9dbc50f21d519037df45d4b828",
     ],

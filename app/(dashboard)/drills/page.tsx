@@ -11,7 +11,7 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 function getSessionFromCookie(): { access_token: string; user_id: string } | null {
   if (typeof document === "undefined") return null;
   try {
-    const name = "sb-atlmnqispyzhsahahpjy-auth-token";
+    const name = `sb-${new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).hostname.split(".")[0]}-auth-token`;
     const match = document.cookie.split("; ").find((c) => c.startsWith(`${name}=`));
     if (!match) return null;
     const parsed = JSON.parse(decodeURIComponent(match.split("=").slice(1).join("=")));
