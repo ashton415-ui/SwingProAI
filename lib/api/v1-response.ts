@@ -29,7 +29,8 @@ export type V1ErrorCode =
   | "AUTH_REQUIRED"
   | "AUTH_INVALID"
   | "SERVER_TEMPORARILY_UNAVAILABLE"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  | "VALIDATION_ERROR";
 
 /** Every V1 response carries private, uncacheable semantics. See `v1Headers`. */
 export const V1_CACHE_CONTROL = "private, no-store";
@@ -116,6 +117,20 @@ const AUTH_REQUIRED_MESSAGE = "Authentication is required.";
 const AUTH_INVALID_MESSAGE = "The supplied credential is not valid.";
 const AUTH_UNAVAILABLE_MESSAGE = "Authentication is temporarily unavailable. Please retry.";
 const INTERNAL_MESSAGE = "The request could not be completed.";
+const VALIDATION_MESSAGE = "The request is not valid.";
+
+/**
+ * A rejected request body or parameter.
+ *
+ * The message is deliberately uniform and says nothing about *which* field
+ * failed or why. A caller that supplied a well-formed request never sees this,
+ * and a caller probing the boundary learns only that the request was refused —
+ * field-level detail here would describe the server's validation rules to
+ * whoever is trying to find their edges.
+ */
+export function v1ValidationError(requestId: string): Response {
+  return v1Error("VALIDATION_ERROR", VALIDATION_MESSAGE, requestId, 400);
+}
 
 /**
  * Turns a resolver outcome into the response it deserves, or `null` when the
