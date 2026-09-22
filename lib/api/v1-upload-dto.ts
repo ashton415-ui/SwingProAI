@@ -184,6 +184,192 @@ export interface UploadAuthorizationDto {
   readonly upsert: boolean;
 }
 
+/* ─── D2: finalization ─────────────────────────────────────────────────────── */
+
+/**
+ * The finalization request.
+ *
+ * `fileSize` is deliberately absent. At authorization time a declared size is
+ * the only size that exists, so D1 accepts one as a courtesy pre-flight. At
+ * finalization the bytes are already stored, which makes Storage the only
+ * honest authority — accepting a caller's number here would invite a client to
+ * register a size its object does not have.
+ */
+export interface UploadFinalizeRequest {
+  readonly uploadId: string;
+  readonly mimeType: UploadMimeType;
+}
+
+/** Exactly the keys finalization accepts. Anything else fails the request. */
+const ALLOWED_FINALIZE_KEYS = ["uploadId", "mimeType"] as const;
+
+/**
+ * Parses an untrusted finalization body, or returns `null`.
+ *
+ * Unknown keys are refused rather than ignored, which is what makes the
+ * forbidden-field list unnecessary: `storagePath`, `userId`, `bucket`,
+ * `fileSize`, `analysisMode` and every other field a caller might hope to
+ * influence are rejected by the closed key set, including ones nobody has
+ * thought of yet. Enumerating known-bad names instead would accept the
+ * twenty-first.
+ */
+export function parseUploadFinalizeRequest(body: unknown): UploadFinalizeRequest | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+
+  const record = body as Record<string, unknown>;
+
+  for (const key of Object.keys(record)) {
+    if (!(ALLOWED_FINALIZE_KEYS as readonly string[]).includes(key)) return null;
+  }
+  for (const key of ALLOWED_FINALIZE_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) return null;
+  }
+
+  const { uploadId, mimeType } = record;
+  if (!isUuidV4(uploadId)) return null;
+  if (!isUploadMimeType(mimeType)) return null;
+
+  return { uploadId, mimeType };
+}
+
+/**
+ * The authoritative facts a stored object must supply.
+ *
+ * Both fields are optional because the installed Storage client types them
+ * that way: `Camelize<FileObjectV2>` declares `size?` and `contentType?`, so a
+ * response with neither is type-legal. Modelling them honestly here forces the
+ * validator below to decide what an absent value means instead of letting
+ * `undefined` flow into a row.
+ */
+export interface StoredUploadMetadata {
+  readonly size?: unknown;
+  readonly contentType?: unknown;
+}
+
+/** A validated stored object: exactly the two values a row may be built from. */
+export interface ValidatedUploadMetadata {
+  readonly size: number;
+  readonly contentType: UploadMimeType;
+}
+
+/**
+ * Validates authoritative Storage metadata against the requested content type.
+ *
+ * Returns `null` rather than throwing, and never repairs: a missing size is not
+ * zero, a `video/mp4;charset=utf-8` is not `video/mp4`, and `VIDEO/MP4` is not
+ * a case variant to be folded. Each of those would mean writing a row that
+ * misdescribes the object it points at.
+ *
+ * The declared type must equal the requested type exactly, because the object
+ * path's extension was derived from the request. If they disagree, either the
+ * upload went somewhere unexpected or the client is describing a file it did
+ * not store; both are refusals, not reconciliations.
+ */
+export function validateStoredUploadMetadata(
+  metadata: StoredUploadMetadata,
+  requestedMimeType: UploadMimeType,
+): ValidatedUploadMetadata | null {
+  const { size, contentType } = metadata;
+
+  if (typeof size !== "number") return null;
+  if (!Number.isSafeInteger(size)) return null;
+  if (size <= 0) return null;
+  if (size > MAX_UPLOAD_BYTES) return null;
+
+  if (typeof contentType !== "string") return null;
+  if (!isUploadMimeType(contentType)) return null;
+  if (contentType !== requestedMimeType) return null;
+
+  return { size, contentType };
+}
+
+export interface UploadFinalizeDto {
+  readonly swingVideoId: string;
+  readonly uploadId: string;
+  readonly status: "uploaded";
+  readonly objectPath: string;
+  readonly fileSize: number;
+  readonly contentType: UploadMimeType;
+  readonly created: boolean;
+}
+
+/**
+ * The canonical finalized-upload answer.
+ *
+ * `swingVideoId` and `uploadId` are the same value, reported twice on purpose:
+ * the caller minted the identifier before the resource existed, and echoing it
+ * under both names lets a client confirm the row it now owns is the upload it
+ * started without having to assume the two are equal.
+ *
+ * `created` distinguishes a first finalization from an idempotent repeat. It
+ * carries that distinction instead of the HTTP status, so a client retrying
+ * after a lost response reads one consistent 200 either way.
+ */
+export function buildUploadFinalizeDto(input: {
+  uploadId: string;
+  objectPath: string;
+  fileSize: number;
+  contentType: UploadMimeType;
+  created: boolean;
+}): UploadFinalizeDto {
+  return {
+    swingVideoId: input.uploadId,
+    uploadId: input.uploadId,
+    status: "uploaded",
+    objectPath: input.objectPath,
+    fileSize: input.fileSize,
+    contentType: input.contentType,
+    created: input.created,
+  };
+}
+
+/** The canonical status a finalized upload row carries. */
+export const UPLOAD_FINALIZED_STATUS = "uploaded";
+
+/** The exact `swing_videos` columns finalization reads to decide idempotency. */
+export const FINALIZE_ROW_COLUMNS =
+  "id, user_id, storage_path, video_url, file_size, mime_type, status, created_at";
+
+/** Postgres unique-violation code. The only error that means "someone won a race". */
+export const PG_UNIQUE_VIOLATION = "23505";
+
+/**
+ * Whether an existing owned row is the canonical record for this finalization.
+ *
+ * Every field is compared, not a subset. A row that matches on id and owner but
+ * disagrees about size, path or content type describes a different upload
+ * wearing the same identifier, and answering success for it would hand the
+ * caller a resource that is not the one they finalized.
+ */
+export function isCanonicalFinalizedRow(
+  row: {
+    id?: unknown;
+    user_id?: unknown;
+    storage_path?: unknown;
+    video_url?: unknown;
+    file_size?: unknown;
+    mime_type?: unknown;
+    status?: unknown;
+  },
+  expected: {
+    uploadId: string;
+    userId: string;
+    objectPath: string;
+    fileSize: number;
+    contentType: UploadMimeType;
+  },
+): boolean {
+  return (
+    row.id === expected.uploadId &&
+    row.user_id === expected.userId &&
+    row.storage_path === expected.objectPath &&
+    row.video_url === expected.objectPath &&
+    Number(row.file_size) === expected.fileSize &&
+    row.mime_type === expected.contentType &&
+    row.status === UPLOAD_FINALIZED_STATUS
+  );
+}
+
 /**
  * The authorization handed to a Native client.
  *

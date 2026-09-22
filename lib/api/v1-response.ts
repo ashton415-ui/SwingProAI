@@ -30,7 +30,10 @@ export type V1ErrorCode =
   | "AUTH_INVALID"
   | "SERVER_TEMPORARILY_UNAVAILABLE"
   | "INTERNAL_ERROR"
-  | "VALIDATION_ERROR";
+  | "VALIDATION_ERROR"
+  | "UPLOAD_NOT_FOUND_OR_NOT_READY"
+  | "UPLOAD_METADATA_INVALID"
+  | "UPLOAD_CONFLICT";
 
 /** Every V1 response carries private, uncacheable semantics. See `v1Headers`. */
 export const V1_CACHE_CONTROL = "private, no-store";

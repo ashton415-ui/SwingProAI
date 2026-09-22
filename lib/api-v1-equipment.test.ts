@@ -733,7 +733,7 @@ const DTO_MODULE = "lib/api/v1-equipment-dto.ts";
 describe("equipment slice source contract", () => {
   const FROZEN: Array<[string, string]> = [
     ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
-    ["lib/api/v1-response.ts", "7ad95521b7bbc0ed20e2be28f804a145af08035772663bc16d1438f3bfff15ad"],
+    ["lib/api/v1-response.ts", "28b1758c6d2b4bc3151415e90f6ed326b61d9296ccea4ea201946a4499d207f0"],
     ["lib/api/me-dto.ts", "ed8d897ca11e05a7d722c03904d4a7642afeea63d5f8db58bc05b861928fa75f"],
     ["app/api/v1/me/route.ts", "465fafe5eb791148b29f27028db0e3685ca219b5217eef6b46aca0e5033071a2"],
     ["lib/api-v1-foundation.test.ts", "55d0db58605084dff9a4a2210f331d45fc2164fa4ea011371bcf6e3adc248335"],
