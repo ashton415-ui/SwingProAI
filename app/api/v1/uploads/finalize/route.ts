@@ -63,6 +63,14 @@ const INTERNAL_MESSAGE = "The request could not be completed.";
 /** HTTP status Storage returns for an object that is not there. */
 const STORAGE_NOT_FOUND_STATUS = 404;
 
+/**
+ * Hosted Supabase Storage can report a missing object as HTTP 400 while the
+ * service-level 404 travels in the error body, which storage-js surfaces as the
+ * typed string `statusCode`. Accepted only together with that exact 400.
+ */
+const STORAGE_WRAPPED_NOT_FOUND_STATUS = 400;
+const STORAGE_NOT_FOUND_STATUS_CODE = "404";
+
 export async function POST(request: Request): Promise<Response> {
   const requestId = resolveRequestId(await headers());
 
@@ -116,11 +124,21 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     if (info.error) {
-      // Classified on the typed numeric status only. The provider message can
+      // Classified on the typed status fields only. The provider message can
       // carry the object path and bucket internals, and matching on its prose
       // would also break silently the first time that prose is reworded.
-      const status = (info.error as { status?: unknown }).status;
-      if (status === STORAGE_NOT_FOUND_STATUS) {
+      //
+      // Missing means a direct HTTP 404, or the hosted shape of an HTTP 400
+      // carrying a service-level "404". Any other 400 is not evidence of
+      // absence and stays an outage. Storage also answers "not found" when a
+      // policy hides the object, so this means "not found or not visible",
+      // which the deliberately non-disclosing public message already allows for.
+      const { status, statusCode } = info.error as { status?: unknown; statusCode?: unknown };
+      const missing =
+        status === STORAGE_NOT_FOUND_STATUS ||
+        (status === STORAGE_WRAPPED_NOT_FOUND_STATUS &&
+          statusCode === STORAGE_NOT_FOUND_STATUS_CODE);
+      if (missing) {
         return v1Error("UPLOAD_NOT_FOUND_OR_NOT_READY", NOT_READY_MESSAGE, requestId, 409);
       }
       // Authorization, configuration and unknown Storage failures are outages,

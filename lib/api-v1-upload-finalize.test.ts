@@ -44,7 +44,7 @@ type RecordedCall = readonly [method: string, ...args: unknown[]];
 
 interface InfoResult {
   data: { id?: unknown; size?: unknown; contentType?: unknown } | null;
-  error: { status?: unknown; statusCode?: string; message?: string } | null;
+  error: { status?: unknown; statusCode?: unknown; message?: string } | null;
 }
 
 interface DbResult {
@@ -538,6 +538,50 @@ describe("D2 finalize — stored metadata is authoritative", () => {
       expect(insertCalls(client)).toHaveLength(0);
     },
   );
+
+  // Observed on hosted Supabase Storage: a missing object reached storage-js as
+  // HTTP 400 with the service-level 404 in the typed string `statusCode`.
+  it("72a. hosted Storage's 400 carrying statusCode \"404\" is not-found-or-not-ready", async () => {
+    const client = makeFakeClient({
+      info: { data: null, error: { status: 400, statusCode: "404" } },
+      insert: { data: null, error: null },
+    });
+    setAuthenticated(client);
+    const response = await finalizePOST(post(validBody()));
+    expect(response.status).toBe(409);
+    const body = await bodyOf(response);
+    expect(body).toMatchObject({
+      error: {
+        code: "UPLOAD_NOT_FOUND_OR_NOT_READY",
+        message: "The upload could not be found or is not ready.",
+      },
+    });
+    expect(insertCalls(client)).toHaveLength(0);
+  });
+
+  it.each<[string, { status: unknown; statusCode: unknown }]>([
+    ["a 400 whose statusCode is \"400\"", { status: 400, statusCode: "400" }],
+    ["a 400 whose statusCode is a named code", { status: 400, statusCode: "InvalidKey" }],
+    ["a 500 whose statusCode is \"404\"", { status: 500, statusCode: "404" }],
+    ["a string status \"400\" with statusCode \"404\"", { status: "400", statusCode: "404" }],
+    ["a 400 whose statusCode is the number 404", { status: 400, statusCode: 404 }],
+  ])("72b-f. %s is an outage, never a missing object", async (_label, error) => {
+    const client = makeFakeClient({
+      info: { data: null, error },
+      insert: { data: null, error: null },
+    });
+    setAuthenticated(client);
+    const response = await finalizePOST(post(validBody()));
+    expect(response.status).toBe(503);
+    const body = await bodyOf(response);
+    expect(body).toMatchObject({
+      error: {
+        code: "SERVER_TEMPORARILY_UNAVAILABLE",
+        message: "Finalization is temporarily unavailable. Please retry.",
+      },
+    });
+    expect(insertCalls(client)).toHaveLength(0);
+  });
 
   it("73. a Storage transport throw is an outage", async () => {
     const client = makeFakeClient({ infoThrows: true });
