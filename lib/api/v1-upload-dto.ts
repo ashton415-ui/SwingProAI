@@ -146,7 +146,13 @@ export function buildUploadObjectPath(userId: string, uploadId: string, mimeType
 }
 
 /**
- * The direct Storage host's resumable endpoint for the configured project.
+ * The direct Storage host's signed resumable (TUS) endpoint for the configured
+ * project.
+ *
+ * The authorize route mints a path-bound token with `createSignedUploadUrl`,
+ * and the client presents it as `x-signature` (with the project `apikey`)
+ * against `/upload/resumable/sign`; the plain `/upload/resumable` endpoint
+ * expects a user Bearer JWT instead and would not accept the signed token.
  *
  * Large uploads are told to go to `<ref>.storage.supabase.co` rather than the
  * API host, which is what Supabase recommends for throughput. The project ref
@@ -169,7 +175,7 @@ export function buildResumableEndpoint(supabaseUrl: string | undefined): string 
   if (!/^[a-z0-9]{8,}$/i.test(ref)) return null;
   if (!host.endsWith(".supabase.co")) return null;
 
-  return `https://${ref}.storage.supabase.co/storage/v1/upload/resumable`;
+  return `https://${ref}.storage.supabase.co/storage/v1/upload/resumable/sign`;
 }
 
 export interface UploadAuthorizationDto {

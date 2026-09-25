@@ -109,7 +109,7 @@ const CALLER_ID = "11111111-2222-4333-8444-555555555555";
 const UPLOAD_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const TEST_SUPABASE_URL = "https://abcdefghijklmnop.supabase.co";
 const EXPECTED_ENDPOINT =
-  "https://abcdefghijklmnop.storage.supabase.co/storage/v1/upload/resumable";
+  "https://abcdefghijklmnop.storage.supabase.co/storage/v1/upload/resumable/sign";
 
 const ORIGINAL_SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 
@@ -358,6 +358,7 @@ describe("D1 authorize — Storage authorization", () => {
         error: { message: 'new row violates row-level security policy for bucket "swing-videos"', statusCode: "403" },
       }),
     );
+    state.incomingRequestId = "NativeUpload_20260920";
     const response = await authorizePOST(post(validBody()));
     expect(response.status).toBe(503);
     const text = JSON.stringify(await bodyOf(response));
@@ -391,6 +392,15 @@ describe("D1 authorize — Storage authorization", () => {
     expect(buildResumableEndpoint(TEST_SUPABASE_URL)).toBe(EXPECTED_ENDPOINT);
     expect(buildResumableEndpoint(undefined)).toBeNull();
     expect(buildResumableEndpoint("http://127.0.0.1:54321")).toBeNull();
+  });
+
+  it("targets the signed resumable endpoint that accepts the x-signature token", () => {
+    const endpoint = buildResumableEndpoint(TEST_SUPABASE_URL)!;
+    expect(endpoint.endsWith("/storage/v1/upload/resumable/sign")).toBe(true);
+    expect(endpoint).not.toBe("https://abcdefghijklmnop.storage.supabase.co/storage/v1/upload/resumable");
+    expect(endpoint.endsWith("/resumable/")).toBe(false);
+    expect(endpoint.endsWith("/sign/")).toBe(false);
+    expect(new URL(endpoint).origin).toBe("https://abcdefghijklmnop.storage.supabase.co");
   });
 });
 
