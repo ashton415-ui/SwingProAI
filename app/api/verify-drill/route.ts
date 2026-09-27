@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
 import { GoogleAIFileManager, FileState } from "@google/generative-ai/server";
 import { createClient } from "@/utils/supabase/server";
-import { createAdminClient } from "@/utils/supabase/admin";
+import { checkDrillVideoPath } from "@/lib/drill-video-path";
 import fs from "fs";
 import path from "path";
 
@@ -70,6 +70,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  // SEC-DRILL1: the video must live in the caller's own drill_videos folder.
+  // Decided locally before any lookup, download, or AI call.
+  const pathCheck = checkDrillVideoPath(user.id, videoStoragePath);
+  if (pathCheck.kind === "forbidden") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  if (pathCheck.kind === "invalid") {
+    return NextResponse.json({ error: "Invalid videoStoragePath" }, { status: 400 });
+  }
+
   // ── Fetch the drill's AI verification prompt ────────────────────────────────
   const { data: drill, error: drillErr } = await supabase
     .from("drills")
@@ -91,10 +101,10 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Download video from Supabase Storage ────────────────────────────────────
-  const admin = createAdminClient();
+  // Caller-scoped client: the drill_videos owner-folder SELECT policy applies.
   console.log("[verify-drill] downloading from drill_videos:", videoStoragePath);
 
-  const { data: videoBlob, error: downloadErr } = await admin.storage
+  const { data: videoBlob, error: downloadErr } = await supabase.storage
     .from("drill_videos")
     .download(videoStoragePath);
 

@@ -119,7 +119,7 @@ const WRITE_OPERATIONS = [".insert(", ".upsert(", ".update(", ".delete("];
 const DOWNSTREAM_EFFECTS = [
   "GEMINI_API_KEY",
   "GOOGLE_AI_API_KEY",
-  "createAdminClient()",
+  '.from("drill_videos")',
   ".download(",
   "fs.writeFileSync",
   "new GoogleAIFileManager(",
