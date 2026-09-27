@@ -52,7 +52,9 @@ const ANCHORS = {
   sessionResolution: "auth.getSession()",
   storageUpload: ".from(BUCKET).upload(",
   swingVideosInsert: `.from("swing_videos")`,
-  swingAnalysisInsert: `.from("swing_analysis")`,
+  /** Analysis request authority closure: the pending analysis row is created by
+   *  the trusted server doorway, which now occupies the old insert's step. */
+  swingAnalysisInsert: `fetch("/api/v1/analyses"`,
   analysisApi: `"/api/analyze-swing"`,
   /** EQ3-S1: the fresh active-bag re-read that guards a stale club selection. */
   clubRevalidation: "querySavedClubs(supabase, { userId })",
@@ -220,18 +222,23 @@ describe("Analyze auth/session source contract — submission ordering", () => {
     expect(analyzeSource).toMatch(
       /const\s+storagePath\s*=\s*`\$\{userId\}\/\$\{crypto\.randomUUID\(\)\}\//
     );
-    // swing_videos and swing_analysis both carry the session-derived id.
+    // swing_videos carries the session-derived id. swing_analysis no longer
+    // takes an owner from the browser at all: /api/v1/analyses derives it from
+    // the verified session server-side.
     expect(analyzeSource).toMatch(/user_id:\s*userId,/);
-    expect(analyzeSource.match(/user_id:\s*userId,/g) ?? []).toHaveLength(2);
+    expect(analyzeSource.match(/user_id:\s*userId,/g) ?? []).toHaveLength(1);
     // No hand-parsed ownership field may survive.
     expect(analyzeSource).not.toContain("user_id: s.user_id");
     expect(analyzeSource).not.toContain("session.user_id");
   });
 
-  it("reuses the same managed client for Storage, swing_videos, and swing_analysis", () => {
+  it("reuses the same managed client for Storage and swing_videos, and writes no swing_analysis row", () => {
     expect(analyzeSource).toContain("await supabase.storage");
     expect(analyzeSource).toMatch(/await\s+supabase\s*\n?\s*\.from\("swing_videos"\)/);
-    expect(analyzeSource).toMatch(/await\s+supabase\s*\n?\s*\.from\("swing_analysis"\)/);
+    // Analysis request authority closure: the browser holds no INSERT on
+    // swing_analysis; the request goes through the trusted server doorway.
+    expect(analyzeSource).not.toMatch(/\.from\("swing_analysis"\)/);
+    expect(analyzeSource).toContain('fetch("/api/v1/analyses"');
     // Exactly one client is constructed in the whole page.
     expect(analyzeSource.match(/createClient\(\)/g) ?? []).toHaveLength(1);
   });

@@ -583,7 +583,9 @@ describe("frozen read-only dependencies", () => {
     ["app/api/v1/me/route.ts", "465fafe5eb791148b29f27028db0e3685ca219b5217eef6b46aca0e5033071a2"],
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
     ["lib/entitlements.ts", "a0ad96e69b3774b4562efe5f25526a9920dfa5646640db3f3df979565a3b962f"],
-    ["app/(dashboard)/analyze/page.tsx", "7aa5a9b6bd166b4042651a198fc9bea130a2ae8ee5c5459a8739d0c7d70f7fae"],
+    // Analysis request authority closure: the browser swing_analysis INSERT is
+    // replaced by a request to POST /api/v1/analyses.
+    ["app/(dashboard)/analyze/page.tsx", "4665f9a99a0622f913e03542a0d8cba635b3142dc0cd1b291c215fba5bbc03a2"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
     ["app/(dashboard)/analyze/upload-actions.ts", "d8c3d8d912b57b298a327367a31e1896bf830c7759d6d7b2a716afae46e9e341"],
     ["app/api/v1/upload/route.ts", "9a93cd1321312efcabe55562b29a1bb8d9eae2874ce74f874788b22eacfd086d"],

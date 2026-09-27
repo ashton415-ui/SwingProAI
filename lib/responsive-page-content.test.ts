@@ -1073,14 +1073,16 @@ describe("AnalyzePage — submission ordering is unchanged", () => {
     const blobIdx = block.indexOf("await getTrimmedBlob()");
     const uploadIdx = block.indexOf(".upload(");
     const videosIdx = block.indexOf('.from("swing_videos")');
-    const analysisIdx = block.indexOf('.from("swing_analysis")');
+    // Analysis request authority closure: the pending analysis row is created by
+    // the trusted server doorway, which occupies the old browser insert's step.
+    const analysisIdx = block.indexOf('fetch("/api/v1/analyses"');
     const apiIdx = block.indexOf('fetch("/api/analyze-swing"');
 
     for (const [label, idx] of [
       ["await getTrimmedBlob()", blobIdx],
       [".upload(", uploadIdx],
       ['.from("swing_videos")', videosIdx],
-      ['.from("swing_analysis")', analysisIdx],
+      ['fetch("/api/v1/analyses"', analysisIdx],
       ['fetch("/api/analyze-swing"', apiIdx],
     ] as [string, number][]) {
       expect(idx, `${ANALYZE_PAGE_FILE}: startAnalysis is missing "${label}"`).toBeGreaterThanOrEqual(0);

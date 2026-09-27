@@ -132,6 +132,26 @@ export const PUTTING_SCORE_EQ5F_E_FILENAME =
   "20260918154500_putting_score_eq5f_e.sql";
 
 /**
+ * The migration that makes analysis requests and results server-authoritative.
+ * Privileges and one unique index only: it revokes anon/authenticated INSERT
+ * and UPDATE on public.swing_analysis and UPDATE on public.swing_videos, and
+ * enforces one analysis per swing_video_id, refusing to run if duplicates
+ * already exist. It changes no policy and rewrites no row.
+ */
+export const ANALYSIS_REQUEST_AUTHORITY_FILENAME =
+  "20260926143659_analysis_request_authority.sql";
+
+/**
+ * The migration that makes public.users billing and authorization fields
+ * server-authoritative. Privileges only: it revokes anon/authenticated INSERT
+ * and UPDATE on public.users with no column re-grant. It changes no policy,
+ * function, trigger or column, rewrites no row, and leaves SELECT, DELETE and
+ * service_role untouched.
+ */
+export const ENTITLEMENT_WRITE_AUTHORITY_FILENAME =
+  "20260926200538_entitlement_write_authority.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -156,6 +176,8 @@ export const APPROVED_MIGRATIONS: string[] = [
   DRILLS_DRILL_FAMILY_FOUNDATION_FILENAME,
   PUTTING_DRILL_CATALOG_SEED_FILENAME,
   PUTTING_SCORE_EQ5F_E_FILENAME,
+  ANALYSIS_REQUEST_AUTHORITY_FILENAME,
+  ENTITLEMENT_WRITE_AUTHORITY_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

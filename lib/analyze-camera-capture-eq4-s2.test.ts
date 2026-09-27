@@ -536,7 +536,9 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
     const preprocessing = submission.indexOf("await getTrimmedBlob()");
     const storage = submission.indexOf("supabase.storage");
     const videos = submission.indexOf('.from("swing_videos")');
-    const analysis = submission.indexOf('.from("swing_analysis")');
+    // Analysis request authority closure: the analysis row is created by the
+    // trusted doorway, which occupies the old browser insert's step.
+    const analysis = submission.indexOf('fetch("/api/v1/analyses"');
     const api = submission.indexOf('fetch("/api/analyze-swing"');
 
     for (const idx of [guard, preprocessing, storage, videos, analysis, api]) {
@@ -554,11 +556,14 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
     // client may read the family the server returned on a completed row, but it
     // may never author one or send one.
     expect(analyzeSource).not.toMatch(/[\b]?analysis_family[ ]*:/);
-    const insertIdx = analyzeSource.indexOf('.from("swing_analysis")');
-    expect(insertIdx).toBeGreaterThan(-1);
-    const insert = analyzeSource.slice(insertIdx, analyzeSource.indexOf("}).select(", insertIdx));
-    expect(insert).not.toContain("analysis_family");
-    expect(insert).toContain("club_id:");
+    // The browser no longer inserts swing_analysis; the analysis request it
+    // sends is the surface that must carry no family.
+    expect(analyzeSource).not.toMatch(/\.from\("swing_analysis"\)/);
+    const requestIdx = analyzeSource.indexOf('fetch("/api/v1/analyses"');
+    expect(requestIdx).toBeGreaterThan(-1);
+    const request = analyzeSource.slice(requestIdx, analyzeSource.indexOf("});", requestIdx));
+    expect(request).not.toContain("analysis_family");
+    expect(request).toContain("clubId: validatedClubId");
     const uses = analyzeSource.match(/analysis_family/g) ?? [];
     expect(uses, "the client should reference the family exactly once").toHaveLength(1);
     expect(analyzeSource).toContain('updatedRow.analysis_family === "putting"');

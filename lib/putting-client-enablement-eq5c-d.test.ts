@@ -82,9 +82,14 @@ function puttingGuard(analyze: string): string {
   return sliceBetween(submission(analyze), "isPuttingCapturePresentation(", "}");
 }
 
-/** The client-authored `swing_analysis` INSERT object. */
+/**
+ * The client-authored analysis creation request. Analysis request authority
+ * closure replaced the browser's `swing_analysis` INSERT with a request to the
+ * trusted `/api/v1/analyses` doorway; this is now the surface that must carry
+ * the club id and nothing the database owns.
+ */
 function analysisInsert(analyze: string): string {
-  return sliceBetween(submission(analyze), '.from("swing_analysis")', "}).select(");
+  return sliceBetween(submission(analyze), 'fetch("/api/v1/analyses"', "});");
 }
 
 /** The `/api/analyze-swing` request. */
@@ -187,12 +192,12 @@ const GUARDS: Guard[] = [
     },
   },
   {
-    id: "the refusal precedes the swing_analysis insert",
+    id: "the refusal precedes the analysis creation request",
     holds: (s) => {
       const body = stripComments(submission(s.analyze));
       return (
         body.indexOf("!canUsePuttingAnalysis(userTier)") >= 0 &&
-        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('.from("swing_analysis")')
+        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('fetch("/api/v1/analyses"')
       );
     },
   },
@@ -234,12 +239,11 @@ const GUARDS: Guard[] = [
     },
   },
   {
-    id: "the client still writes club_id and authors no family",
+    id: "the client still sends the club id and authors no family",
     holds: (s) => {
       const insert = analysisInsert(s.analyze);
       return (
-        insert.includes("club_id:") &&
-        insert.includes("validatedClubId") &&
+        insert.includes("clubId: validatedClubId") &&
         !insert.includes("analysis_family")
       );
     },
@@ -392,7 +396,7 @@ describe("EQ5C-D region anchors resolve against the real source", () => {
   it("isolates startAnalysis, the guard, the insert, the request and the success branch", () => {
     expect(submission(sources.analyze).length, "startAnalysis not found").toBeGreaterThan(0);
     expect(puttingGuard(sources.analyze).length, "putting guard not found").toBeGreaterThan(0);
-    expect(analysisInsert(sources.analyze).length, "swing_analysis insert not found").toBeGreaterThan(0);
+    expect(analysisInsert(sources.analyze).length, "analysis creation request not found").toBeGreaterThan(0);
     expect(analysisRequest(sources.analyze).length, "analysis request not found").toBeGreaterThan(0);
     expect(successHandling(sources.analyze).length, "success branch not found").toBeGreaterThan(0);
   });
@@ -466,7 +470,7 @@ describe("EQ5C-D — the full-swing path is untouched", () => {
       "querySavedClubs(supabase, { userId })",
       ".from(BUCKET).upload(",
       '.from("swing_videos")',
-      '.from("swing_analysis")',
+      'fetch("/api/v1/analyses"',
       'fetch("/api/analyze-swing"',
     ];
     let previous = -1;
@@ -539,16 +543,16 @@ const REGRESSIONS: Regression[] = [
     breaks: ["the refusal precedes preprocessing", "the refusal precedes the Storage upload"],
   },
   {
-    name: "the client starts authoring analysis_family on the insert",
+    name: "the client starts authoring analysis_family on the analysis request",
     apply: (s) => ({
       ...s,
       analyze: s.analyze.replace(
-        "          club_id:        validatedClubId,",
-        '          analysis_family: "putting",\n          club_id:        validatedClubId,',
+        "JSON.stringify({ swingVideoId: videoRow.id, clubId: validatedClubId })",
+        'JSON.stringify({ swingVideoId: videoRow.id, analysis_family: "putting", clubId: validatedClubId })',
       ),
     }),
     breaks: [
-      "the client still writes club_id and authors no family",
+      "the client still sends the club id and authors no family",
       "no client code authors an analysis_family property",
     ],
   },

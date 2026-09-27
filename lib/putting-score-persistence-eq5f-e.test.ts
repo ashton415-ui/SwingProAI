@@ -6,7 +6,11 @@ import { fileURLToPath } from "node:url";
 import { computePuttingScoreFromAnalysisV1 } from "./putting-score-from-analysis-eq5f-e";
 import { computePuttingScoreV1 } from "./putting-score-eq5f-d";
 import { PUTTING_SECTIONS, type PersistedPuttingAnalysisV1 } from "./putting-analysis-contract";
-import { APPROVED_MIGRATIONS, EXPECTED_MIGRATION_COUNT } from "./migration-inventory";
+import {
+  APPROVED_MIGRATIONS,
+  EXPECTED_MIGRATION_COUNT,
+  migrationsAuthoredBefore,
+} from "./migration-inventory";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(__dirname, "..");
@@ -731,13 +735,20 @@ describe("EQ5F-E — untouched boundaries", () => {
     expect(telemetry).not.toContain("putting_score");
   });
 
-  it("the new migration is the last approved one and is present on disk", () => {
+  // Asserts EQ5F-E's own historical contract — it sorts after every migration
+  // that existed when it was authored — rather than "is the newest approved
+  // migration", which expired the moment a later migration was added. This is
+  // the same correction SEC1C, SEC1D and SEC1F already carry, and the pattern
+  // lib/migration-inventory.ts prescribes.
+  it("the migration sorts after everything that existed when it was authored and is present on disk", () => {
     const filename = "20260918154500_putting_score_eq5f_e.sql";
     expect(APPROVED_MIGRATIONS).toContain(filename);
     expect(APPROVED_MIGRATIONS.filter((m) => m === filename)).toHaveLength(1);
-    expect(APPROVED_MIGRATIONS[APPROVED_MIGRATIONS.length - 1]).toBe(filename);
+    const earlier = migrationsAuthoredBefore(filename);
+    expect(earlier).toHaveLength(33);
+    expect(APPROVED_MIGRATIONS.indexOf(filename)).toBe(earlier.length);
     expect(EXPECTED_MIGRATION_COUNT).toBe(APPROVED_MIGRATIONS.length);
-    for (const other of APPROVED_MIGRATIONS.slice(0, -1)) {
+    for (const other of earlier) {
       expect(filename > other, `${filename} must sort after ${other}`).toBe(true);
     }
     expect(existsSync(path.join(repoRoot, "supabase", "migrations", filename))).toBe(true);
@@ -1100,8 +1111,8 @@ const REGRESSIONS: Regression[] = [
     apply: (s) => ({
       ...s,
       inventory: s.inventory.replace(
-        "  PUTTING_SCORE_EQ5F_E_FILENAME,\n];",
-        "  PUTTING_SCORE_EQ5F_E_FILENAME,\n  PUTTING_SCORE_EQ5F_E_FILENAME,\n];",
+        "  PUTTING_SCORE_EQ5F_E_FILENAME,\n",
+        "  PUTTING_SCORE_EQ5F_E_FILENAME,\n  PUTTING_SCORE_EQ5F_E_FILENAME,\n",
       ),
     }),
     breaks: ["35. the migration is registered exactly once in the inventory"],

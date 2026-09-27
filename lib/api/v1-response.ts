@@ -33,7 +33,12 @@ export type V1ErrorCode =
   | "VALIDATION_ERROR"
   | "UPLOAD_NOT_FOUND_OR_NOT_READY"
   | "UPLOAD_METADATA_INVALID"
-  | "UPLOAD_CONFLICT";
+  | "UPLOAD_CONFLICT"
+  | "SWING_VIDEO_NOT_FOUND"
+  | "SWING_VIDEO_NOT_READY"
+  | "CLUB_INVALID"
+  | "ENTITLEMENT_REQUIRED"
+  | "ANALYSIS_CONFLICT";
 
 /** Every V1 response carries private, uncacheable semantics. See `v1Headers`. */
 export const V1_CACHE_CONTROL = "private, no-store";

@@ -574,23 +574,27 @@ export default function AnalyzePage() {
         }).select().single();
       if (videoErr || !videoRow) throw new Error(`Failed to register video: ${videoErr?.message}`);
 
-      // 3. Create a pending swing_analysis row so the API route has an ID to work with
-      const { data: analysisRow, error: analysisErr } = await supabase
-        .from("swing_analysis").insert({
-          swing_video_id: videoRow.id,
-          user_id:        userId,
-          status:         "pending",
-          // The only equipment field the client may write. The derived analysis
-          // family and the immutable equipment snapshot are produced by the
-          // database trigger and are never sent from here.
-          club_id:        validatedClubId,
-        }).select("id").single();
-      if (analysisErr || !analysisRow) {
-        // This branch now also covers the database refusing a club archived
-        // between the check above and this insert. Raw database text must not
-        // become golfer-facing copy, so it is logged and a fixed message is
-        // thrown instead.
-        console.error("Failed to create analysis record:", analysisErr?.message);
+      // 3. Ask the server to create the pending analysis request. The browser
+      // holds no INSERT privilege on swing_analysis: the owner, readiness, club
+      // and entitlement are all decided by /api/v1/analyses, the same doorway
+      // native clients use. The club id is the only equipment fact sent; the
+      // derived analysis family and the immutable equipment snapshot are
+      // produced by the database trigger and are never sent from here.
+      const createRes = await fetch("/api/v1/analyses", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ swingVideoId: videoRow.id, clubId: validatedClubId }),
+      });
+      const created = await createRes.json().catch(() => null) as
+        { data?: { analysisId?: unknown } } | null;
+      const createdId = created?.data?.analysisId;
+      const analysisRow = createRes.ok && typeof createdId === "string" ? { id: createdId } : null;
+      if (!analysisRow) {
+        // This branch also covers the server refusing a club archived between
+        // the check above and the request. Server error text must not become
+        // golfer-facing copy, so only the status is logged and a fixed message
+        // is thrown instead.
+        console.error("Failed to create analysis record:", createRes.status);
         throw new Error(ANALYSIS_CREATE_FAILED_MESSAGE);
       }
 

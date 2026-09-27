@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveVerifiedAuth } from "@/utils/supabase/server";
+import { createAdminClient } from "@/utils/supabase/admin";
 import Stripe from "stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
@@ -60,12 +61,32 @@ export async function GET(req: NextRequest) {
       metadata: { supabase_user_id: auth.userId },
     });
 
-    const { error: linkError } = await supabase
-      .from("users")
-      .update({ stripe_customer_id: customer.id })
-      .eq("id", auth.userId);
+    // The link is a billing fact, and the golfer's own session holds no UPDATE
+    // on public.users, so the trusted server writer records it. Identity was
+    // decided above by the verified session; the elevated client only writes
+    // it, bound to that golfer's row and only while no customer is linked, so
+    // an existing link is never overwritten.
+    let linkedRows: unknown = null;
+    let linkFailed = false;
+    try {
+      const admin = createAdminClient();
+      const { data, error: linkError } = await admin
+        .from("users")
+        .update({ stripe_customer_id: customer.id })
+        .eq("id", auth.userId)
+        .is("stripe_customer_id", null)
+        .select("id");
+      linkedRows = data;
+      linkFailed = Boolean(linkError);
+    } catch {
+      // A missing server configuration throws on construction: a failed
+      // link, never a silent success.
+      linkFailed = true;
+    }
 
-    if (linkError) {
+    // Exactly one row, proved. Zero means the row was linked concurrently or
+    // is not this golfer's; either way it is not a link this request made.
+    if (linkFailed || !Array.isArray(linkedRows) || linkedRows.length !== 1) {
       // The webhook grants entitlement by matching stripe_customer_id back to
       // a row. If that link did not persist, a completed payment could never
       // be attributed to this golfer, so stop before taking their money

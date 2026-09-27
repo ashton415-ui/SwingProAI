@@ -477,8 +477,21 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
       (puttingHelperSource.match(/createAdminClient\(\)/g) ?? []).length,
       "the admin client must be constructed exactly once",
     ).toBe(1);
-    // Every read on this route stays with the golfer's own session.
-    expect(puttingHelperSource).toContain('await supabase\n    .from("swing_analysis")');
+    // Analysis request authority closure: the golfer's session holds no UPDATE
+    // on swing_analysis, so the status writes in this helper go through the
+    // route's trusted writer, bound to this row and this owner. The Storage
+    // read stays with the golfer's own session.
+    expect(puttingHelperSource).not.toContain('await supabase\n    .from("swing_analysis")');
+    expect(puttingHelperSource).toContain("await supabase.storage");
+    for (const status of ["processing", "failed"]) {
+      const at = puttingHelperSource.indexOf(`.update({ status: "${status}" })`);
+      expect(at, `the ${status} write is missing`).toBeGreaterThan(-1);
+      const before = puttingHelperSource.slice(Math.max(0, at - 80), at);
+      expect(before, `the ${status} write must use the trusted writer`).toContain("trustedAnalysisTable()");
+      const after = puttingHelperSource.slice(at, at + 160);
+      expect(after).toContain('.eq("id", analysisId)');
+      expect(after).toContain('.eq("user_id", authenticatedUserId)');
+    }
   });
 
   it("persists only after structural and semantic validation succeed", () => {

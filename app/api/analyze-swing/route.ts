@@ -476,6 +476,34 @@ function isSubscriptionTier(value: unknown): value is SubscriptionTier {
 
 type RouteSupabaseClient = Awaited<ReturnType<typeof createClient>>;
 
+// ── Trusted analysis writes ──────────────────────────────────────────────────
+//
+// Clients hold no INSERT or UPDATE privilege on swing_analysis: a status or a
+// result is a server statement, and a golfer's own session must not be able to
+// author one. So every write this route makes to the table goes through the
+// server-only writer, and every call site restates the two facts the elevated
+// client cannot know for itself — this row, and this owner — as filters.
+//
+// Reads, ownership and Storage signing stay on the golfer's own session. The
+// elevated client decides nothing; it only records what the caller-scoped
+// checks above each write have already established.
+function trustedAnalysisTable() {
+  return createAdminClient().from("swing_analysis");
+}
+
+/** Best-effort failure write for the full-swing path, id- and owner-bound. */
+async function markAnalysisFailed(analysisId: string, authenticatedUserId: string): Promise<void> {
+  try {
+    await trustedAnalysisTable()
+      .update({ status: "failed" })
+      .eq("id", analysisId)
+      .eq("user_id", authenticatedUserId);
+  } catch {
+    // Best effort. A failed status write must not replace the response the
+    // originating condition already decided.
+  }
+}
+
 async function runPuttingAnalysis(
   supabase: RouteSupabaseClient,
   analysisRow: Record<string, unknown>,
@@ -497,7 +525,10 @@ async function runPuttingAnalysis(
 
   const markFailed = async (): Promise<void> => {
     try {
-      await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+      await trustedAnalysisTable()
+        .update({ status: "failed" })
+        .eq("id", analysisId)
+        .eq("user_id", authenticatedUserId);
     } catch {
       // Best effort. A failed status write must not change the response the
       // golfer already earned from the originating condition.
@@ -513,10 +544,17 @@ async function runPuttingAnalysis(
     );
   }
 
-  const { error: puttingProcessingError } = await supabase
-    .from("swing_analysis")
-    .update({ status: "processing" })
-    .eq("id", analysisId);
+  let puttingProcessingError: unknown = null;
+  try {
+    const { error } = await trustedAnalysisTable()
+      .update({ status: "processing" })
+      .eq("id", analysisId)
+      .eq("user_id", authenticatedUserId);
+    puttingProcessingError = error;
+  } catch {
+    // An unconstructable writer is a failure to record that work started.
+    puttingProcessingError = true;
+  }
 
   if (puttingProcessingError) {
     // Full swing logs this and continues. Putting deliberately does not: if the
@@ -790,10 +828,16 @@ export async function POST(req: NextRequest) {
   }
 
   // Mark as processing
-  const { error: markErr } = await supabase
-    .from("swing_analysis")
-    .update({ status: "processing" })
-    .eq("id", analysisId);
+  let markErr: unknown = null;
+  try {
+    const { error } = await trustedAnalysisTable()
+      .update({ status: "processing" })
+      .eq("id", analysisId)
+      .eq("user_id", user.id);
+    markErr = error;
+  } catch {
+    markErr = true;
+  }
 
   if (markErr) {
     console.error("[analyze-swing] mark-processing update failed");
@@ -803,7 +847,7 @@ export async function POST(req: NextRequest) {
   console.log("[analyze-swing] Gemini key configured:", !!geminiKey);
   if (!geminiKey) {
     console.error("[analyze-swing] FATAL: no Gemini API key — set GEMINI_API_KEY or GOOGLE_AI_API_KEY in Vercel env vars");
-    await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+    await markAnalysisFailed(analysisId, user.id);
     return NextResponse.json(
       { error: "AI analysis is temporarily unavailable. Please try again later." },
       { status: 503 },
@@ -1096,16 +1140,16 @@ export async function POST(req: NextRequest) {
     };
 
 
-    const { data: updated, error: updateErr } = await supabase
-      .from("swing_analysis")
+    const { data: updated, error: updateErr } = await trustedAnalysisTable()
       .update(payload)
       .eq("id", analysisId)
+      .eq("user_id", user.id)
       .select()
       .single();
 
     if (updateErr) {
       console.error("[analyze-swing] analysis completion update failed");
-      await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+      await markAnalysisFailed(analysisId, user.id);
       return NextResponse.json(
         { error: "We couldn't save your analysis. Please try again." },
         { status: 400 },
@@ -1118,7 +1162,10 @@ export async function POST(req: NextRequest) {
   } catch {
     console.error("[analyze-swing] analysis pipeline failed");
     try {
-      await supabase.from("swing_analysis").update({ status: "failed" }).eq("id", analysisId);
+      await trustedAnalysisTable()
+        .update({ status: "failed" })
+        .eq("id", analysisId)
+        .eq("user_id", user.id);
     } catch {
       console.error("[analyze-swing] failed-status update also failed");
     }

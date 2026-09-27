@@ -76,12 +76,17 @@ function submissionBody(): string {
 
 const submissionSource = submissionBody();
 
-/** The client-authored `swing_analysis` INSERT object, isolated. */
+/**
+ * The client-authored analysis request, isolated. Analysis request authority
+ * closure moved row creation to the trusted `/api/v1/analyses` doorway, so the
+ * surface through which the client could carry a database-owned value outward
+ * is now that request rather than a direct `swing_analysis` INSERT.
+ */
 function analysisInsertSource(): string {
-  const start = submissionSource.indexOf('.from("swing_analysis")');
-  expect(start, "expected startAnalysis to insert swing_analysis").toBeGreaterThan(-1);
-  const end = submissionSource.indexOf("}).select(", start);
-  expect(end, "expected the swing_analysis insert to close").toBeGreaterThan(start);
+  const start = submissionSource.indexOf('fetch("/api/v1/analyses"');
+  expect(start, "expected startAnalysis to request an analysis").toBeGreaterThan(-1);
+  const end = submissionSource.indexOf("});", start);
+  expect(end, "expected the analysis request to close").toBeGreaterThan(start);
   return submissionSource.slice(start, end);
 }
 
@@ -104,7 +109,7 @@ function analysisRequestSource(): string {
  */
 function clientAuthoredSurfaces(): { label: string; source: string }[] {
   return [
-    { label: "swing_analysis insert", source: analysisInsertSource() },
+    { label: "analysis creation request", source: analysisInsertSource() },
     { label: "analysis API request", source: analysisRequestSource() },
   ];
 }
@@ -350,7 +355,7 @@ describe("EQ3-S1 Analyze — submission order and the club revalidation step", (
     revalidation: "querySavedClubs(supabase, { userId })",
     storage: ".from(BUCKET).upload(",
     videos: '.from("swing_videos")',
-    analysis: '.from("swing_analysis")',
+    analysis: 'fetch("/api/v1/analyses"',
     api: 'fetch("/api/analyze-swing"',
   } as const;
 
@@ -417,10 +422,15 @@ describe("EQ3-S1 Analyze — the client writes club_id and nothing else the DB o
     expect(submissionSource).toMatch(/validatedClubId\s*=\s*selectedClubId;/);
   });
 
-  it("writes exactly club_id: validatedClubId on the swing_analysis insert", () => {
-    expect(submissionSource).toMatch(/club_id:\s*validatedClubId,/);
-    expect(submissionSource).toMatch(/swing_video_id:\s*videoRow\.id,/);
-    expect(submissionSource).toMatch(/status:\s*"pending",/);
+  it("sends exactly swingVideoId and clubId: validatedClubId to the analysis doorway", () => {
+    // Analysis request authority closure: the browser no longer inserts the
+    // row. It names the video and the validated club; the server derives the
+    // owner and the database defaults the status.
+    const request = analysisInsertSource();
+    expect(request).toContain("JSON.stringify({ swingVideoId: videoRow.id, clubId: validatedClubId })");
+    expect(request).not.toContain("status");
+    expect(request).not.toContain("user_id");
+    expect(submissionSource).not.toMatch(/\.from\("swing_analysis"\)/);
   });
 
   it("never writes the DB-authored equipment fields", () => {
@@ -707,7 +717,7 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
 
   it("refuses before both database inserts", () => {
     expect(at(guard)).toBeLessThan(at(String.raw`.from("swing_videos")`));
-    expect(at(guard)).toBeLessThan(at(String.raw`.from("swing_analysis")`));
+    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/v1/analyses"`));
   });
 
   it("refuses before the analysis API call", () => {
@@ -741,8 +751,8 @@ describe("EQ3-S2 — presentation only, no routing and no new surfaces", () => {
     expect(submissionSource).toContain("JSON.stringify({ analysisId: analysisRow.id })");
   });
 
-  it("keeps the existing club_id write and its revalidation", () => {
-    expect(submissionSource).toContain("club_id:");
+  it("keeps the club id on the analysis request and its revalidation", () => {
+    expect(submissionSource).toContain("clubId: validatedClubId");
     expect(submissionSource).toContain("validatedClubId");
     expect(submissionSource).toContain("isSelectionStillValid(currentClubs, selectedClubId)");
   });
@@ -939,7 +949,7 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
     const preprocessing = submissionSource.indexOf("await getTrimmedBlob()");
     const storage = submissionSource.indexOf("supabase.storage");
     const videos = submissionSource.indexOf('.from("swing_videos")');
-    const analysis = submissionSource.indexOf('.from("swing_analysis")');
+    const analysis = submissionSource.indexOf('fetch("/api/v1/analyses"');
     const api = submissionSource.indexOf('fetch("/api/analyze-swing"');
 
     for (const idx of [guard, preprocessing, storage, videos, analysis, api]) {
