@@ -72,13 +72,14 @@ describe("entitlement-write-authority — identity and inventory", () => {
     expect(APPROVED_MIGRATIONS.indexOf(ENTITLEMENT_WRITE_AUTHORITY_FILENAME)).toBe(35);
   });
 
-  it("leaves a closed-world inventory of 36 with a derived count", () => {
+  // The current total is the inventory's to state, not this historical test's:
+  // pinning it here would expire the moment a later migration lands.
+  it("leaves the closed-world inventory derived from the approved migration list", () => {
     const onDisk = readdirSync(migrationsDir)
       .filter((f) => f.endsWith(".sql"))
       .sort();
     expect(APPROVED_MIGRATIONS.slice().sort()).toEqual(onDisk);
     expect(EXPECTED_MIGRATION_COUNT).toBe(APPROVED_MIGRATIONS.length);
-    expect(EXPECTED_MIGRATION_COUNT).toBe(36);
   });
 });
 

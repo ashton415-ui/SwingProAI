@@ -152,6 +152,17 @@ export const ENTITLEMENT_WRITE_AUTHORITY_FILENAME =
   "20260926200538_entitlement_write_authority.sql";
 
 /**
+ * SEC-COACH1: closes browser coach write authority. Privileges and policies
+ * only: it revokes anon/authenticated INSERT, UPDATE and DELETE on the five
+ * coach-to-golfer tables and downgrades their catch-all coach FOR ALL policies
+ * to FOR SELECT with the same name and predicate. It leaves SELECT, the
+ * golfer/student policies, service_role, launch_monitor_sessions and the
+ * invite-code function untouched, and rewrites no row.
+ */
+export const SEC_COACH1_WRITE_AUTHORITY_FILENAME =
+  "20260928124321_sec_coach1_coach_write_authority.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -178,6 +189,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   PUTTING_SCORE_EQ5F_E_FILENAME,
   ANALYSIS_REQUEST_AUTHORITY_FILENAME,
   ENTITLEMENT_WRITE_AUTHORITY_FILENAME,
+  SEC_COACH1_WRITE_AUTHORITY_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
