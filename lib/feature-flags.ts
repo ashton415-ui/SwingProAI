@@ -35,3 +35,16 @@ function normalizeFlagValue(raw: string | undefined): string {
 export function isCoachMarketplaceEnabled(): boolean {
   return normalizeFlagValue(process.env.COACH_MARKETPLACE_ENABLED) === "true";
 }
+
+/**
+ * Whether Practice Intelligence (PI-0) is enabled.
+ *
+ * Reads ONLY process.env.PRACTICE_INTELLIGENCE_ENABLED, with exactly the same
+ * rule as isCoachMarketplaceEnabled: only the normalized string "true" turns
+ * it on, and absent, empty or any other value leaves it off. Every
+ * /api/v1/practice route checks this before authenticating or touching the
+ * database, so with the flag off the surface answers as if it did not exist.
+ */
+export function isPracticeIntelligenceEnabled(): boolean {
+  return normalizeFlagValue(process.env.PRACTICE_INTELLIGENCE_ENABLED) === "true";
+}

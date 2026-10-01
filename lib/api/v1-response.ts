@@ -38,7 +38,14 @@ export type V1ErrorCode =
   | "SWING_VIDEO_NOT_READY"
   | "CLUB_INVALID"
   | "ENTITLEMENT_REQUIRED"
-  | "ANALYSIS_CONFLICT";
+  | "ANALYSIS_CONFLICT"
+  | "FEATURE_UNAVAILABLE"
+  | "PRACTICE_PLAN_NOT_FOUND"
+  | "PRACTICE_SESSION_NOT_FOUND"
+  | "PRACTICE_SESSION_ALREADY_ACTIVE"
+  | "PRACTICE_SESSION_NOT_ACTIVE"
+  | "DRILL_NOT_FOUND"
+  | "IDEMPOTENCY_CONFLICT";
 
 /** Every V1 response carries private, uncacheable semantics. See `v1Headers`. */
 export const V1_CACHE_CONTROL = "private, no-store";

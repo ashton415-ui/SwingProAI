@@ -163,6 +163,16 @@ export const SEC_COACH1_WRITE_AUTHORITY_FILENAME =
   "20260928124321_sec_coach1_coach_write_authority.sql";
 
 /**
+ * PI-0: the Practice Intelligence foundation. Four new owner-scoped tables
+ * (plans, plan items, sessions, user-entered session results), one SELECT-only
+ * owner policy each, browser roles limited to SELECT, and two SECURITY INVOKER
+ * write functions executable only by service_role. It changes no existing
+ * table, policy, grant or function and touches no drill row.
+ */
+export const PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME =
+  "20260930125813_pi0_practice_intelligence_foundation.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -190,6 +200,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   ANALYSIS_REQUEST_AUTHORITY_FILENAME,
   ENTITLEMENT_WRITE_AUTHORITY_FILENAME,
   SEC_COACH1_WRITE_AUTHORITY_FILENAME,
+  PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
