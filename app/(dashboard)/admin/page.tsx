@@ -1,31 +1,31 @@
-import { getServerSession } from "@/utils/supabase/server";
+import type { ReactNode } from "react";
 import { createClient } from "@/utils/supabase/server";
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Users, Video, UserCheck, CreditCard } from "lucide-react";
+import { requireAdminForPage } from "@/lib/admin/admin-authority";
+import { getAdminDirectoryCounts } from "@/lib/admin/user-directory";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function AdminPage() {
-  const session = await getServerSession();
-  if (!session) redirect("/login");
+  const caller = await requireAdminForPage();
 
+  // Total Users and Coaches come from the complete admin directory. Swing
+  // Videos is unchanged in ADMIN-OPS-0 (still caller-scoped; separate slice).
   const supabase = await createClient();
-  const { data: profile } = await supabase
-    .from("users").select("role").eq("id", session.user.id).single();
-
-  if (profile?.role !== "admin") redirect("/dashboard");
-
-  const [{ count: userCount }, { count: videoCount }, { count: coachCount }] = await Promise.all([
-    supabase.from("users").select("*", { count: "exact", head: true }),
+  const [directory, { count: videoCount }] = await Promise.all([
+    getAdminDirectoryCounts(caller),
     supabase.from("swing_videos").select("*", { count: "exact", head: true }),
-    supabase.from("users").select("*", { count: "exact", head: true }).eq("role", "coach"),
   ]);
 
-  const stats = [
-    { label: "Total Users", value: userCount ?? 0, icon: <Users size={18} />, href: "/admin/users" },
+  const directoryNote =
+    directory.status === "ok" ? undefined : directory.status === "incomplete" ? "Directory incomplete" : "Directory unavailable";
+
+  const stats: { label: string; value: number | string; note?: string; icon: ReactNode; href: string }[] = [
+    { label: "Total Users", value: directory.status === "ok" ? directory.totalUsers : "—", note: directoryNote, icon: <Users size={18} />, href: "/admin/users" },
     { label: "Swing Videos", value: videoCount ?? 0, icon: <Video size={18} />, href: "/admin/swings" },
-    { label: "Coaches", value: coachCount ?? 0, icon: <UserCheck size={18} />, href: "/admin/coaches" },
+    { label: "Coaches", value: directory.status === "ok" ? directory.coaches : "—", note: directoryNote, icon: <UserCheck size={18} />, href: "/admin/coaches" },
     { label: "Subscriptions", value: "—", icon: <CreditCard size={18} />, href: "/admin/subscriptions" },
   ];
 
@@ -41,6 +41,7 @@ export default async function AdminPage() {
             <div className="text-golf-green mb-4">{s.icon}</div>
             <p className="text-[9px] font-black uppercase tracking-widest text-gray-500 mb-2">{s.label}</p>
             <p className="text-3xl font-mono font-black text-white">{s.value}</p>
+            {s.note && <p className="text-[9px] font-black uppercase tracking-widest text-red-400 mt-2">{s.note}</p>}
           </Link>
         ))}
       </div>
