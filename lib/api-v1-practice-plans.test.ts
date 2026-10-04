@@ -52,6 +52,11 @@ function makeDb() {
     practice_sessions: [],
     practice_session_results: [],
     drills: [{ id: DRILL_A }, { id: DRILL_B }],
+    // PI-1A: the entitlement authority reads tier and status from here.
+    users: [
+      { id: CALLER_ID, subscription_tier: "birdie", subscription_status: "active" },
+      { id: OTHER_ID, subscription_tier: "eagle", subscription_status: "trialing" },
+    ],
   };
   const calls: Call[] = [];
   const failures: ((call: Call) => DbError | undefined)[] = [];
@@ -189,6 +194,10 @@ function makeDb() {
       if (this.who === "user" && OWNED_TABLES.has(this.table)) {
         rows = rows.filter((r) => r.user_id === this.uid);
       }
+      // public.users RLS: a caller sees only their own profile row.
+      if (this.who === "user" && this.table === "users") {
+        rows = rows.filter((r) => r.id === this.uid);
+      }
       for (const [col, asc] of [...this.orders].reverse()) {
         rows = [...rows].sort((a, b) => (a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0) * (asc ? 1 : -1));
       }
@@ -311,6 +320,9 @@ const state = vi.hoisted(() => ({
   authCalls: 0,
   incomingRequestId: null as string | null,
 }));
+
+// `server-only` throws outside a Next.js server context; Vitest is not one.
+vi.mock("server-only", () => ({}));
 
 vi.mock("next/headers", () => ({
   headers: async () => ({
@@ -469,6 +481,114 @@ describe("practice plans — authentication", () => {
     const response = await listPlans(new Request(BASE));
     expect(response.headers.get("X-Request-Id")).toBe("client-req-0001");
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+});
+
+// ─── Entitlement (PI-1A) ──────────────────────────────────────────────────────
+
+function setMembership(userId: string, tier: unknown, status: unknown): void {
+  const row = db.tables.users.find((u) => u.id === userId)!;
+  row.subscription_tier = tier;
+  row.subscription_status = status;
+}
+
+describe("practice plans — entitlement (PI-1A)", () => {
+  const handlers: [string, () => Promise<Response>][] = [
+    ["GET list", () => listPlans(new Request(BASE))],
+    ["POST create", () => createPlanRoute(postPlan(validPlan()))],
+    ["GET detail", () => getPlan(new Request(`${BASE}/x`), { params: { planId: DRILL_A } })],
+    ["POST archive", () => archivePlan(new Request(`${BASE}/x/archive`), { params: { planId: DRILL_A } })],
+  ];
+
+  /** The only thing a refused caller may cause: one read of their own profile. */
+  function expectOnlyOwnProfileRead(): void {
+    expect(db.calls).toEqual([
+      { who: "user", kind: "select", table: "users", filters: [["id", CALLER_ID]], payload: undefined },
+    ]);
+    expect(state.adminConstructions).toBe(0);
+  }
+
+  const DENIED: [string, unknown, unknown][] = [
+    ["par + active", "par", "active"],
+    ["none + none", "none", "none"],
+    ["birdie + past_due", "birdie", "past_due"],
+    ["eagle + canceled", "eagle", "canceled"],
+    ["coach_pro + none", "coach_pro", "none"],
+    ["unknown tier", "platinum", "active"],
+    ["unknown status", "birdie", "paused"],
+    ["null tier", null, "active"],
+    ["null status", "birdie", null],
+    ["non-string tier", 7, "active"],
+  ];
+
+  for (const [label, tier, status] of DENIED) {
+    it(`answers 403 ENTITLEMENT_REQUIRED for ${label} on every handler, before any practice read or write`, async () => {
+      setMembership(CALLER_ID, tier, status);
+      for (const [name, handler] of handlers) {
+        db.calls.length = 0;
+        const response = await handler();
+        expect(response.status, name).toBe(403);
+        const body = await json(response);
+        expect(body.error.code).toBe("ENTITLEMENT_REQUIRED");
+        expect(body.error.message).toBe("Practice Intelligence isn't available with your current membership.");
+        expect(JSON.stringify(body)).not.toMatch(/birdie|eagle|coach|par\b|active|trialing|past_due|canceled|tier|status/i);
+        expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+        expectOnlyOwnProfileRead();
+      }
+      expect(db.tables.practice_plans).toHaveLength(0);
+    });
+  }
+
+  for (const [tier, status] of [
+    ["birdie", "active"],
+    ["birdie", "trialing"],
+    ["eagle", "active"],
+    ["coach_starter", "trialing"],
+    ["coach_pro", "active"],
+  ] as const) {
+    it(`lets ${tier} + ${status} through to the practice surface`, async () => {
+      setMembership(CALLER_ID, tier, status);
+      expect((await createPlanRoute(postPlan(validPlan()))).status).toBe(201);
+      expect((await listPlans(new Request(BASE))).status).toBe(200);
+    });
+  }
+
+  it("decides on the membership before reading the path, the key or the body", async () => {
+    setMembership(CALLER_ID, "none", "none");
+    db.calls.length = 0;
+    await expectError(await createPlanRoute(postPlan(null, null, "{not json")), 403, "ENTITLEMENT_REQUIRED");
+    await expectError(await getPlan(new Request(BASE), { params: { planId: "not-a-uuid" } }), 403, "ENTITLEMENT_REQUIRED");
+    await expectError(await listPlans(new Request(`${BASE}?status=deleted`)), 403, "ENTITLEMENT_REQUIRED");
+    expect(writes()).toEqual([]);
+  });
+
+  it("answers 503 when the profile read fails, writing nothing", async () => {
+    db.failures.push((c) => (c.table === "users" ? { code: "XX000", message: "secret-detail" } : undefined));
+    for (const [name, handler] of handlers) {
+      db.calls.length = 0;
+      const response = await handler();
+      expect(response.status, name).toBe(503);
+      const body = await json(response);
+      expect(body.error.code).toBe("SERVER_TEMPORARILY_UNAVAILABLE");
+      expect(body.error.message).toBe("Practice access is temporarily unavailable. Please retry.");
+      expect(JSON.stringify(body)).not.toContain("secret-detail");
+      expectOnlyOwnProfileRead();
+    }
+  });
+
+  it("answers 503, not 403, when the verified caller has no profile row", async () => {
+    db.tables.users = db.tables.users.filter((u) => u.id !== CALLER_ID);
+    for (const [name, handler] of handlers) {
+      db.calls.length = 0;
+      const response = await handler();
+      expect(response.status, name).toBe(503);
+      expectOnlyOwnProfileRead();
+    }
+  });
+
+  it("does not grant access from role: an admin on no plan is refused", async () => {
+    db.tables.users[0] = { id: CALLER_ID, role: "admin", subscription_tier: "none", subscription_status: "none" };
+    await expectError(await listPlans(new Request(BASE)), 403, "ENTITLEMENT_REQUIRED");
   });
 });
 

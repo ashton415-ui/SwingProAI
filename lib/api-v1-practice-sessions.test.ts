@@ -53,6 +53,11 @@ function makeDb() {
     practice_sessions: [],
     practice_session_results: [],
     drills: [{ id: DRILL_A }, { id: DRILL_B }],
+    // PI-1A: the entitlement authority reads tier and status from here.
+    users: [
+      { id: CALLER_ID, subscription_tier: "coach_starter", subscription_status: "active" },
+      { id: OTHER_ID, subscription_tier: "coach_pro", subscription_status: "trialing" },
+    ],
   };
   const calls: Call[] = [];
   const failures: ((call: Call) => DbError | undefined)[] = [];
@@ -190,6 +195,10 @@ function makeDb() {
       if (this.who === "user" && OWNED_TABLES.has(this.table)) {
         rows = rows.filter((r) => r.user_id === this.uid);
       }
+      // public.users RLS: a caller sees only their own profile row.
+      if (this.who === "user" && this.table === "users") {
+        rows = rows.filter((r) => r.id === this.uid);
+      }
       for (const [col, asc] of [...this.orders].reverse()) {
         rows = [...rows].sort((a, b) => (a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0) * (asc ? 1 : -1));
       }
@@ -312,6 +321,9 @@ const state = vi.hoisted(() => ({
   authCalls: 0,
   incomingRequestId: null as string | null,
 }));
+
+// `server-only` throws outside a Next.js server context; Vitest is not one.
+vi.mock("server-only", () => ({}));
 
 vi.mock("next/headers", () => ({
   headers: async () => ({
@@ -483,6 +495,109 @@ describe("practice sessions — authentication", () => {
     }
     expect(db.calls).toEqual([]);
     expect(state.adminConstructions).toBe(0);
+  });
+});
+
+// ─── Entitlement (PI-1A) ──────────────────────────────────────────────────────
+
+function setMembership(userId: string, tier: unknown, status: unknown): void {
+  const row = db.tables.users.find((u) => u.id === userId)!;
+  row.subscription_tier = tier;
+  row.subscription_status = status;
+}
+
+describe("practice sessions — entitlement (PI-1A)", () => {
+  const handlers: [string, () => Promise<Response>][] = [
+    ["GET list", () => listSessions(new Request(BASE))],
+    ["POST start", () => startSession(post(BASE, {}, KEY_1))],
+    ["GET detail", () => getSession(new Request(BASE), sid(DRILL_A))],
+    ["POST result", () => recordResult(post(BASE, { drillId: DRILL_A, attempts: 1 }, KEY_1), sid(DRILL_A))],
+    ["POST complete", () => completeSession(post(BASE, { outcome: "completed" }), sid(DRILL_A))],
+  ];
+
+  function expectOnlyOwnProfileRead(): void {
+    expect(db.calls).toEqual([
+      { who: "user", kind: "select", table: "users", filters: [["id", CALLER_ID]], payload: undefined },
+    ]);
+    expect(state.adminConstructions).toBe(0);
+  }
+
+  const DENIED: [string, unknown, unknown][] = [
+    ["par + trialing", "par", "trialing"],
+    ["none + active", "none", "active"],
+    ["coach_starter + past_due", "coach_starter", "past_due"],
+    ["birdie + canceled", "birdie", "canceled"],
+    ["eagle + none", "eagle", "none"],
+    ["unknown tier", "gold", "trialing"],
+    ["unknown status", "eagle", "unpaid"],
+    ["undefined tier", undefined, "active"],
+    ["non-string status", "eagle", true],
+  ];
+
+  for (const [label, tier, status] of DENIED) {
+    it(`answers 403 ENTITLEMENT_REQUIRED for ${label} on every handler with no practice read, write or RPC`, async () => {
+      const session = await seedSession();
+      setMembership(CALLER_ID, tier, status);
+      const reals: [string, () => Promise<Response>][] = [
+        ...handlers,
+        ["POST result (own session)", () => recordResult(post(BASE, { drillId: DRILL_A, attempts: 3 }, KEY_2), sid(session))],
+        ["POST complete (own session)", () => completeSession(post(BASE, { outcome: "completed" }), sid(session))],
+      ];
+      for (const [name, handler] of reals) {
+        resetCalls();
+        const response = await handler();
+        expect(response.status, name).toBe(403);
+        const body = await json(response);
+        expect(body.error.code).toBe("ENTITLEMENT_REQUIRED");
+        expect(body.error.message).toBe("Practice Intelligence isn't available with your current membership.");
+        expectOnlyOwnProfileRead();
+      }
+      expect(db.tables.practice_sessions[0].status).toBe("in_progress");
+      expect(db.tables.practice_session_results).toHaveLength(0);
+    });
+  }
+
+  for (const [tier, status] of [
+    ["birdie", "trialing"],
+    ["eagle", "active"],
+    ["coach_starter", "active"],
+    ["coach_pro", "trialing"],
+  ] as const) {
+    it(`lets ${tier} + ${status} through to the practice surface`, async () => {
+      setMembership(CALLER_ID, tier, status);
+      expect((await startSession(post(BASE, {}, KEY_1))).status).toBe(201);
+      expect((await listSessions(new Request(BASE))).status).toBe(200);
+    });
+  }
+
+  it("decides on the membership before reading the path, the key or the body", async () => {
+    setMembership(CALLER_ID, "par", "active");
+    resetCalls();
+    await expectError(await startSession(post(BASE, undefined, null, "{oops")), 403, "ENTITLEMENT_REQUIRED");
+    await expectError(await recordResult(post(BASE, { bogus: true }), sid("not-a-uuid")), 403, "ENTITLEMENT_REQUIRED");
+    await expectError(await completeSession(post(BASE, { outcome: "nope" }), sid("not-a-uuid")), 403, "ENTITLEMENT_REQUIRED");
+    await expectError(await listSessions(new Request(`${BASE}?status=bogus`)), 403, "ENTITLEMENT_REQUIRED");
+    expect(writes()).toEqual([]);
+    expect(state.adminConstructions).toBe(0);
+  });
+
+  it("answers 503 when the profile read fails or the row is missing, with no practice access", async () => {
+    db.failures.push((c) => (c.table === "users" ? { code: "XX000", message: "x" } : undefined));
+    for (const [name, handler] of handlers) {
+      resetCalls();
+      const response = await handler();
+      expect(response.status, name).toBe(503);
+      expect((await json(response)).error.message).toBe("Practice access is temporarily unavailable. Please retry.");
+      expectOnlyOwnProfileRead();
+    }
+    db.failures.length = 0;
+    db.tables.users = db.tables.users.filter((u) => u.id !== CALLER_ID);
+    for (const [name, handler] of handlers) {
+      resetCalls();
+      const response = await handler();
+      expect(response.status, name).toBe(503);
+      expectOnlyOwnProfileRead();
+    }
   });
 });
 

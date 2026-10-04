@@ -579,10 +579,12 @@ describe("D1 source contract", () => {
 describe("frozen read-only dependencies", () => {
   const FROZEN: Array<[string, string]> = [
     ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
-    ["lib/api/me-dto.ts", "ed8d897ca11e05a7d722c03904d4a7642afeea63d5f8db58bc05b861928fa75f"],
-    ["app/api/v1/me/route.ts", "465fafe5eb791148b29f27028db0e3685ca219b5217eef6b46aca0e5033071a2"],
+    // PI-1A: Practice Intelligence entitlement and effective /me capability.
+    ["lib/api/me-dto.ts", "49db919fefb85d9e5412a75978fbb901fdc893b04cb3a1883412dfe4dce0e842"],
+    ["app/api/v1/me/route.ts", "73d1a8a0195eae4978bd32ac73665c5c2992682f24281bca91c765c5b7cb5415"],
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
-    ["lib/entitlements.ts", "a0ad96e69b3774b4562efe5f25526a9920dfa5646640db3f3df979565a3b962f"],
+    // PI-1A: canUsePracticeIntelligence added.
+    ["lib/entitlements.ts", "e211f663ff7863f9ffb82a10ed397f7eb9e9b9bf39abe932d1bdc48de0e833e1"],
     // Analysis request authority closure: the browser swing_analysis INSERT is
     // replaced by a request to POST /api/v1/analyses.
     ["app/(dashboard)/analyze/page.tsx", "4665f9a99a0622f913e03542a0d8cba635b3142dc0cd1b291c215fba5bbc03a2"],

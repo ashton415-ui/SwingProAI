@@ -60,6 +60,15 @@ const SOURCES = execFileSync(
 
 const PRACTICE_TOKENS = /practice_(plans|plan_items|sessions|session_results)|pi_create_practice_plan|pi_record_practice_result|v1-practice-dto|practice-progress|isPracticeIntelligenceEnabled/;
 
+/**
+ * PI-1A: the two sources outside the practice surface that may know about it.
+ * /me reports effective availability (flag AND entitlement) and so reads the
+ * flag; the access authority is consumed by the practice routes. Neither may
+ * touch a practice table, function or module — asserted below.
+ */
+const PI1A_CONSUMERS = new Set<string>(["app/api/v1/me/route.ts", "lib/practice-entitlement-authority.ts"]);
+const PRACTICE_AUTHORITY = "lib/practice-entitlement-authority.ts";
+
 // ─── Containment ──────────────────────────────────────────────────────────────
 
 describe("PI-0 containment — only the practice surface knows about practice", () => {
@@ -69,15 +78,30 @@ describe("PI-0 containment — only the practice surface knows about practice", 
 
   it("no other application source references practice tables, functions or modules", () => {
     const offenders = SOURCES.filter(
-      (f) => !PRACTICE_SOURCES.has(f) && f !== "lib/feature-flags.ts" && PRACTICE_TOKENS.test(stripComments(read(f))),
+      (f) =>
+        !PRACTICE_SOURCES.has(f) &&
+        !PI1A_CONSUMERS.has(f) &&
+        f !== "lib/feature-flags.ts" &&
+        PRACTICE_TOKENS.test(stripComments(read(f))),
     );
     expect(offenders).toEqual([]);
   });
 
-  it("no client component imports the practice modules", () => {
+  it("the PI-1A consumers reach no practice table, function or module", () => {
+    for (const f of Array.from(PI1A_CONSUMERS)) {
+      const code = stripComments(read(f));
+      expect(code, f).not.toMatch(
+        /practice_(plans|plan_items|sessions|session_results)|pi_create_practice_plan|pi_record_practice_result|v1-practice-dto|practice-progress/,
+      );
+    }
+    // /me reads the flag and nothing else practice-specific.
+    expect(stripComments(read("app/api/v1/me/route.ts"))).toContain("isPracticeIntelligenceEnabled()");
+  });
+
+  it("no client component imports the practice modules or the access authority", () => {
     const clients = SOURCES.filter((f) => /^\s*["']use client["']/m.test(read(f)));
     for (const f of clients) {
-      expect(read(f), f).not.toMatch(/v1-practice-dto|practice-progress|app\/api\/v1\/practice/);
+      expect(read(f), f).not.toMatch(/v1-practice-dto|practice-progress|app\/api\/v1\/practice|practice-entitlement-authority/);
     }
   });
 
@@ -87,8 +111,17 @@ describe("PI-0 containment — only the practice surface knows about practice", 
     }
   });
 
-  it("entitlements gain no practice capability in PI-0", () => {
-    expect(read("lib/entitlements.ts")).not.toMatch(/practice/i);
+  // PI-0 asserted that entitlements had no practice capability. PI-1A
+  // supersedes that with exactly one, independent capability.
+  it("entitlements gain exactly one, independent practice capability (PI-1A)", () => {
+    const source = read("lib/entitlements.ts");
+    const exported = Array.from(source.matchAll(/export function (\w*[Pp]ractice\w*)/g)).map((m) => m[1]);
+    expect(exported).toEqual(["canUsePracticeIntelligence"]);
+    const start = source.indexOf("export function canUsePracticeIntelligence(");
+    const next = source.indexOf("export function", start + 1);
+    const helper = stripComments(next === -1 ? source.slice(start) : source.slice(start, next));
+    expect(helper).not.toMatch(/canUse(LaunchMonitor|PuttingAnalysis|PuttingRecommendations|UltraDeepAnalysis|FrameComparison)\(/);
+    expect(helper).not.toMatch(/role|admin/);
   });
 
   it("practice code never writes drills or the legacy user_drills table", () => {
@@ -135,6 +168,58 @@ describe("PI-0 routes — flag first, verified identity always", () => {
         expect(handler.slice(0, flag + 200)).toContain('v1Error("FEATURE_UNAVAILABLE"');
       }
     }
+  });
+
+  it("every handler runs flag → auth → entitlement → request, data and write work (PI-1A)", () => {
+    for (const file of Object.values(PRACTICE_ROUTES)) {
+      const code = stripComments(read(file));
+      expect(code, file).toContain('import { requirePracticeAccess } from "@/lib/practice-entitlement-authority";');
+      const handlers = code.split(/export async function (?:GET|POST)\b/).slice(1);
+      for (const handler of handlers) {
+        const flag = handler.indexOf("isPracticeIntelligenceEnabled()");
+        const auth = handler.indexOf("resolveRouteAuth()");
+        const access = handler.indexOf("await requirePracticeAccess(auth, requestId)");
+        expect(handler.split("requirePracticeAccess(").length - 1, file).toBe(1);
+        expect(flag, file).toBeGreaterThan(-1);
+        expect(auth, file).toBeGreaterThan(flag);
+        expect(access, `${file}: entitlement before auth`).toBeGreaterThan(auth);
+        expect(handler.slice(access, access + 120)).toContain("if (refused) return refused;");
+        for (const later of [
+          "parsePathId(",
+          "parseIdempotencyKey(",
+          "parsePlanListQuery(",
+          "parseSessionListQuery(",
+          "readJsonBody(",
+          "request.json",
+          "request.url",
+          ".from(",
+          ".rpc(",
+          "createAdminClient()",
+        ]) {
+          const at = handler.indexOf(later);
+          if (at !== -1) expect(at, `${file}: ${later} before the entitlement`).toBeGreaterThan(access);
+        }
+      }
+    }
+  });
+
+  it("no practice route restates the membership policy", () => {
+    for (const file of Object.values(PRACTICE_ROUTES)) {
+      const code = stripComments(read(file));
+      expect(code, file).not.toMatch(/"(birdie|eagle|coach_starter|coach_pro|par|trialing|past_due|canceled)"/);
+      expect(code, file).not.toMatch(/subscription_(tier|status)|canUsePracticeIntelligence|@\/lib\/entitlements/);
+    }
+  });
+
+  it("the access authority is server-only, caller-scoped and read-only", () => {
+    const raw = read(PRACTICE_AUTHORITY);
+    expect(raw.trimStart().startsWith('import "server-only";')).toBe(true);
+    const code = stripComments(raw);
+    expect(code).not.toMatch(/createAdminClient|SUPABASE_SERVICE_ROLE_KEY|service_role/);
+    expect(code).not.toMatch(/\.(insert|update|upsert|delete|rpc)\(/);
+    expect(code).toContain('.eq("id", caller.userId)');
+    expect(code).toContain('"subscription_tier, subscription_status"');
+    expect(code).not.toMatch(/\brole\b|app_metadata|user_metadata/);
   });
 
   it("the elevated client exists only in the five write handlers", () => {

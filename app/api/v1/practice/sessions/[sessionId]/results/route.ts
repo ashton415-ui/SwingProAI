@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 import { resolveRouteAuth } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { isPracticeIntelligenceEnabled } from "@/lib/feature-flags";
+import { requirePracticeAccess } from "@/lib/practice-entitlement-authority";
 import {
   resolveRequestId,
   v1AuthErrorResponse,
@@ -63,6 +64,9 @@ export async function POST(
     if (auth.status !== "authenticated") {
       return v1AuthErrorResponse(auth, requestId) ?? internal();
     }
+
+    const refused = await requirePracticeAccess(auth, requestId);
+    if (refused) return refused;
 
     const sessionId = parsePathId(params?.sessionId);
     if (sessionId === null) {

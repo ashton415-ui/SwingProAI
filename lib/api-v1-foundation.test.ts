@@ -21,6 +21,7 @@ import {
 import {
   canUseFrameComparison,
   canUseLaunchMonitor,
+  canUsePracticeIntelligence,
   canUsePuttingAnalysis,
   canUsePuttingRecommendations,
   canUseUltraDeepAnalysis,
@@ -370,12 +371,14 @@ describe("/me DTO mapping", () => {
     expect(dto.entitlement.status).toBe("none");
   });
 
-  it("24. publishes exactly the five backed capabilities for every tier", () => {
+  // PI-1A evolves this from five to six capabilities: practiceIntelligence.
+  it("24. publishes exactly the six backed capabilities for every tier", () => {
     for (const tier of ALL_TIERS) {
       const dto = toMeResponse(CALLER, profileRow({ subscription_tier: tier }));
       expect(Object.keys(dto.entitlement.capabilities).sort()).toEqual([
         "frameComparison",
         "launchMonitor",
+        "practiceIntelligence",
         "puttingAnalysis",
         "puttingRecommendations",
         "ultraDeepAnalysis",
@@ -386,8 +389,47 @@ describe("/me DTO mapping", () => {
         ultraDeepAnalysis: canUseUltraDeepAnalysis(tier),
         frameComparison: canUseFrameComparison(tier),
         launchMonitor: canUseLaunchMonitor(tier),
+        // No server feature state supplied → off, whatever the membership.
+        practiceIntelligence: false,
       });
     }
+  });
+
+  it("24b. practiceIntelligence is the server flag AND the central entitlement helper", () => {
+    const statuses = ["active", "trialing", "past_due", "canceled", "none", "paused", null];
+    const tiers = [...ALL_TIERS, "platinum", null];
+    for (const on of [false, true]) {
+      for (const tier of tiers) {
+        for (const status of statuses) {
+          const dto = toMeResponse(
+            CALLER,
+            profileRow({ subscription_tier: tier, subscription_status: status }),
+            new Date(),
+            { practiceIntelligence: on },
+          );
+          expect(dto.entitlement.capabilities.practiceIntelligence, `${on}/${tier}/${status}`).toBe(
+            on && canUsePracticeIntelligence(tier, status),
+          );
+        }
+      }
+    }
+  });
+
+  it("24c. practiceIntelligence: entitled+off false, entitled+on true, denied or unknown false", () => {
+    const at = (overrides: Record<string, unknown>, on: boolean) =>
+      toMeResponse(CALLER, profileRow(overrides), new Date(), { practiceIntelligence: on }).entitlement.capabilities
+        .practiceIntelligence;
+    expect(at({ subscription_tier: "birdie", subscription_status: "active" }, false)).toBe(false);
+    expect(at({ subscription_tier: "birdie", subscription_status: "active" }, true)).toBe(true);
+    expect(at({ subscription_tier: "coach_pro", subscription_status: "trialing" }, true)).toBe(true);
+    expect(at({ subscription_tier: "par", subscription_status: "active" }, true)).toBe(false);
+    expect(at({ subscription_tier: "eagle", subscription_status: "past_due" }, true)).toBe(false);
+    expect(at({ subscription_tier: "eagle", subscription_status: "canceled" }, true)).toBe(false);
+    expect(at({ subscription_tier: "platinum", subscription_status: "active" }, true)).toBe(false);
+    expect(at({ subscription_tier: "eagle", subscription_status: "unpaid" }, true)).toBe(false);
+    expect(at({ role: "admin", subscription_tier: "none", subscription_status: "none" }, true)).toBe(false);
+    // Omitting the feature state fails closed.
+    expect(toMeResponse(CALLER, profileRow()).entitlement.capabilities.practiceIntelligence).toBe(false);
   });
 
   it("25. does not publish analysisFullSwing, which no helper backs", () => {
@@ -556,6 +598,14 @@ describe("/me route source contract", () => {
     expect(routeSource).toContain("await resolveRouteAuth()");
   });
 
+  it("39c. resolves practice availability on the server without exposing the variable (PI-1A)", () => {
+    expect(routeSource).toContain('import { isPracticeIntelligenceEnabled } from "@/lib/feature-flags";');
+    expect(routeSource).toContain("practiceIntelligence: isPracticeIntelligenceEnabled()");
+    expect(routeSource).not.toContain("process.env");
+    expect(routeSource).not.toContain("PRACTICE_INTELLIGENCE_ENABLED");
+    expect(routeSource).not.toMatch(/"(birdie|eagle|coach_starter|coach_pro|trialing)"/);
+  });
+
   it("39b. does not reimplement token or cookie parsing", () => {
     // Deliberately code-level markers rather than words: the route's own
     // comment explains cookie and Bearer ingress, and a test that forbade the
@@ -666,7 +716,8 @@ describe("frozen read-only dependencies", () => {
   const FROZEN: Array<[string, string]> = [
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
     ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
-    ["lib/entitlements.ts", "a0ad96e69b3774b4562efe5f25526a9920dfa5646640db3f3df979565a3b962f"],
+    // PI-1A: canUsePracticeIntelligence added.
+    ["lib/entitlements.ts", "e211f663ff7863f9ffb82a10ed397f7eb9e9b9bf39abe932d1bdc48de0e833e1"],
     ["types/database.ts", "661d2f072f7e3b0531352350b67b80c3c9432e86dab1c0850d44a349f28f577e"],
   ];
 

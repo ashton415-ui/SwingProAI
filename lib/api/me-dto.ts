@@ -2,6 +2,7 @@ import {
   canUseFrameComparison,
   canUseLaunchMonitor,
   canUsePuttingAnalysis,
+  canUsePracticeIntelligence,
   canUsePuttingRecommendations,
   canUseUltraDeepAnalysis,
   getAnalysisModeForTier,
@@ -108,7 +109,24 @@ export interface MeCapabilitiesDto {
   readonly ultraDeepAnalysis: boolean;
   readonly frameComparison: boolean;
   readonly launchMonitor: boolean;
+  /**
+   * Effective availability, not eligibility alone: the feature is switched on
+   * for this deployment AND the membership passes canUsePracticeIntelligence.
+   * A client acts on this boolean and never re-derives the rule.
+   */
+  readonly practiceIntelligence: boolean;
 }
+
+/**
+ * Server-side feature availability, resolved by the route and passed in so the
+ * mapper stays pure. Defaults to everything off: a caller that forgets to say
+ * a feature is on can only under-report it.
+ */
+export interface MeServerFeatures {
+  readonly practiceIntelligence: boolean;
+}
+
+const FEATURES_OFF: MeServerFeatures = { practiceIntelligence: false };
 
 export interface MeLimitsDto {
   /** Saved swing analyses, or `null` for unlimited. */
@@ -223,8 +241,10 @@ export function toMeResponse(
   caller: VerifiedCallerIdentity,
   profile: MeProfileRow,
   now: Date = new Date(),
+  features: MeServerFeatures = FEATURES_OFF,
 ): MeResponseDto {
   const tier = toEnumOrFallback(profile.subscription_tier, TIERS, "none");
+  const status = toEnumOrFallback(profile.subscription_status, STATUSES, "none");
 
   return {
     user: {
@@ -247,7 +267,7 @@ export function toMeResponse(
       // tiers would destroy the distinction before any client could act on it.
       tier,
       tierDisplayName: getTierDisplayName(tier),
-      status: toEnumOrFallback(profile.subscription_status, STATUSES, "none"),
+      status,
       analysisMode: getAnalysisModeForTier(tier),
       capabilities: {
         puttingAnalysis: canUsePuttingAnalysis(tier),
@@ -255,6 +275,7 @@ export function toMeResponse(
         ultraDeepAnalysis: canUseUltraDeepAnalysis(tier),
         frameComparison: canUseFrameComparison(tier),
         launchMonitor: canUseLaunchMonitor(tier),
+        practiceIntelligence: features.practiceIntelligence === true && canUsePracticeIntelligence(tier, status),
       },
       limits: {
         savedSwings: getSwingLimitForTier(tier),

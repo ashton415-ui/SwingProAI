@@ -159,3 +159,33 @@ export function getUpsellTier(tier: SubscriptionTier): SubscriptionTier | null {
     default:       return null;
   }
 }
+
+/**
+ * Practice Intelligence — its own product contract (PI-1A).
+ *
+ * The first capability here that depends on billing state as well as tier: a
+ * paid tier can outlive the payment behind it (a failed invoice leaves the
+ * tier in place and marks the status past_due), so tier alone would keep
+ * granting access to an account that is no longer paying. Both must pass.
+ *
+ * Independent of every other helper in this file. Its tier list currently
+ * matches the putting and launch-monitor grants; that is the current price
+ * sheet, not a relationship, so nothing here calls, aliases or derives from
+ * another helper, and both lists are written out in full.
+ *
+ * Both arguments are taken as `unknown` because both originate in database
+ * columns: an unrecognised, null or non-string value can genuinely arrive at
+ * runtime, and the positive allow-lists below refuse anything not named.
+ *
+ * Eligibility only. Whether the feature is switched on, and whose rows a
+ * caller may read or write, are separate server boundaries.
+ */
+export function canUsePracticeIntelligence(tier: unknown, status: unknown): boolean {
+  const tierAllowed =
+    tier === "birdie" ||
+    tier === "eagle" ||
+    tier === "coach_starter" ||
+    tier === "coach_pro";
+  const statusAllowed = status === "active" || status === "trialing";
+  return tierAllowed && statusAllowed;
+}

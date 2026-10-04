@@ -735,9 +735,10 @@ describe("equipment slice source contract", () => {
     ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
     // Analysis request authority closure: five analysis-request error codes added.
     ["lib/api/v1-response.ts", "300df9cc9bfab79f1425b24d84ac7b1cd51e464e62ef39947f4afe310ec4c86c"],
-    ["lib/api/me-dto.ts", "ed8d897ca11e05a7d722c03904d4a7642afeea63d5f8db58bc05b861928fa75f"],
-    ["app/api/v1/me/route.ts", "465fafe5eb791148b29f27028db0e3685ca219b5217eef6b46aca0e5033071a2"],
-    ["lib/api-v1-foundation.test.ts", "55d0db58605084dff9a4a2210f331d45fc2164fa4ea011371bcf6e3adc248335"],
+    // PI-1A: Practice Intelligence effective /me capability (six capabilities).
+    ["lib/api/me-dto.ts", "49db919fefb85d9e5412a75978fbb901fdc893b04cb3a1883412dfe4dce0e842"],
+    ["app/api/v1/me/route.ts", "73d1a8a0195eae4978bd32ac73665c5c2992682f24281bca91c765c5b7cb5415"],
+    ["lib/api-v1-foundation.test.ts", "3dfa45e4d51e4e241c88c677fdb19274a52b5851d1eb98eebeb94ca6591d0779"],
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
     ["lib/equipment/catalog.ts", "88303c5b51838bd16562246a3ee27379b4e39feacddf0e9ab8c102cb63195a7e"],
     ["lib/equipment/club-display-name.ts", "6533d152a8bc8919e832f97669f35cab3a6f0249ffd5e538dc90be35bd9443d1"],

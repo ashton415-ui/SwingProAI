@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 import { resolveRouteAuth } from "@/utils/supabase/server";
 import { resolveRequestId, v1AuthErrorResponse, v1Error, v1Success } from "@/lib/api/v1-response";
 import { toMeResponse, type MeProfileRow } from "@/lib/api/me-dto";
+import { isPracticeIntelligenceEnabled } from "@/lib/feature-flags";
 
 /**
  * GET /api/v1/me
@@ -71,5 +72,11 @@ export async function GET(): Promise<Response> {
     return v1Error("INTERNAL_ERROR", PROFILE_UNAVAILABLE_MESSAGE, requestId, 500);
   }
 
-  return v1Success(toMeResponse({ userId: auth.userId, email: auth.email }, profile), requestId);
+  // Feature availability is decided here, on the server, and handed to the
+  // mapper as a boolean; the variable itself never reaches the response.
+  const features = { practiceIntelligence: isPracticeIntelligenceEnabled() };
+  return v1Success(
+    toMeResponse({ userId: auth.userId, email: auth.email }, profile, new Date(), features),
+    requestId,
+  );
 }

@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { resolveRouteAuth } from "@/utils/supabase/server";
 import { isPracticeIntelligenceEnabled } from "@/lib/feature-flags";
+import { requirePracticeAccess } from "@/lib/practice-entitlement-authority";
 import {
   resolveRequestId,
   v1AuthErrorResponse,
@@ -51,6 +52,9 @@ export async function GET(
     if (auth.status !== "authenticated") {
       return v1AuthErrorResponse(auth, requestId) ?? internal();
     }
+
+    const refused = await requirePracticeAccess(auth, requestId);
+    if (refused) return refused;
 
     // A malformed id cannot name a plan the caller owns.
     const planId = parsePathId(params?.planId);

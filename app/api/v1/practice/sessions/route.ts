@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 import { resolveRouteAuth } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { isPracticeIntelligenceEnabled } from "@/lib/feature-flags";
+import { requirePracticeAccess } from "@/lib/practice-entitlement-authority";
 import {
   resolveRequestId,
   v1AuthErrorResponse,
@@ -61,6 +62,9 @@ export async function GET(request: Request): Promise<Response> {
       return v1AuthErrorResponse(auth, requestId) ?? internal();
     }
 
+    const refused = await requirePracticeAccess(auth, requestId);
+    if (refused) return refused;
+
     const query = parseSessionListQuery(new URL(request.url));
     if (!query.ok) {
       return v1ValidationError(requestId);
@@ -100,6 +104,9 @@ export async function POST(request: Request): Promise<Response> {
     if (auth.status !== "authenticated") {
       return v1AuthErrorResponse(auth, requestId) ?? internal();
     }
+
+    const refused = await requirePracticeAccess(auth, requestId);
+    if (refused) return refused;
 
     const idempotencyKey = parseIdempotencyKey(request.headers);
     if (idempotencyKey === null) {
