@@ -1,15 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveVerifiedAuth } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
+import { resolveStripePlan } from "@/lib/billing/stripe-plan-authority";
 import Stripe from "stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://swing-pro-ai.vercel.app";
 
 /**
- * GET /api/stripe/checkout?priceId=price_xxx&tier=birdie
+ * GET /api/stripe/checkout?plan=birdie
  * Uses GET so CloudFront/CDN layers don't block it.
  * Redirects the browser directly to Stripe Checkout.
+ *
+ * The browser names a plan and nothing else. The price charged and the tier
+ * recorded both come from the server plan authority (BILL-TIER1), so a caller
+ * cannot pair a cheap price with a premium tier.
  *
  * This is a web-commerce surface and stays one: it authenticates the browser
  * session only, and deliberately does not accept a Bearer credential. A native
@@ -30,10 +35,11 @@ export async function GET(req: NextRequest) {
   }
 
   const { searchParams } = new URL(req.url);
-  const priceId = searchParams.get("priceId");
-  const tier = searchParams.get("tier");
+  // An unknown plan, or one whose price is missing or shared with another
+  // plan, stops here: before any Stripe customer, link write or session.
+  const plan = resolveStripePlan(searchParams.get("plan"));
 
-  if (!priceId || !tier) {
+  if (!plan) {
     return NextResponse.redirect(new URL("/upgrade?error=missing-plan", req.url));
   }
 
@@ -103,10 +109,12 @@ export async function GET(req: NextRequest) {
     customer: customerId,
     mode: "subscription",
     payment_method_types: ["card"],
-    line_items: [{ price: priceId, quantity: 1 }],
+    line_items: [{ price: plan.priceId, quantity: 1 }],
     subscription_data: {
       trial_period_days: 7,
-      metadata: { tier, supabase_user_id: auth.userId },
+      // Traceability only. The webhook derives tier from the price paid and
+      // never reads this.
+      metadata: { tier: plan.tier, supabase_user_id: auth.userId },
     },
     success_url: `${SITE_URL}/dashboard?upgraded=true`,
     cancel_url: `${SITE_URL}/upgrade`,

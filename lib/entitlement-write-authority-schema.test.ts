@@ -252,6 +252,43 @@ describe("entitlement-write-authority — the Stripe webhook writes fail closed"
   });
 });
 
+// ─── Stripe price-to-tier authority (BILL-TIER1) ──────────────────────────────
+
+describe("entitlement-write-authority — tier is bound to the price paid", () => {
+  const checkout = stripComments(readSource(CHECKOUT));
+  const webhook = stripComments(readSource(WEBHOOK));
+
+  it("checkout takes a plan selector only; price and tier come from the server", () => {
+    expect(checkout).toContain("await resolveVerifiedAuth()");
+    expect(checkout).toContain('resolveStripePlan(searchParams.get("plan"))');
+    expect(checkout).not.toMatch(/searchParams\.get\("(priceId|price|tier)"\)/);
+    expect(checkout).toContain("line_items: [{ price: plan.priceId, quantity: 1 }]");
+    expect(checkout).toContain("metadata: { tier: plan.tier, supabase_user_id: auth.userId }");
+  });
+
+  it("checkout resolves the plan before any customer, link or session side effect", () => {
+    const resolve = checkout.indexOf("resolveStripePlan(");
+    expect(resolve).toBeGreaterThan(-1);
+    for (const effect of ["stripe.customers.create", "createAdminClient()", "stripe.checkout.sessions.create"]) {
+      expect(checkout.indexOf(effect), effect).toBeGreaterThan(resolve);
+    }
+  });
+
+  it("checkout still writes only the customer link, never entitlement", () => {
+    expect(checkout).toMatch(/\.update\(\{ stripe_customer_id: customer\.id \}\)/);
+    expect(checkout).toContain('.is("stripe_customer_id", null)');
+    expect(checkout).not.toMatch(/subscription_tier|subscription_status/);
+  });
+
+  it("the webhook derives tier from the server price authority, never metadata", () => {
+    expect(webhook).toContain('import { tierForStripePriceId } from "@/lib/billing/stripe-plan-authority";');
+    expect(webhook).not.toMatch(/metadata/);
+    expect(webhook).toContain('.eq("stripe_customer_id", customerId)');
+    expect(webhook).toContain('.select("id")');
+    expect(webhook).not.toMatch(/searchParams|req\.json\(|user_id|userId/);
+  });
+});
+
 // ─── Live writer scan ─────────────────────────────────────────────────────────
 
 describe("entitlement-write-authority — every live public.users writer is trusted", () => {

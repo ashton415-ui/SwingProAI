@@ -5,12 +5,11 @@ import { CheckoutButton } from "@/components/CheckoutButton";
 
 const PLANS = [
   {
-    id: "par",
+    id: "par" as const,
     name: "Par",
     price: "$9.99",
     period: "/ month",
     target: "The Casual Improver",
-    priceEnvKey: "STRIPE_PAR_PRICE_ID",
     popular: false,
     features: [
       "Up to 5 AI-powered video analyses per month",
@@ -20,12 +19,11 @@ const PLANS = [
     ],
   },
   {
-    id: "birdie",
+    id: "birdie" as const,
     name: "Birdie",
     price: "$24.99",
     period: "/ month",
     target: "The Dedicated Amateur",
-    priceEnvKey: "STRIPE_BIRDIE_PRICE_ID",
     popular: true,
     features: [
       "Unlimited swing analyses",
@@ -35,12 +33,11 @@ const PLANS = [
     ],
   },
   {
-    id: "eagle",
+    id: "eagle" as const,
     name: "Eagle",
     price: "$49.99",
     period: "/ month",
     target: "The Competitive Player",
-    priceEnvKey: "STRIPE_EAGLE_PRICE_ID",
     popular: false,
     features: [
       "Everything in Birdie, plus:",
@@ -92,7 +89,6 @@ export default async function UpgradePage() {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {PLANS.map((plan) => {
             const isCurrent = currentTier === plan.id;
-            const priceId = process.env[plan.priceEnvKey];
 
             return (
               <div
@@ -139,8 +135,7 @@ export default async function UpgradePage() {
                   </div>
                 ) : (
                   <CheckoutButton
-                    priceId={priceId ?? ""}
-                    tier={plan.id}
+                    plan={plan.id}
                     label={`Get ${plan.name}`}
                     className={`w-full py-3.5 font-black uppercase tracking-widest rounded-2xl transition-all text-[10px] disabled:opacity-60 ${
                       plan.popular

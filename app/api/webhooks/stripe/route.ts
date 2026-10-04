@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { normalizeStripeSubscriptionStatus } from "@/lib/billing/stripe-subscription-status";
-import type { SubscriptionStatus } from "@/types/database";
+import { tierForStripePriceId } from "@/lib/billing/stripe-plan-authority";
+import type { SubscriptionStatus, SubscriptionTier } from "@/types/database";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
@@ -26,8 +27,15 @@ const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
  *   * Nothing identifying — customer, subscription, user, provider or database
  *     error — is logged or returned.
  *
- * Tier still comes from subscription metadata exactly as before. Binding tier
- * to the purchased price is BILL-TIER1, deliberately not changed here.
+ * BILL-TIER1:
+ *
+ *   * Tier is the plan the current subscription actually pays for: its single
+ *     item's price, mapped through the server plan authority. Subscription
+ *     metadata is never read — checkout writes a tier there for traceability,
+ *     but a value the browser once influenced is not an entitlement source.
+ *   * Every subscription-bearing write persists tier alongside status, so an
+ *     unknown or ambiguous price clears a previous premium tier instead of
+ *     leaving it in place.
  */
 
 /** Persistence or provider failure after a valid signature. */
@@ -35,7 +43,7 @@ class BillingWriteFailure extends Error {}
 
 type BillingPatch = {
   subscription_status: SubscriptionStatus;
-  subscription_tier?: string;
+  subscription_tier: SubscriptionTier;
 };
 
 function failed(): NextResponse {
@@ -67,6 +75,19 @@ function customerOf(subscription: Stripe.Subscription): string {
   const customerId = idOf(subscription.customer);
   if (!customerId) throw new BillingWriteFailure();
   return customerId;
+}
+
+/**
+ * The tier the subscription pays for. Exactly one item, whose price matches
+ * exactly one configured plan; anything else — no items, several items, a
+ * missing, unknown or ambiguously configured price — grants nothing.
+ */
+function tierOf(subscription: Stripe.Subscription): SubscriptionTier {
+  const items: unknown = subscription.items?.data;
+  if (!Array.isArray(items) || items.length !== 1) return "none";
+  const price: unknown = (items[0] as { price?: unknown } | null)?.price;
+  const priceId = typeof price === "object" && price !== null ? (price as { id?: unknown }).id : undefined;
+  return tierForStripePriceId(priceId) ?? "none";
 }
 
 /** The single trusted write: exactly one linked profile row, proved. */
@@ -107,24 +128,23 @@ export async function POST(req: NextRequest) {
           const subscription = await currentSubscription(session.subscription);
           await persistBillingState(customerOf(subscription), {
             subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
-            subscription_tier: subscription.metadata?.tier ?? "par",
+            subscription_tier: tierOf(subscription),
           });
         } else {
           // No subscription: nothing here grants access.
           const customerId = idOf(session.customer);
           if (!customerId) throw new BillingWriteFailure();
-          await persistBillingState(customerId, { subscription_status: "none" });
+          await persistBillingState(customerId, { subscription_status: "none", subscription_tier: "none" });
         }
         break;
       }
 
       case "customer.subscription.updated": {
-        // The payload names the subscription; its status is not trusted.
+        // The payload names the subscription; its status and price are not trusted.
         const subscription = await currentSubscription(event.data.object as Stripe.Subscription);
-        const tier = subscription.metadata?.tier;
         await persistBillingState(customerOf(subscription), {
           subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
-          ...(tier ? { subscription_tier: tier } : {}),
+          subscription_tier: tierOf(subscription),
         });
         break;
       }
@@ -145,6 +165,7 @@ export async function POST(req: NextRequest) {
         const subscription = await currentSubscription(invoice.subscription);
         await persistBillingState(customerOf(subscription), {
           subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
+          subscription_tier: tierOf(subscription),
         });
         break;
       }

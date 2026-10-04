@@ -1,14 +1,16 @@
 "use client";
 
+/** The plans checkout sells. The server alone decides the price and tier. */
+type CheckoutPlan = "par" | "birdie" | "eagle";
+
 interface CheckoutButtonProps {
-  priceId: string;
-  tier: string;
+  plan: CheckoutPlan;
   label: string;
   className?: string;
 }
 
-export function CheckoutButton({ priceId, tier, label, className }: CheckoutButtonProps) {
-  const url = `/api/stripe/checkout?priceId=${encodeURIComponent(priceId)}&tier=${encodeURIComponent(tier)}`;
+export function CheckoutButton({ plan, label, className }: CheckoutButtonProps) {
+  const url = `/api/stripe/checkout?plan=${encodeURIComponent(plan)}`;
 
   return (
     <a

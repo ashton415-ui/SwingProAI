@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,11 +11,25 @@ import { fileURLToPath } from "node:url";
 // real against deterministic stand-ins: Stripe (signature check and current
 // subscription retrieval), the server-only admin client, and NextResponse. No
 // network call, no Stripe API, no database. Identifiers are synthetic.
+//
+// BILL-TIER1: tier is the current subscription's actual price mapped through
+// the server plan authority; the synthetic plan prices below stand in for the
+// server configuration and are restored after the file.
+
+const PRICE_ENV_KEYS = ["STRIPE_PAR_PRICE_ID", "STRIPE_BIRDIE_PRICE_ID", "STRIPE_EAGLE_PRICE_ID"] as const;
 
 const state = vi.hoisted(() => {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of ["STRIPE_PAR_PRICE_ID", "STRIPE_BIRDIE_PRICE_ID", "STRIPE_EAGLE_PRICE_ID"]) {
+    saved[key] = process.env[key];
+  }
   process.env.STRIPE_SECRET_KEY = "test-stripe-secret-not-real";
   process.env.STRIPE_WEBHOOK_SECRET = "test-webhook-secret-not-real";
+  process.env.STRIPE_PAR_PRICE_ID = "price_TEST_PAR";
+  process.env.STRIPE_BIRDIE_PRICE_ID = "price_TEST_BIRDIE";
+  process.env.STRIPE_EAGLE_PRICE_ID = "price_TEST_EAGLE";
   return {
+    savedPriceEnv: saved,
     event: null as unknown,
     badSignature: false,
     constructArgs: [] as unknown[][],
@@ -29,6 +43,8 @@ const state = vi.hoisted(() => {
     writeThrows: false,
   };
 });
+
+vi.mock("server-only", () => ({}));
 
 vi.mock("next/server", () => ({
   NextResponse: {
@@ -99,8 +115,24 @@ const CUSTOMER = "cus_TEST_0001";
 const SUB = "sub_TEST_0001";
 const RAW_BODY = '{"id":"evt_TEST","object":"event"}';
 
+const PRICE = { par: "price_TEST_PAR", birdie: "price_TEST_BIRDIE", eagle: "price_TEST_EAGLE" } as const;
+
+/** Subscription items carrying the given price ids, as Stripe returns them. */
+function items(...priceIds: unknown[]) {
+  return { object: "list", data: priceIds.map((id, i) => ({ id: `si_TEST_${i}`, price: { id } })) };
+}
+
+/** A current subscription paying the Birdie price, with metadata that must be ignored. */
 function subscription(status: unknown, overrides: Record<string, unknown> = {}) {
-  return { id: SUB, object: "subscription", status, customer: CUSTOMER, metadata: { tier: "birdie" }, ...overrides };
+  return {
+    id: SUB,
+    object: "subscription",
+    status,
+    customer: CUSTOMER,
+    items: items(PRICE.birdie),
+    metadata: { tier: "birdie" },
+    ...overrides,
+  };
 }
 
 function event(type: string, object: Record<string, unknown>) {
@@ -140,6 +172,17 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  process.env.STRIPE_PAR_PRICE_ID = PRICE.par;
+  process.env.STRIPE_BIRDIE_PRICE_ID = PRICE.birdie;
+  process.env.STRIPE_EAGLE_PRICE_ID = PRICE.eagle;
+});
+
+afterAll(() => {
+  for (const key of PRICE_ENV_KEYS) {
+    const value = state.savedPriceEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 async function expectFailure(response: Response) {
@@ -236,19 +279,33 @@ describe("checkout.session.completed", () => {
     ]);
   });
 
-  it("accepts an expanded subscription object and keeps the existing tier default", async () => {
-    state.subscriptions.set(SUB, subscription("active", { metadata: {} }));
+  it("accepts an expanded subscription object; missing metadata no longer defaults a tier", async () => {
+    state.subscriptions.set(SUB, subscription("active", { metadata: {}, items: items(PRICE.par) }));
     state.event = event("checkout.session.completed", { subscription: { id: SUB }, customer: CUSTOMER });
     expect((await deliver()).status).toBe(200);
     expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "par" });
   });
 
-  it("23. with no subscription writes status none only, leaving tier alone", async () => {
+  it("metadata tier=eagle on an actual Par price persists par", async () => {
+    state.subscriptions.set(SUB, subscription("trialing", { metadata: { tier: "eagle" }, items: items(PRICE.par) }));
+    state.event = event("checkout.session.completed", { subscription: SUB, customer: CUSTOMER });
+    expect((await deliver()).status).toBe(200);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "trialing", subscription_tier: "par" });
+  });
+
+  it("metadata tier=coach_pro on an unknown price persists none", async () => {
+    state.subscriptions.set(SUB, subscription("active", { metadata: { tier: "coach_pro" }, items: items("price_TEST_UNKNOWN") }));
+    state.event = event("checkout.session.completed", { subscription: SUB, customer: CUSTOMER });
+    expect((await deliver()).status).toBe(200);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "none" });
+  });
+
+  it("23. with no subscription writes status none and tier none", async () => {
     state.event = event("checkout.session.completed", { subscription: null, customer: CUSTOMER });
     expect((await deliver()).status).toBe(200);
     expect(state.retrieveCalls).toEqual([]);
     expect(state.writes).toHaveLength(1);
-    expect(state.writes[0].patch).toEqual({ subscription_status: "none" });
+    expect(state.writes[0].patch).toEqual({ subscription_status: "none", subscription_tier: "none" });
     expect(state.writes[0].eq).toEqual(["stripe_customer_id", CUSTOMER]);
   });
 
@@ -275,11 +332,41 @@ describe("customer.subscription.updated", () => {
     expect(state.writes[0].patch).toEqual({ subscription_status: "none", subscription_tier: "birdie" });
   });
 
-  it("leaves tier unchanged when the current subscription carries none", async () => {
-    state.subscriptions.set(SUB, subscription("active", { metadata: {} }));
+  it("follows the current price, not stale payload items or metadata", async () => {
+    state.subscriptions.set(SUB, subscription("active", { items: items(PRICE.eagle), metadata: {} }));
+    state.event = event("customer.subscription.updated", subscription("active", { items: items(PRICE.par) }));
+    await deliver();
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "eagle" });
+  });
+
+  it("writes tier every time: a stale premium tier cannot survive an unknown current price", async () => {
+    state.subscriptions.set(SUB, subscription("active", { metadata: { tier: "eagle" }, items: items("price_TEST_UNKNOWN") }));
+    state.event = event("customer.subscription.updated", subscription("active", { metadata: { tier: "eagle" } }));
+    await deliver();
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "none" });
+  });
+
+  const FAIL_CLOSED_ITEMS: [string, unknown][] = [
+    ["zero items", items()],
+    ["multiple items", items(PRICE.birdie, PRICE.eagle)],
+    ["an item without a price", { object: "list", data: [{ id: "si_TEST_0" }] }],
+    ["a missing items list", undefined],
+  ];
+  for (const [label, currentItems] of FAIL_CLOSED_ITEMS) {
+    it(`${label} → tier none`, async () => {
+      state.subscriptions.set(SUB, subscription("active", { items: currentItems }));
+      state.event = event("customer.subscription.updated", subscription("active"));
+      expect((await deliver()).status).toBe(200);
+      expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "none" });
+    });
+  }
+
+  it("a price configured for two plans → tier none", async () => {
+    process.env.STRIPE_EAGLE_PRICE_ID = PRICE.birdie;
+    state.subscriptions.set(SUB, subscription("active"));
     state.event = event("customer.subscription.updated", subscription("active"));
     await deliver();
-    expect(state.writes[0].patch).toEqual({ subscription_status: "active" });
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "none" });
   });
 
   it("derives the customer from the current subscription, not the payload", async () => {
@@ -301,19 +388,19 @@ describe("customer.subscription.deleted", () => {
 });
 
 describe("invoice.payment_failed", () => {
-  it("28. with a subscription persists the current normalized status only", async () => {
+  it("28. with a subscription persists the current normalized status and actual-price tier", async () => {
     state.subscriptions.set(SUB, subscription("past_due"));
     state.event = event("invoice.payment_failed", { subscription: SUB, customer: CUSTOMER });
     expect((await deliver()).status).toBe(200);
     expect(state.retrieveCalls).toEqual([SUB]);
-    expect(state.writes[0].patch).toEqual({ subscription_status: "past_due" });
+    expect(state.writes[0].patch).toEqual({ subscription_status: "past_due", subscription_tier: "birdie" });
   });
 
   it("follows the current subscription, not the event name", async () => {
-    state.subscriptions.set(SUB, subscription("active"));
+    state.subscriptions.set(SUB, subscription("active", { items: items(PRICE.eagle) }));
     state.event = event("invoice.payment_failed", { subscription: SUB, customer: CUSTOMER });
     await deliver();
-    expect(state.writes[0].patch).toEqual({ subscription_status: "active" });
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "eagle" });
   });
 
   it("29. without a subscription performs no entitlement write and acknowledges", async () => {
@@ -454,6 +541,20 @@ describe("webhook source contract", () => {
   it("acknowledges received:true exactly once, after the failure catch", () => {
     expect((src.match(/received: true/g) ?? []).length).toBe(1);
     expect(src.lastIndexOf("return failed();")).toBeLessThan(src.indexOf("received: true"));
+  });
+
+  it("derives tier from the actual price through the plan authority, never from metadata", () => {
+    expect(src).not.toMatch(/metadata/);
+    expect(src).toContain('import { tierForStripePriceId } from "@/lib/billing/stripe-plan-authority";');
+    expect(src).toContain("subscription.items?.data");
+    expect(src).toContain("items.length !== 1");
+    expect(src).not.toMatch(/prices\.retrieve|products\.retrieve/);
+    // Every tier written is either derived from the price or the literal none.
+    const tiers = (src.match(/subscription_tier:\s*[^,}\n]+/g) ?? []).filter(
+      (w) => !/subscription_tier:\s*SubscriptionTier;/.test(w),
+    );
+    expect(tiers.length).toBe(5);
+    for (const w of tiers) expect(w, w).toMatch(/tierOf\(subscription\)|"none"/);
   });
 
   it("only the webhook consumes the normalizer", () => {
