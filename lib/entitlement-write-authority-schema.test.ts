@@ -219,6 +219,39 @@ describe("entitlement-write-authority — checkout customer link is a trusted wr
   });
 });
 
+// ─── Stripe webhook: fail-closed trusted billing writer (BILL-STATUS1) ────────
+
+describe("entitlement-write-authority — the Stripe webhook writes fail closed", () => {
+  const webhook = stripComments(readSource(WEBHOOK));
+
+  it("writes only through the server-only elevated client, bound to stripe_customer_id", () => {
+    expect(webhook).toContain('import { createAdminClient } from "@/utils/supabase/admin";');
+    expect(webhook).toContain('.eq("stripe_customer_id", customerId)');
+    expect(webhook).not.toMatch(/searchParams|req\.json\(|user_id|userId/);
+  });
+
+  it("proves every write changed exactly one row by its id", () => {
+    expect(webhook).toContain('.select("id")');
+    expect(webhook).toContain("result.data.length !== 1");
+    expect((webhook.match(/\.from\("users"\)/g) ?? []).length).toBe(1);
+  });
+
+  it("cannot acknowledge a failed write as received", () => {
+    expect(webhook).toContain('{ error: "Webhook processing failed" }, { status: 500 }');
+    expect((webhook.match(/received: true/g) ?? []).length).toBe(1);
+    expect(webhook.lastIndexOf("return failed();")).toBeLessThan(webhook.indexOf("received: true"));
+  });
+
+  it("never persists a raw Stripe status", () => {
+    expect(webhook).not.toMatch(/subscription_status:\s*(sub|subscription)\.status/);
+    expect(webhook).toContain("normalizeStripeSubscriptionStatus(");
+  });
+
+  it("logs no customer or subscription identifier", () => {
+    expect(webhook).not.toMatch(/console\.(log|error|warn|info|debug)\([^)]*(customer|subscription|\$\{)/i);
+  });
+});
+
 // ─── Live writer scan ─────────────────────────────────────────────────────────
 
 describe("entitlement-write-authority — every live public.users writer is trusted", () => {
