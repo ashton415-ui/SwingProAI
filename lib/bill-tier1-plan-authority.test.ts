@@ -350,6 +350,18 @@ describe("CheckoutButton and upgrade page", () => {
     expect(upgrade).toContain("plan={plan.id}");
     expect(upgrade).not.toMatch(/tier=\{/);
   });
+
+  it("PRICING-1. each plan displays its own launch price (presentation only)", () => {
+    const pairs = Array.from(upgrade.matchAll(/id: "([a-z_]+)" as const,[\s\S]*?price: "([^"]+)"/g), (m) => [m[1], m[2]]);
+    expect(pairs).toEqual([
+      ["par", "$7.99"],
+      ["birdie", "$14.99"],
+      ["eagle", "$24.99"],
+    ]);
+    expect(upgrade).not.toContain("$9.99");
+    expect(upgrade).not.toContain("$49.99");
+    expect(upgrade.match(/\$24\.99/g)).toHaveLength(1);
+  });
 });
 
 // ─── Webhook ──────────────────────────────────────────────────────────────────

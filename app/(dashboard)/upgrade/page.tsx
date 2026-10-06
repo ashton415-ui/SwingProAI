@@ -7,7 +7,7 @@ const PLANS = [
   {
     id: "par" as const,
     name: "Par",
-    price: "$9.99",
+    price: "$7.99",
     period: "/ month",
     target: "The Casual Improver",
     popular: false,
@@ -21,7 +21,7 @@ const PLANS = [
   {
     id: "birdie" as const,
     name: "Birdie",
-    price: "$24.99",
+    price: "$14.99",
     period: "/ month",
     target: "The Dedicated Amateur",
     popular: true,
@@ -35,7 +35,7 @@ const PLANS = [
   {
     id: "eagle" as const,
     name: "Eagle",
-    price: "$49.99",
+    price: "$24.99",
     period: "/ month",
     target: "The Competitive Player",
     popular: false,
