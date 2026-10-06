@@ -413,6 +413,112 @@ describe("invoice.payment_failed", () => {
   });
 });
 
+// ─── invoice.payment_failed: current (2026-04-22.dahlia) snapshot shape ───────
+// Current API versions name the subscription at
+// parent.subscription_details.subscription instead of a top-level field.
+
+describe("invoice.payment_failed — version-tolerant subscription reference", () => {
+  const dahlia = (subscriptionRef: unknown, extra: Record<string, unknown> = {}) => ({
+    customer: CUSTOMER,
+    parent: { type: "subscription_details", quote_details: null, subscription_details: { subscription: subscriptionRef, ...extra } },
+  });
+
+  async function expectNoWrite() {
+    const response = await deliver();
+    expect(response.status).toBe(200);
+    expect(state.retrieveCalls).toEqual([]);
+    expect(state.writes).toEqual([]);
+    expect(state.adminConstructions).toBe(0);
+  }
+
+  it("DAHLIA-1. a parent string id is retrieved and its current status and actual-price tier persisted", async () => {
+    state.subscriptions.set(SUB, subscription("past_due"));
+    state.event = event("invoice.payment_failed", dahlia(SUB));
+    expect((await deliver()).status).toBe(200);
+    expect(state.retrieveCalls).toEqual([SUB]);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "past_due", subscription_tier: "birdie" });
+    expect(state.writes[0].eq).toEqual(["stripe_customer_id", CUSTOMER]);
+  });
+
+  it("DAHLIA-2. an expanded parent subscription reference resolves by its id", async () => {
+    state.subscriptions.set(SUB, subscription("unpaid"));
+    state.event = event("invoice.payment_failed", dahlia({ id: SUB, object: "subscription" }));
+    expect((await deliver()).status).toBe(200);
+    expect(state.retrieveCalls).toEqual([SUB]);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "past_due", subscription_tier: "birdie" });
+  });
+
+  it("DAHLIA-3. a null parent with no top-level subscription writes nothing and acknowledges", async () => {
+    state.event = event("invoice.payment_failed", { customer: CUSTOMER, parent: null });
+    await expectNoWrite();
+  });
+
+  it("DAHLIA-4. a quote parent never yields a subscription", async () => {
+    state.subscriptions.set(SUB, subscription("active"));
+    state.event = event("invoice.payment_failed", {
+      customer: CUSTOMER,
+      parent: { type: "quote_details", quote_details: { quote: "qt_TEST_0001" }, subscription_details: { subscription: SUB } },
+    });
+    await expectNoWrite();
+  });
+
+  it("DAHLIA-5. malformed current shapes fail closed with no write", async () => {
+    state.subscriptions.set(SUB, subscription("active"));
+    const MALFORMED: unknown[] = [
+      { type: "subscription_details", subscription_details: null },
+      { type: "subscription_details", subscription_details: "sub_TEST_0001" },
+      { type: "subscription_details", subscription_details: { subscription: "" } },
+      { type: "subscription_details", subscription_details: { subscription: 42 } },
+      { type: "subscription_details", subscription_details: { subscription: { id: "" } } },
+      { type: "subscription_details", subscription_details: { subscription: null } },
+      { subscription_details: { subscription: SUB } },
+      "subscription_details",
+    ];
+    for (const parent of MALFORMED) {
+      state.retrieveCalls = [];
+      state.writes = [];
+      state.adminConstructions = 0;
+      state.event = event("invoice.payment_failed", { customer: CUSTOMER, parent });
+      await expectNoWrite();
+    }
+  });
+
+  it("DAHLIA-6. a top-level id that contradicts the parent id fails with no retrieval or write", async () => {
+    state.subscriptions.set(SUB, subscription("active"));
+    state.subscriptions.set("sub_TEST_0002", subscription("active", { id: "sub_TEST_0002" }));
+    state.event = event("invoice.payment_failed", { ...dahlia(SUB), subscription: "sub_TEST_0002" });
+    await expectFailure(await deliver());
+    expect(state.retrieveCalls).toEqual([]);
+    expect(state.writes).toEqual([]);
+    expect(state.adminConstructions).toBe(0);
+  });
+
+  it("DAHLIA-7. matching top-level and parent ids retrieve once and write once", async () => {
+    state.subscriptions.set(SUB, subscription("past_due", { items: items(PRICE.eagle) }));
+    state.event = event("invoice.payment_failed", { ...dahlia(SUB), subscription: SUB });
+    expect((await deliver()).status).toBe(200);
+    expect(state.retrieveCalls).toEqual([SUB]);
+    expect(state.writes).toHaveLength(1);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "past_due", subscription_tier: "eagle" });
+  });
+
+  it("LEGACY-MALFORMED. a present top-level subscription with no usable id still fails with no retrieval or write", async () => {
+    state.subscriptions.set(SUB, subscription("active"));
+    state.event = event("invoice.payment_failed", { customer: CUSTOMER, subscription: { object: "subscription" } });
+    await expectFailure(await deliver());
+    expect(state.retrieveCalls).toEqual([]);
+    expect(state.writes).toEqual([]);
+    expect(state.adminConstructions).toBe(0);
+  });
+
+  it("DAHLIA-8. a higher-plan hint in the parent cannot outrank the actual Par price", async () => {
+    state.subscriptions.set(SUB, subscription("active", { items: items(PRICE.par), metadata: { tier: "eagle" } }));
+    state.event = event("invoice.payment_failed", dahlia(SUB, { metadata: { tier: "eagle" } }));
+    expect((await deliver()).status).toBe(200);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "par" });
+  });
+});
+
 describe("unhandled events", () => {
   it("36. perform no entitlement write and no Stripe call", async () => {
     state.event = event("customer.created", { id: CUSTOMER });

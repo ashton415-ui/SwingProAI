@@ -30,9 +30,10 @@ const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
  * BILL-TIER1:
  *
  *   * Tier is the plan the current subscription actually pays for: its single
- *     item's price, mapped through the server plan authority. Subscription
- *     metadata is never read — checkout writes a tier there for traceability,
- *     but a value the browser once influenced is not an entitlement source.
+ *     item's price, mapped through the server plan authority. The key/value
+ *     annotations on a subscription are never read — checkout writes a tier
+ *     there for traceability, but a value the browser once influenced is not
+ *     an entitlement source.
  *   * Every subscription-bearing write persists tier alongside status, so an
  *     unknown or ambiguous price clears a previous premium tier instead of
  *     leaving it in place.
@@ -58,6 +59,31 @@ function idOf(reference: unknown): string | null {
     return typeof id === "string" && id.length > 0 ? id : null;
   }
   return null;
+}
+
+function objectLike(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+/**
+ * The subscription that generated an invoice, from whichever snapshot shape
+ * the webhook endpoint's API version renders: current versions name it at
+ * parent.subscription_details.subscription (only when parent.type says so);
+ * 2024-04-10 names it at the top-level subscription field. null when neither
+ * names one. A top-level reference that is present but carries no usable id,
+ * or two different subscriptions, are faults in signed data, never a choice:
+ * those fail, before any retrieval or write.
+ */
+function invoiceSubscriptionId(invoice: unknown): string | null {
+  const fields = objectLike(invoice);
+  if (!fields) return null;
+  const parent = objectLike(fields.parent);
+  const details = parent?.type === "subscription_details" ? objectLike(parent.subscription_details) : null;
+  const current = details ? idOf(details.subscription) : null;
+  const legacy = idOf(fields.subscription);
+  if (fields.subscription && !legacy) throw new BillingWriteFailure();
+  if (current && legacy && current !== legacy) throw new BillingWriteFailure();
+  return current ?? legacy;
 }
 
 /** The subscription as Stripe holds it now. */
@@ -159,10 +185,10 @@ export async function POST(req: NextRequest) {
       }
 
       case "invoice.payment_failed": {
-        const invoice = event.data.object as Stripe.Invoice;
         // An invoice with no subscription says nothing about entitlement.
-        if (!invoice.subscription) break;
-        const subscription = await currentSubscription(invoice.subscription);
+        const subscriptionId = invoiceSubscriptionId(event.data.object);
+        if (!subscriptionId) break;
+        const subscription = await currentSubscription(subscriptionId);
         await persistBillingState(customerOf(subscription), {
           subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
           subscription_tier: tierOf(subscription),
