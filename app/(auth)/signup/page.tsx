@@ -106,7 +106,7 @@ export default function SignupPage() {
         <div className="flex items-center justify-center gap-2 mt-6">
           <Zap size={10} className="text-golf-green" fill="currentColor" />
           <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-gray-600">
-            7-Day Free Trial — No Credit Card Required
+            7-day trial on paid plans · Card required at checkout
           </p>
         </div>
       </div>

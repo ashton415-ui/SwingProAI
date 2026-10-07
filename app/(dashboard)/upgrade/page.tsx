@@ -76,7 +76,7 @@ export default async function UpgradePage() {
             Unlock Your Game
           </h1>
           <p className="text-gray-500 mt-3 text-sm font-medium max-w-xl mx-auto">
-            All plans include a 7-day free trial. Cancel anytime.
+            All plans include a 7-day free trial. A card is required at checkout; billing starts when your trial ends.
           </p>
           {isAdmin && (
             <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-full text-red-400 text-[9px] font-black uppercase tracking-widest">
@@ -150,7 +150,7 @@ export default async function UpgradePage() {
         </div>
 
         <p className="text-center text-[10px] font-bold uppercase tracking-widest text-gray-700 mt-10">
-          Secured by Stripe · Cancel anytime · No hidden fees
+          Secured by Stripe
         </p>
       </div>
     </div>

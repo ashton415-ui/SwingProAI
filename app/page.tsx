@@ -73,7 +73,7 @@ export default function HomePage() {
               href="/signup"
               className="w-full sm:w-auto px-10 py-5 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center justify-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_30px_rgba(74,222,128,0.2)] uppercase tracking-widest text-sm"
             >
-              Start Free Trial
+              Get Started
               <ArrowRight size={16} />
             </Link>
             <Link
