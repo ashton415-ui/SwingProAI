@@ -8,6 +8,7 @@ import {
   getBottomTabItems,
   getEffectiveNavItems,
   UPGRADE_CALLOUT,
+  PLAN_AND_BILLING,
   SIGN_OUT,
 } from "./dashboard-navigation";
 
@@ -236,7 +237,22 @@ export default function MobileDashboardNavigation({
               </div>
             )}
 
-            <div className="p-4 border-t border-white/5 mt-auto">
+            {/* Plan & Billing — every role, matching the desktop sidebar */}
+            <div className="px-4 pt-2 mt-auto">
+              <Link
+                href={PLAN_AND_BILLING.href}
+                className={`flex items-center gap-3 px-3 py-3 rounded-2xl min-h-[44px] text-[10px] font-black uppercase tracking-widest transition-colors ${
+                  pathname === PLAN_AND_BILLING.href ? "text-golf-green bg-golf-green/10" : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <span className="text-golf-green">
+                  <CreditCard size={16} />
+                </span>
+                {PLAN_AND_BILLING.label}
+              </Link>
+            </div>
+
+            <div className="p-4 border-t border-white/5">
               <form action={SIGN_OUT.href} method="POST">
                 <button
                   type="submit"

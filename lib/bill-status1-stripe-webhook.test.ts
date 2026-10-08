@@ -377,6 +377,28 @@ describe("customer.subscription.updated", () => {
   });
 });
 
+// ─── PRICING-1: portal cancellation at period end ─────────────────────────────
+// A portal cancellation only schedules the end. Access stays until Stripe
+// actually ends the subscription and sends customer.subscription.deleted.
+
+describe("customer.subscription.updated — cancellation scheduled at period end", () => {
+  it("active with cancel_at_period_end keeps status active and the paid tier", async () => {
+    const scheduled = subscription("active", { cancel_at_period_end: true, cancel_at: 1893456000 });
+    state.subscriptions.set(SUB, scheduled);
+    state.event = event("customer.subscription.updated", scheduled);
+    expect((await deliver()).status).toBe(200);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "active", subscription_tier: "birdie" });
+  });
+
+  it("trialing with cancel_at_period_end keeps status trialing and the paid tier", async () => {
+    const scheduled = subscription("trialing", { cancel_at_period_end: true, cancel_at: 1893456000 });
+    state.subscriptions.set(SUB, scheduled);
+    state.event = event("customer.subscription.updated", scheduled);
+    expect((await deliver()).status).toBe(200);
+    expect(state.writes[0].patch).toEqual({ subscription_status: "trialing", subscription_tier: "birdie" });
+  });
+});
+
 describe("customer.subscription.deleted", () => {
   it("27. resolves the current subscription and persists its status with tier none", async () => {
     state.subscriptions.set(SUB, subscription("canceled"));

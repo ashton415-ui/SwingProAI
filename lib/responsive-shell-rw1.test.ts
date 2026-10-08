@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   ADMIN_SECTION,
   UPGRADE_CALLOUT,
+  PLAN_AND_BILLING,
   getSectionsForRole,
   getEffectiveNavItems,
   getBottomTabItems,
@@ -65,7 +66,6 @@ const EXPECTED_ADMIN_OWN: [string, string][] = [
   ["/admin/users", "All Users"],
   ["/admin/coaches", "Coaches"],
   ["/admin/swings", "All Swings"],
-  ["/upgrade", "View Plans"],
 ];
 
 // ============================================================================
@@ -150,9 +150,34 @@ describe("dashboard navigation — upgrade callout", () => {
     expect(shouldShowUpgradeCallout("admin", true)).toBe(false);
   });
 
-  it("the upgrade callout and admin's View Plans link resolve to the same route", () => {
-    const viewPlans = ADMIN_SECTION.items.find((i) => i.label === "View Plans");
-    expect(viewPlans?.href).toBe(UPGRADE_CALLOUT.href);
+  it("the upgrade callout and Plan & Billing resolve to the same route", () => {
+    expect(PLAN_AND_BILLING.href).toBe(UPGRADE_CALLOUT.href);
+  });
+});
+
+// ============================================================================
+// PRICING-1. Persistent Plan & Billing destination
+// ============================================================================
+describe("dashboard navigation — Plan & Billing", () => {
+  it("Plan & Billing points at /upgrade with the exact label", () => {
+    expect(PLAN_AND_BILLING).toEqual({ href: "/upgrade", label: "Plan & Billing" });
+  });
+
+  it("admin no longer carries a duplicate View Plans item", () => {
+    expect(ADMIN_SECTION.items.some((i) => i.label === "View Plans" || i.href === "/upgrade")).toBe(false);
+  });
+
+  it("the desktop sidebar renders Plan & Billing unconditionally", () => {
+    const layout = readSource(LAYOUT_FILE);
+    expect(layout).toContain("PLAN_AND_BILLING.href");
+    expect(layout).toContain("PLAN_AND_BILLING.label");
+    expect(layout).not.toMatch(/&&\s*\(?\s*<nav[^>]*>\s*<NavLink href=\{PLAN_AND_BILLING/);
+  });
+
+  it("the mobile drawer renders Plan & Billing", () => {
+    const mobile = readSource(MOBILE_NAV_FILE);
+    expect(mobile).toContain("href={PLAN_AND_BILLING.href}");
+    expect(mobile).toContain("{PLAN_AND_BILLING.label}");
   });
 });
 

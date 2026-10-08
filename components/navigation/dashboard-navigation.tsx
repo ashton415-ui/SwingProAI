@@ -14,7 +14,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard, TrendingUp, Target, Briefcase, Flag, Crosshair,
-  ClipboardCheck, BookOpen, UserCheck, Users, Video, Shield, CreditCard,
+  ClipboardCheck, BookOpen, UserCheck, Users, Video, Shield,
 } from "lucide-react";
 
 export type DashboardRole = "golfer" | "coach" | "admin";
@@ -72,14 +72,18 @@ export const ADMIN_SECTION: NavSection = {
     { href: "/admin/users", label: "All Users", icon: Users, bottomTab: true },
     { href: "/admin/coaches", label: "Coaches", icon: UserCheck, bottomTab: true },
     { href: "/admin/swings", label: "All Swings", icon: Video, bottomTab: true },
-    { href: "/upgrade", label: "View Plans", icon: CreditCard, bottomTab: false },
   ],
 };
 
-/** The golfer-only "Upgrade Plan" callout, shown separately from the
- *  admin section's "View Plans" link even though both point at `/upgrade`
- *  — they are distinct UI treatments (a highlighted CTA vs. an ordinary
- *  nav link), not the same NavItem reused. */
+/** The persistent billing destination every role sees, on desktop and in
+ *  the mobile drawer. Subscribers no longer see the upgrade callout, so this
+ *  is what keeps their way back to Manage billing. */
+export const PLAN_AND_BILLING = { href: "/upgrade", label: "Plan & Billing" } as const;
+
+/** The golfer-only "Upgrade Plan" callout, shown alongside the plain
+ *  Plan & Billing link even though both point at `/upgrade` — they are
+ *  distinct UI treatments (a highlighted CTA vs. an ordinary nav link),
+ *  not the same descriptor reused. */
 export const UPGRADE_CALLOUT = { href: "/upgrade", label: "Upgrade Plan" } as const;
 
 export const SIGN_OUT = { href: "/api/auth/signout", label: "End Session" } as const;

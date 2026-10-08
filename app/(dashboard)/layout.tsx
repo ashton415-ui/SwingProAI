@@ -6,6 +6,7 @@ import {
   getSectionsForRole,
   shouldShowUpgradeCallout,
   UPGRADE_CALLOUT,
+  PLAN_AND_BILLING,
   SIGN_OUT,
 } from "@/components/navigation/dashboard-navigation";
 import MobileDashboardNavigation from "@/components/navigation/MobileDashboardNavigation";
@@ -91,8 +92,13 @@ export default async function DashboardLayout({ children }: { children: React.Re
           </div>
         )}
 
+        {/* Plan & Billing — every role, so subscribers keep a way to Manage billing */}
+        <nav className="p-4 mt-auto">
+          <NavLink href={PLAN_AND_BILLING.href} icon={<CreditCard size={16} />} label={PLAN_AND_BILLING.label} />
+        </nav>
+
         {/* Sign out */}
-        <div className="p-4 border-t border-white/5 mt-auto">
+        <div className="p-4 border-t border-white/5">
           <form action={SIGN_OUT.href} method="POST">
             <button type="submit"
               className="flex items-center gap-3 px-3 py-2.5 w-full rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">

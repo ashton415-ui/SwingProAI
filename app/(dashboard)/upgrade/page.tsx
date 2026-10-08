@@ -1,7 +1,8 @@
 import { createClient, getServerSession } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
-import { CheckCircle, Zap } from "lucide-react";
+import { CheckCircle, CreditCard, Zap } from "lucide-react";
 import { CheckoutButton } from "@/components/CheckoutButton";
+import { canManageBilling } from "@/lib/billing/manage-billing-eligibility";
 
 const PLANS = [
   {
@@ -49,19 +50,46 @@ const PLANS = [
   },
 ];
 
-export default async function UpgradePage() {
+/** Statuses with a live Stripe subscription: these golfers manage, not buy. */
+const LIVE_SUBSCRIPTION_STATUSES = ["active", "trialing", "past_due"];
+
+const STATUS_COPY: Record<string, string> = {
+  active: "Active",
+  trialing: "Free trial",
+  past_due: "Payment past due. Update your payment method in Manage billing.",
+};
+
+const BILLING_NOTICES: Record<string, string> = {
+  unavailable: "Billing management is unavailable right now. Please try again shortly.",
+  "auth-unavailable": "We couldn't confirm your session. Please try again shortly.",
+};
+
+export default async function UpgradePage({
+  searchParams,
+}: {
+  searchParams?: { billing?: string | string[] };
+}) {
   const session = await getServerSession();
   if (!session) redirect("/login");
 
   const supabase = await createClient();
   const { data: profile } = await supabase
     .from("users")
-    .select("subscription_status, subscription_tier, role")
+    .select("subscription_status, subscription_tier, role, stripe_customer_id")
     .eq("id", session.user.id)
     .single();
 
   const currentTier = profile?.subscription_tier ?? "none";
   const isAdmin = profile?.role === "admin";
+
+  // Decided here on the server; only booleans and labels reach the page.
+  const status = profile?.subscription_status ?? "none";
+  const canManage = canManageBilling(profile?.stripe_customer_id, status);
+  const hasLiveSubscription = canManage && LIVE_SUBSCRIPTION_STATUSES.includes(status);
+  const currentPlanName = hasLiveSubscription ? PLANS.find((p) => p.id === currentTier)?.name ?? null : null;
+
+  const billing = searchParams?.billing;
+  const billingNotice = typeof billing === "string" ? BILLING_NOTICES[billing] ?? null : null;
 
   return (
     <div className="px-6 py-10">
@@ -85,7 +113,42 @@ export default async function UpgradePage() {
           )}
         </div>
 
-        {/* Pricing Cards */}
+        {billingNotice && (
+          <div className="max-w-xl mx-auto mb-8 px-5 py-4 rounded-2xl border border-amber-400/20 bg-amber-400/10 text-amber-300 text-sm font-medium text-center">
+            {billingNotice}
+          </div>
+        )}
+
+        {/* Plan & Billing — server-decided; no billing identifier is rendered */}
+        {canManage && (
+          <div className="max-w-xl mx-auto mb-12 bg-golf-surface rounded-5xl p-8 border border-golf-green/20">
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-golf-green">Plan &amp; Billing</p>
+            {hasLiveSubscription ? (
+              <>
+                <h2 className="text-2xl font-black italic tracking-tighter uppercase text-white mt-3">
+                  {currentPlanName ?? "Your plan"}
+                </h2>
+                <p className="text-sm text-gray-400 mt-1">{STATUS_COPY[status]}</p>
+              </>
+            ) : (
+              <h2 className="text-2xl font-black italic tracking-tighter uppercase text-white mt-3">
+                Your subscription has ended
+              </h2>
+            )}
+            <form method="POST" action="/api/stripe/portal" className="mt-6">
+              <button
+                type="submit"
+                className="w-full min-h-[44px] py-3.5 flex items-center justify-center gap-2 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-2xl text-[10px] hover:bg-[#22C55E] transition-all"
+              >
+                <CreditCard size={14} />
+                Manage billing
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* Pricing Cards — live subscribers manage their plan above instead */}
+        {!hasLiveSubscription && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {PLANS.map((plan) => {
             const isCurrent = currentTier === plan.id;
@@ -148,6 +211,7 @@ export default async function UpgradePage() {
             );
           })}
         </div>
+        )}
 
         <p className="text-center text-[10px] font-bold uppercase tracking-widest text-gray-700 mt-10">
           Secured by Stripe
