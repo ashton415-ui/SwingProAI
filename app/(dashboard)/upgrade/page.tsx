@@ -64,10 +64,19 @@ const BILLING_NOTICES: Record<string, string> = {
   "auth-unavailable": "We couldn't confirm your session. Please try again shortly.",
 };
 
+/** Checkout outcomes. Generic by design: no billing identifier or provider detail. */
+const CHECKOUT_NOTICES: Record<string, string> = {
+  "in-progress": "A checkout is already in progress. Finish it, or try again in a few minutes.",
+  processing: "Your checkout is complete and your plan is being activated. This page will update shortly.",
+  "existing-subscription": "You already have a subscription. Use Manage billing to review it.",
+  unavailable: "Checkout is unavailable right now. Please try again shortly.",
+  "auth-unavailable": "We couldn't confirm your session. Please try again shortly.",
+};
+
 export default async function UpgradePage({
   searchParams,
 }: {
-  searchParams?: { billing?: string | string[] };
+  searchParams?: { billing?: string | string[]; checkout?: string | string[] };
 }) {
   const session = await getServerSession();
   if (!session) redirect("/login");
@@ -89,7 +98,10 @@ export default async function UpgradePage({
   const currentPlanName = hasLiveSubscription ? PLANS.find((p) => p.id === currentTier)?.name ?? null : null;
 
   const billing = searchParams?.billing;
-  const billingNotice = typeof billing === "string" ? BILLING_NOTICES[billing] ?? null : null;
+  const checkout = searchParams?.checkout;
+  const billingNotice =
+    (typeof billing === "string" ? BILLING_NOTICES[billing] ?? null : null) ??
+    (typeof checkout === "string" ? CHECKOUT_NOTICES[checkout] ?? null : null);
 
   return (
     <div className="px-6 py-10">
@@ -104,7 +116,7 @@ export default async function UpgradePage({
             Unlock Your Game
           </h1>
           <p className="text-gray-500 mt-3 text-sm font-medium max-w-xl mx-auto">
-            All plans include a 7-day free trial. A card is required at checkout; billing starts when your trial ends.
+            Eligible first-time subscribers receive a 7-day free trial. A card is required at checkout; billing starts when the trial ends.
           </p>
           {isAdmin && (
             <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-full text-red-400 text-[9px] font-black uppercase tracking-widest">

@@ -424,26 +424,60 @@ describe("stripe checkout identity", () => {
     expect(source).not.toContain("getServerSession");
   });
 
-  it("28. stops before checkout when the customer link cannot be persisted", () => {
+  it("28. stops before checkout when the profile read or customer link fails", () => {
     const source = readSource(CHECKOUT);
-    expect(source).toContain("error: linkError");
     expect(source).toContain("error: profileError");
 
-    const linkGuard = source.indexOf("account-link-failed");
-    const profileGuard = source.indexOf("account-unavailable");
-    const checkout = source.indexOf("stripe.checkout.sessions.create");
-    expect(linkGuard).toBeGreaterThan(-1);
+    const profileGuard = source.indexOf("if (profileError || !profile)");
+    const linkGuard = source.indexOf('if (linked !== "linked" && linked !== "already_linked_same") return unavailable();');
+    const checkout = source.indexOf("stripe.checkout.sessions.create(");
     expect(profileGuard).toBeGreaterThan(-1);
+    expect(linkGuard).toBeGreaterThan(-1);
     expect(linkGuard).toBeLessThan(checkout);
     expect(profileGuard).toBeLessThan(checkout);
+    // The old direct, claim-unguarded link write is gone.
+    expect(source).not.toContain("linkedRows");
+    expect(source).not.toContain("linkError");
+    expect(source).not.toMatch(/\.update\(\{\s*stripe_customer_id/);
+  });
+
+  it("PRICING-1. the customer link carries the verified user, the current claim token and Stripe's customer, all server-side", () => {
+    const source = readSource(CHECKOUT);
+    expect(source).toContain("const userId = auth.userId;");
+    expect(source).toContain("await linkCustomer(admin, userId, claim.token, customer.id);");
+    expect(source).toContain(
+      'admin.rpc("billing_link_checkout_customer", {\n      p_user_id: userId,\n      p_claim_token: token,\n      p_stripe_customer_id: customerId,\n    });',
+    );
+    // Nothing the browser sends can reach the link: the form yields the plan only.
+    expect(source.match(/\.get\("[a-z_]+"\)/gi)).toEqual(['.get("origin")', '.get("plan")']);
+    expect(source).not.toMatch(/searchParams|req\.json\(|formData\(\)\)\.get\("(customer|claim|user)/);
+  });
+
+  it("PRICING-1. the pre-claim profile read selects the name only, never the customer", () => {
+    const source = readSource(CHECKOUT);
+    expect(source).toContain('.select("full_name")');
+    expect(source).not.toContain('.select("stripe_customer_id, full_name")');
+    expect(source).not.toMatch(/profile\??\.stripe_customer_id/);
   });
 
   it("remains a cookie-only web commerce surface", () => {
     const source = readSource(CHECKOUT);
     expect(source).not.toContain("resolveRouteAuth");
-    expect(source).toContain('trial_period_days: 7');
-    expect(source).toContain("${SITE_URL}/dashboard?upgraded=true");
-    expect(source).toContain("${SITE_URL}/upgrade");
+    expect(source).toContain('if (auth.source !== "cookie") return forbidden();');
+    expect(source).toContain("trial_period_days: 7");
+    expect(source).toContain('const SUCCESS_URL = `${CANONICAL_ORIGIN}/dashboard?upgraded=true`;');
+    expect(source).toContain('const CANCEL_URL = `${CANONICAL_ORIGIN}/upgrade`;');
+    expect(source).toContain('const CANONICAL_ORIGIN = "https://www.swingpro-ai.com";');
+    expect(source).not.toContain("NEXT_PUBLIC_SITE_URL");
+  });
+
+  it("PRICING-1. checks the exact Origin before resolving any credential", () => {
+    const source = readSource(CHECKOUT);
+    const origin = source.indexOf('if (req.headers.get("origin") !== CANONICAL_ORIGIN) return forbidden();');
+    expect(origin).toBeGreaterThan(-1);
+    expect(origin).toBeLessThan(source.indexOf("await resolveVerifiedAuth()"));
+    expect(source).toContain("export async function POST(");
+    expect(source).not.toMatch(/export async function GET\(/);
   });
 });
 

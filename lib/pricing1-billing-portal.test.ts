@@ -500,7 +500,7 @@ describe("Plan & Billing page contract", () => {
     expect(page).toContain('price: "$14.99"');
     expect(page).toContain('price: "$24.99"');
     expect(page).toContain(
-      "All plans include a 7-day free trial. A card is required at checkout; billing starts when your trial ends.",
+      "Eligible first-time subscribers receive a 7-day free trial. A card is required at checkout; billing starts when the trial ends.",
     );
   });
 

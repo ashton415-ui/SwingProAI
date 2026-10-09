@@ -164,36 +164,44 @@ describe("entitlement-write-authority — checkout customer link is a trusted wr
   it("keeps caller identity on the verified session", () => {
     expect(checkout).toContain("await resolveVerifiedAuth()");
     expect(checkout).toContain("const supabase = auth.client;");
-    // The profile read stays on the golfer's own session.
-    const read = checkout.indexOf('.select("stripe_customer_id, full_name")');
+    // The profile read stays on the golfer's own session, and is presentation
+    // only: it no longer selects the customer, which comes from the claim.
+    const read = checkout.indexOf('.select("full_name")');
     expect(read).toBeGreaterThan(-1);
     expect(checkout.slice(checkout.lastIndexOf("await supabase", read), read)).toContain('.from("users")');
+    expect(checkout).not.toContain('.select("stripe_customer_id, full_name")');
+    expect(checkout).not.toMatch(/profile\??\.stripe_customer_id/);
   });
 
-  it("constructs the elevated client once, after authentication, only for the link write", () => {
+  it("constructs the elevated client once, after authentication, and links the customer only through its RPC", () => {
     expect((checkout.match(/createAdminClient\(\)/g) ?? []).length).toBe(1);
     const auth = checkout.indexOf("await resolveVerifiedAuth()");
     const admin = checkout.indexOf("createAdminClient()");
-    const profileRead = checkout.indexOf('.select("stripe_customer_id, full_name")');
+    const profileRead = checkout.indexOf('.select("full_name")');
     expect(admin).toBeGreaterThan(auth);
     expect(admin).toBeGreaterThan(profileRead);
-    const block = checkout.slice(admin, checkout.indexOf('.select("id")', admin));
-    expect(block).toContain('.from("users")');
-    expect(block).toContain(".update({ stripe_customer_id: customer.id })");
-    expect(block).toContain('.eq("id", auth.userId)');
-    expect(block).toContain('.is("stripe_customer_id", null)');
-    for (const banned of ["subscription_tier", "subscription_status", "role"]) {
-      expect(block, `the trusted link write must not touch ${banned}`).not.toMatch(new RegExp(`\\b${banned}\\b`));
-    }
+    // The link carries only server-held values: the verified user, the
+    // current claim token and the customer Stripe returned.
+    expect(checkout).toContain('admin.rpc("billing_link_checkout_customer", {');
+    expect(checkout).toContain("p_user_id: userId,");
+    expect(checkout).toContain("p_claim_token: token,");
+    expect(checkout).toContain("p_stripe_customer_id: customerId,");
+    expect(checkout).toContain("await linkCustomer(admin, userId, claim.token, customer.id);");
+    expect(checkout).toContain("const userId = auth.userId;");
   });
 
-  it("requires exactly one linked row before any checkout session", () => {
-    const guard = checkout.indexOf("linkedRows.length !== 1");
-    const failure = checkout.indexOf("account-link-failed");
+  it("requires a confirmed customer link before any checkout session", () => {
+    const guard = checkout.indexOf('if (linked !== "linked" && linked !== "already_linked_same") return unavailable();');
     const session = checkout.indexOf("stripe.checkout.sessions.create");
     expect(guard).toBeGreaterThan(-1);
-    expect(guard).toBeLessThan(failure);
-    expect(failure).toBeLessThan(session);
+    expect(guard).toBeLessThan(session);
+    expect(checkout.indexOf('if (linked === "lost") return inProgress();')).toBeLessThan(guard);
+  });
+
+  it("has no direct public.users customer write left in checkout", () => {
+    expect(checkout).not.toMatch(/\.from\("users"\)\s*\.update\(/);
+    expect(checkout).not.toMatch(/\.update\(\{\s*stripe_customer_id/);
+    expect(checkout).not.toContain('.is("stripe_customer_id", null)');
   });
 
   it("never writes public.users through the caller's session", () => {
@@ -226,14 +234,19 @@ describe("entitlement-write-authority — the Stripe webhook writes fail closed"
 
   it("writes only through the server-only elevated client, bound to stripe_customer_id", () => {
     expect(webhook).toContain('import { createAdminClient } from "@/utils/supabase/admin";');
-    expect(webhook).toContain('.eq("stripe_customer_id", customerId)');
-    expect(webhook).not.toMatch(/searchParams|req\.json\(|user_id|userId/);
+    expect(webhook).toContain('rpc("billing_apply_subscription_state", {');
+    expect(webhook).toContain("p_stripe_customer_id: customerId,");
+    expect(webhook).not.toMatch(/searchParams|req\.json\(|userId/);
+    // The only profile id the webhook ever names comes from the customer mapping.
+    expect(webhook.match(/p_user_id:[^,\n]+/g)).toEqual(["p_user_id: profileId"]);
+    expect(webhook).toContain('.select("id").eq("stripe_customer_id", customerId)');
   });
 
-  it("proves every write changed exactly one row by its id", () => {
-    expect(webhook).toContain('.select("id")');
-    expect(webhook).toContain("result.data.length !== 1");
+  it("accepts only a known writer outcome and reads public.users without writing it", () => {
+    expect(webhook).toContain("!APPLY_OUTCOMES.includes(result.data)");
     expect((webhook.match(/\.from\("users"\)/g) ?? []).length).toBe(1);
+    expect(webhook).not.toMatch(/\.from\("users"\)\s*\.(update|insert|upsert|delete)\(/);
+    expect(webhook).toContain("rows.length !== 1");
   });
 
   it("cannot acknowledge a failed write as received", () => {
@@ -260,8 +273,10 @@ describe("entitlement-write-authority — tier is bound to the price paid", () =
 
   it("checkout takes a plan selector only; price and tier come from the server", () => {
     expect(checkout).toContain("await resolveVerifiedAuth()");
-    expect(checkout).toContain('resolveStripePlan(searchParams.get("plan"))');
-    expect(checkout).not.toMatch(/searchParams\.get\("(priceId|price|tier)"\)/);
+    expect(checkout).toContain('selector = (await req.formData()).get("plan");');
+    expect(checkout).toContain("const plan = resolveStripePlan(selector);");
+    expect(checkout.match(/\.get\("[a-z_]+"\)/gi)).toEqual(['.get("origin")', '.get("plan")']);
+    expect(checkout).not.toMatch(/searchParams/);
     expect(checkout).toContain("line_items: [{ price: plan.priceId, quantity: 1 }]");
     expect(checkout).toContain("metadata: { tier: plan.tier, supabase_user_id: auth.userId }");
   });
@@ -275,24 +290,24 @@ describe("entitlement-write-authority — tier is bound to the price paid", () =
   });
 
   it("checkout still writes only the customer link, never entitlement", () => {
-    expect(checkout).toMatch(/\.update\(\{ stripe_customer_id: customer\.id \}\)/);
-    expect(checkout).toContain('.is("stripe_customer_id", null)');
+    expect(checkout).toContain('admin.rpc("billing_link_checkout_customer", {');
     expect(checkout).not.toMatch(/subscription_tier|subscription_status/);
+    expect(checkout).not.toContain("billing_apply_subscription_state");
   });
 
   it("the webhook derives tier from the server price authority, never metadata", () => {
     expect(webhook).toContain('import { tierForStripePriceId } from "@/lib/billing/stripe-plan-authority";');
     expect(webhook).not.toMatch(/metadata/);
-    expect(webhook).toContain('.eq("stripe_customer_id", customerId)');
-    expect(webhook).toContain('.select("id")');
-    expect(webhook).not.toMatch(/searchParams|req\.json\(|user_id|userId/);
+    expect(webhook).toContain("p_subscription_tier: state.subscription_tier,");
+    expect(webhook).toContain('subscription_tier: status === "canceled" ? "none" : tierOf(subscription),');
+    expect(webhook).not.toMatch(/searchParams|req\.json\(|userId/);
   });
 });
 
 // ─── Live writer scan ─────────────────────────────────────────────────────────
 
 describe("entitlement-write-authority — every live public.users writer is trusted", () => {
-  it("finds public.users writes only in the webhook and the checkout link", () => {
+  it("finds no direct public.users write; checkout and the webhook write through their RPCs", () => {
     const tracked = execFileSync("git", ["ls-files", "app", "lib", "utils", "components"], {
       cwd: repoRoot,
       encoding: "utf8",
@@ -305,9 +320,29 @@ describe("entitlement-write-authority — every live public.users writer is trus
       const source = stripComments(readSource(file));
       if (/\.from\((["'])users\1\)\s*\.(update|insert|upsert)\(/.test(source)) writers.push(file);
     }
-    expect(writers.sort()).toEqual([CHECKOUT, WEBHOOK].sort());
-    // Both through the server-only elevated client, never the caller's session.
-    expect(stripComments(readSource(CHECKOUT))).toMatch(/await admin\s*\.from\("users"\)\s*\.update\(/);
+    expect(writers).toEqual([]);
+    // Both through the server-only elevated client, never the caller's session:
+    // the customer link authority and the billing state authority.
+    expect(stripComments(readSource(CHECKOUT))).toContain('rpc("billing_link_checkout_customer"');
+    expect(stripComments(readSource(CHECKOUT))).toContain("createAdminClient");
     expect(stripComments(readSource(WEBHOOK))).toContain("createAdminClient");
+    expect(stripComments(readSource(WEBHOOK))).toContain('rpc("billing_apply_subscription_state"');
+  });
+
+  it("PRICING-1. the billing RPCs are called only from the two trusted server routes", () => {
+    const tracked = execFileSync("git", ["ls-files", "app", "lib", "utils", "components"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    })
+      .split("\n")
+      .filter((f) => /\.(ts|tsx)$/.test(f) && !f.endsWith(".test.ts"));
+    const callers = tracked.filter((file) => /rpc\(\s*"billing_/.test(stripComments(readSource(file))));
+    expect(callers.sort()).toEqual([CHECKOUT, WEBHOOK].sort());
+    for (const file of callers) expect(stripComments(readSource(file))).toContain("createAdminClient");
+    // Each authority stays with its own route.
+    const checkoutSource = stripComments(readSource(CHECKOUT));
+    const webhookSource = stripComments(readSource(WEBHOOK));
+    expect(checkoutSource).not.toContain("billing_apply_subscription_state");
+    expect(webhookSource).not.toContain("billing_link_checkout_customer");
   });
 });

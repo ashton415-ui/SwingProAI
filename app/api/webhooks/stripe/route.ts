@@ -3,6 +3,11 @@ import Stripe from "stripe";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { normalizeStripeSubscriptionStatus } from "@/lib/billing/stripe-subscription-status";
 import { tierForStripePriceId } from "@/lib/billing/stripe-plan-authority";
+import {
+  classifySubscriptionHistory,
+  hadTrial,
+  isTerminalStripeSubscriptionStatus,
+} from "@/lib/billing/subscription-preflight";
 import type { SubscriptionStatus, SubscriptionTier } from "@/types/database";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
@@ -20,10 +25,9 @@ const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
  *     delivery order, and a stale payload must not overwrite a newer state.
  *   * Every status written goes through normalizeStripeSubscriptionStatus, so
  *     only the five values the database accepts are ever persisted.
- *   * Every write is matched by stripe_customer_id (unique) and must prove it
- *     changed exactly one row. A write that errors, throws or matches any other
- *     number of rows answers 500, so Stripe retries instead of being told the
- *     entitlement change was recorded.
+ *   * A write that errors, throws, finds no profile, or is refused answers 500,
+ *     so Stripe retries instead of being told the entitlement change was
+ *     recorded.
  *   * Nothing identifying — customer, subscription, user, provider or database
  *     error — is logged or returned.
  *
@@ -37,15 +41,51 @@ const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET!;
  *   * Every subscription-bearing write persists tier alongside status, so an
  *     unknown or ambiguous price clears a previous premium tier instead of
  *     leaving it in place.
+ *
+ * PRICING-1:
+ *
+ *   * Every billing write is one call to billing_apply_subscription_state,
+ *     which in a single transaction locks the profile by its Stripe customer,
+ *     enforces subscription identity, writes status and tier, binds or clears
+ *     the bound subscription id, records trial usage monotonically, and clears
+ *     a checkout claim only for an exact non-NULL token.
+ *   * A nonterminal subscription that differs from the bound one is a
+ *     conflict: nothing is written, the claim stays held, and the event is
+ *     retried until an operator resolves it.
+ *   * A terminal event for a different bound subscription changes nothing.
+ *   * A terminal event for an unbound row is never trusted alone: the
+ *     customer's full Stripe history decides. No nonterminal subscription →
+ *     canceled. Exactly one with a recognized price → bind that one instead.
+ *     Anything else → retry, no write.
+ *   * Only checkout.session.completed carries a claim token (the Session's
+ *     client_reference_id). Every other event passes NULL, which can never
+ *     clear a claim.
  */
 
 /** Persistence or provider failure after a valid signature. */
 class BillingWriteFailure extends Error {}
 
-type BillingPatch = {
+type ApplyOutcome = "applied" | "stale_terminal" | "conflict" | "unbound_terminal_recheck" | "not_found";
+
+const APPLY_OUTCOMES: readonly string[] = [
+  "applied",
+  "stale_terminal",
+  "conflict",
+  "unbound_terminal_recheck",
+  "not_found",
+];
+
+interface SubscriptionState {
+  subscriptionId: string;
   subscription_status: SubscriptionStatus;
   subscription_tier: SubscriptionTier;
-};
+  trialReceived: boolean;
+}
+
+/** History pages read before giving up; a customer never legitimately nears it. */
+const MAX_SUBSCRIPTION_PAGES = 50;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function failed(): NextResponse {
   return NextResponse.json({ error: "Webhook processing failed" }, { status: 500 });
@@ -63,6 +103,11 @@ function idOf(reference: unknown): string | null {
 
 function objectLike(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+/** The checkout claim a Session correlates to, or null. Never an authority. */
+function claimTokenOf(reference: unknown): string | null {
+  return typeof reference === "string" && UUID.test(reference) ? reference : null;
 }
 
 /**
@@ -90,11 +135,14 @@ function invoiceSubscriptionId(invoice: unknown): string | null {
 async function currentSubscription(reference: unknown): Promise<Stripe.Subscription> {
   const subscriptionId = idOf(reference);
   if (!subscriptionId) throw new BillingWriteFailure();
+  let subscription: Stripe.Subscription;
   try {
-    return await stripe.subscriptions.retrieve(subscriptionId);
+    subscription = await stripe.subscriptions.retrieve(subscriptionId);
   } catch {
     throw new BillingWriteFailure();
   }
+  if (idOf(subscription?.id) !== subscriptionId) throw new BillingWriteFailure();
+  return subscription;
 }
 
 function customerOf(subscription: Stripe.Subscription): string {
@@ -116,20 +164,156 @@ function tierOf(subscription: Stripe.Subscription): SubscriptionTier {
   return tierForStripePriceId(priceId) ?? "none";
 }
 
-/** The single trusted write: exactly one linked profile row, proved. */
-async function persistBillingState(customerId: string, patch: BillingPatch): Promise<void> {
-  let result: { data: unknown; error: unknown };
+/** What a current subscription says, normalized and server-derived. */
+function stateOf(subscription: Stripe.Subscription): SubscriptionState {
+  const status = normalizeStripeSubscriptionStatus(subscription.status);
+  return {
+    subscriptionId: subscription.id,
+    subscription_status: status,
+    // A terminal subscription never entitles, whatever it was paying for.
+    subscription_tier: status === "canceled" ? "none" : tierOf(subscription),
+    trialReceived: hadTrial(subscription),
+  };
+}
+
+function admin() {
   try {
-    const admin = createAdminClient();
-    result = await admin
-      .from("users")
-      .update(patch)
-      .eq("stripe_customer_id", customerId)
-      .select("id");
+    return createAdminClient();
   } catch {
     throw new BillingWriteFailure();
   }
-  if (result.error || !Array.isArray(result.data) || result.data.length !== 1) {
+}
+
+/** The single trusted billing write: one atomic database call. */
+async function applySubscriptionState(
+  customerId: string,
+  claimToken: string | null,
+  state: SubscriptionState,
+  allowUnboundTerminal: boolean,
+): Promise<ApplyOutcome> {
+  let result: { data: unknown; error: unknown };
+  try {
+    result = await admin().rpc("billing_apply_subscription_state", {
+      p_stripe_customer_id: customerId,
+      p_claim_token: claimToken,
+      p_subscription_id: state.subscriptionId,
+      p_subscription_status: state.subscription_status,
+      p_subscription_tier: state.subscription_tier,
+      p_trial_received: state.trialReceived,
+      p_allow_unbound_terminal: allowUnboundTerminal,
+    });
+  } catch {
+    throw new BillingWriteFailure();
+  }
+  if (result.error || typeof result.data !== "string" || !APPLY_OUTCOMES.includes(result.data)) {
+    throw new BillingWriteFailure();
+  }
+  return result.data as ApplyOutcome;
+}
+
+/** Every subscription the customer has ever had, or a throw. Never partial. */
+async function subscriptionHistory(customerId: string): Promise<Stripe.Subscription[]> {
+  const all: Stripe.Subscription[] = [];
+  let startingAfter: string | undefined;
+  try {
+    for (let page = 0; page < MAX_SUBSCRIPTION_PAGES; page++) {
+      const result = await stripe.subscriptions.list({
+        customer: customerId,
+        status: "all",
+        limit: 100,
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+      if (!result || !Array.isArray(result.data) || typeof result.has_more !== "boolean") break;
+      all.push(...result.data);
+      if (!result.has_more) return all;
+      const last = result.data[result.data.length - 1];
+      if (!last || typeof last.id !== "string" || last.id.length === 0 || last.id === startingAfter) break;
+      startingAfter = last.id;
+    }
+  } catch {
+    throw new BillingWriteFailure();
+  }
+  throw new BillingWriteFailure();
+}
+
+/**
+ * A terminal event for a row with no bound subscription. The row may carry
+ * entitlement written before subscription identity existed, so the event is
+ * neither ignored nor trusted alone: the customer's whole Stripe history
+ * decides.
+ */
+async function reconcileUnboundTerminal(
+  customerId: string,
+  claimToken: string | null,
+  terminal: SubscriptionState,
+): Promise<void> {
+  const { nonterminalSubscriptions } = classifySubscriptionHistory(await subscriptionHistory(customerId));
+
+  if (nonterminalSubscriptions.length === 0) {
+    // Truly over: cancel, unless a subscription was bound in the meantime.
+    const outcome = await applySubscriptionState(customerId, claimToken, terminal, true);
+    if (outcome !== "applied" && outcome !== "stale_terminal") throw new BillingWriteFailure();
+    return;
+  }
+
+  // Never cancel because of the terminal event while something is still live.
+  if (nonterminalSubscriptions.length !== 1) throw new BillingWriteFailure();
+
+  const current = await currentSubscription(nonterminalSubscriptions[0].id);
+  if (customerOf(current) !== customerId || isTerminalStripeSubscriptionStatus(current.status)) {
+    throw new BillingWriteFailure();
+  }
+  const state = stateOf(current);
+  // A live subscription whose price is not recognized is not something to bind.
+  if (state.subscription_tier === "none") throw new BillingWriteFailure();
+
+  const outcome = await applySubscriptionState(customerId, null, state, false);
+  if (outcome !== "applied") throw new BillingWriteFailure();
+}
+
+/** Applies one current subscription; anything but a safe outcome retries. */
+async function applySubscription(subscription: Stripe.Subscription, claimToken: string | null): Promise<void> {
+  const customerId = customerOf(subscription);
+  const state = stateOf(subscription);
+  const outcome = await applySubscriptionState(customerId, claimToken, state, false);
+
+  switch (outcome) {
+    case "applied":
+    case "stale_terminal":
+      return;
+    case "unbound_terminal_recheck":
+      return reconcileUnboundTerminal(customerId, claimToken, state);
+    default:
+      // conflict, not_found: no write, claim untouched, Stripe retries.
+      throw new BillingWriteFailure();
+  }
+}
+
+/**
+ * A completed Session that created no subscription grants and revokes
+ * nothing; it only releases the claim it correlates to, on exactly one
+ * profile.
+ */
+async function releaseClaimForCustomer(customerId: string, claimToken: string): Promise<void> {
+  const client = admin();
+  let rows: unknown;
+  try {
+    const { data, error } = await client.from("users").select("id").eq("stripe_customer_id", customerId);
+    if (error) throw new BillingWriteFailure();
+    rows = data;
+  } catch {
+    throw new BillingWriteFailure();
+  }
+  if (!Array.isArray(rows) || rows.length !== 1) throw new BillingWriteFailure();
+  const profileId = (rows[0] as { id?: unknown }).id;
+  if (typeof profileId !== "string") throw new BillingWriteFailure();
+  try {
+    const { error } = await client.rpc("billing_release_checkout", {
+      p_user_id: profileId,
+      p_claim_token: claimToken,
+    });
+    if (error) throw new BillingWriteFailure();
+  } catch {
     throw new BillingWriteFailure();
   }
 }
@@ -149,38 +333,23 @@ export async function POST(req: NextRequest) {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
+        const claimToken = claimTokenOf(session.client_reference_id);
         if (session.subscription) {
           // A seven-day trial checkout is "trialing", not "active".
-          const subscription = await currentSubscription(session.subscription);
-          await persistBillingState(customerOf(subscription), {
-            subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
-            subscription_tier: tierOf(subscription),
-          });
+          await applySubscription(await currentSubscription(session.subscription), claimToken);
         } else {
-          // No subscription: nothing here grants access.
+          // No subscription: nothing here grants or revokes access.
           const customerId = idOf(session.customer);
           if (!customerId) throw new BillingWriteFailure();
-          await persistBillingState(customerId, { subscription_status: "none", subscription_tier: "none" });
+          if (claimToken) await releaseClaimForCustomer(customerId, claimToken);
         }
         break;
       }
 
-      case "customer.subscription.updated": {
-        // The payload names the subscription; its status and price are not trusted.
-        const subscription = await currentSubscription(event.data.object as Stripe.Subscription);
-        await persistBillingState(customerOf(subscription), {
-          subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
-          subscription_tier: tierOf(subscription),
-        });
-        break;
-      }
-
+      case "customer.subscription.updated":
       case "customer.subscription.deleted": {
-        const subscription = await currentSubscription(event.data.object as Stripe.Subscription);
-        await persistBillingState(customerOf(subscription), {
-          subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
-          subscription_tier: "none",
-        });
+        // The payload names the subscription; its status and price are not trusted.
+        await applySubscription(await currentSubscription(event.data.object as Stripe.Subscription), null);
         break;
       }
 
@@ -188,11 +357,7 @@ export async function POST(req: NextRequest) {
         // An invoice with no subscription says nothing about entitlement.
         const subscriptionId = invoiceSubscriptionId(event.data.object);
         if (!subscriptionId) break;
-        const subscription = await currentSubscription(subscriptionId);
-        await persistBillingState(customerOf(subscription), {
-          subscription_status: normalizeStripeSubscriptionStatus(subscription.status),
-          subscription_tier: tierOf(subscription),
-        });
+        await applySubscription(await currentSubscription(subscriptionId), null);
         break;
       }
 

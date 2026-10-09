@@ -22,11 +22,16 @@ const state = vi.hoisted(() => {
   process.env.STRIPE_WEBHOOK_SECRET = "test-webhook-secret-not-real";
   return {
     savedPriceEnv: saved,
+    /** The durable customer the claim answer carries (users.stripe_customer_id). */
     linkedCustomer: null as string | null,
+    /** billing_link_checkout_customer's answer. */
+    linkOutcome: "linked" as unknown,
+    order: [] as string[],
     customersCreated: 0,
     sessions: [] as Record<string, unknown>[],
     adminConstructions: 0,
     writes: [] as { patch: unknown; eq: [string, unknown] }[],
+    rpcCalls: [] as { fn: string; args: Record<string, unknown> }[],
     event: null as unknown,
     subscription: null as unknown,
   };
@@ -38,7 +43,8 @@ vi.mock("next/server", () => ({
   NextResponse: {
     json: (body: unknown, init?: { status?: number }) =>
       new Response(JSON.stringify(body), { status: init?.status ?? 200 }),
-    redirect: (url: string | URL) => new Response(null, { status: 307, headers: { location: String(url) } }),
+    redirect: (url: string | URL, init?: { status?: number }) =>
+      new Response(null, { status: init?.status ?? 307, headers: { location: String(url) } }),
   },
 }));
 
@@ -47,6 +53,7 @@ vi.mock("@/utils/supabase/server", () => ({
     status: "authenticated",
     userId: "user_TEST_0001",
     email: "golfer@example.test",
+    source: "cookie",
     client: {
       from: () => ({
         select: () => ({
@@ -63,6 +70,35 @@ vi.mock("@/utils/supabase/admin", () => ({
   createAdminClient: () => {
     state.adminConstructions++;
     return {
+      rpc: async (fn: string, args: Record<string, unknown>) => {
+        state.rpcCalls.push({ fn, args });
+        state.order.push(`rpc:${fn}`);
+        if (fn === "billing_link_checkout_customer") return { data: state.linkOutcome, error: null };
+        if (fn === "billing_apply_subscription_state") {
+          state.writes.push({
+            patch: { subscription_status: args.p_subscription_status, subscription_tier: args.p_subscription_tier },
+            eq: ["stripe_customer_id", args.p_stripe_customer_id],
+          });
+          return { data: "applied", error: null };
+        }
+        if (fn === "billing_begin_checkout") {
+          return {
+            data: {
+              outcome: "claimed",
+              claim_token: "3f0c9a2e-7b1d-4c5e-9a8f-1d2e3f4a5b6c",
+              claim_acquired_at: new Date().toISOString(),
+              claim_expires_at: new Date(Date.now() + 2100 * 1000).toISOString(),
+              claim_age_seconds: 0,
+              claim_remaining_seconds: 2100,
+              held_session_id: null,
+              trial_used: false,
+              stripe_customer_id: state.linkedCustomer,
+            },
+            error: null,
+          };
+        }
+        return { data: true, error: null };
+      },
       from: () => ({
         update: (patch: unknown) => {
           const write = { patch, eq: ["", null] as [string, unknown] };
@@ -87,6 +123,7 @@ vi.mock("stripe", () => ({
     customers = {
       create: async () => {
         state.customersCreated++;
+        state.order.push("stripe:customers.create");
         return { id: "cus_TEST_NEW" };
       },
     };
@@ -94,17 +131,21 @@ vi.mock("stripe", () => ({
       sessions: {
         create: async (params: Record<string, unknown>) => {
           state.sessions.push(params);
-          return { url: "https://checkout.stripe.test/session" };
+          state.order.push("stripe:sessions.create");
+          return { id: "cs_TEST_0001", url: "https://checkout.stripe.com/c/pay/cs_TEST_0001" };
         },
       },
     };
-    subscriptions = { retrieve: async () => state.subscription };
+    subscriptions = {
+      retrieve: async () => state.subscription,
+      list: async () => ({ object: "list", data: [], has_more: false }),
+    };
     webhooks = { constructEvent: () => state.event };
   },
 }));
 
 import { resolveStripePlan, tierForStripePriceId } from "@/lib/billing/stripe-plan-authority";
-import { GET as checkoutGET } from "@/app/api/stripe/checkout/route";
+import { POST as checkoutPOST } from "@/app/api/stripe/checkout/route";
 import { POST as webhookPOST } from "@/app/api/webhooks/stripe/route";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -132,10 +173,13 @@ function configure(prices: Partial<Record<keyof typeof ENV, string | undefined>>
 beforeEach(() => {
   configure();
   state.linkedCustomer = null;
+  state.linkOutcome = "linked";
+  state.order = [];
   state.customersCreated = 0;
   state.sessions = [];
   state.adminConstructions = 0;
   state.writes = [];
+  state.rpcCalls = [];
   state.event = null;
   state.subscription = null;
 });
@@ -255,41 +299,51 @@ describe("plan authority server boundary", () => {
 
 // ─── Checkout ─────────────────────────────────────────────────────────────────
 
-async function checkout(query: string): Promise<Response> {
-  return checkoutGET(new Request(`https://www.swingpro-ai.test/api/stripe/checkout${query}`) as never);
+/** A same-origin form POST carrying exactly the given fields. */
+async function checkout(fields: Record<string, string>): Promise<Response> {
+  const body = new URLSearchParams(fields);
+  return checkoutPOST(
+    new Request("https://www.swingpro-ai.com/api/stripe/checkout", {
+      method: "POST",
+      headers: { origin: "https://www.swingpro-ai.com", "content-type": "application/x-www-form-urlencoded" },
+      body,
+    }) as never,
+  );
 }
 
 describe("checkout — plan selector only", () => {
   const src = code(CHECKOUT);
 
   it("31-33. reads plan, never a browser priceId or tier", () => {
-    expect(src).toContain('searchParams.get("plan")');
-    expect(src).not.toMatch(/searchParams\.get\("priceId"\)/);
-    expect(src).not.toMatch(/searchParams\.get\("tier"\)/);
+    expect(src).toContain('selector = (await req.formData()).get("plan");');
+    expect(src).not.toMatch(/\.get\("priceId"\)/);
+    expect(src).not.toMatch(/\.get\("tier"\)/);
+    expect(src).not.toMatch(/searchParams/);
   });
 
-  const UNRESOLVED: [string, string, () => void][] = [
-    ["no plan", "", () => {}],
-    ["a raw price id and forged tier", `?priceId=${PRICE.par}&tier=eagle`, () => {}],
-    ["coach_pro", "?plan=coach_pro", () => {}],
-    ["an unconfigured plan", "?plan=birdie", () => configure({ ...PRICE, birdie: undefined })],
-    ["a duplicated plan price", "?plan=eagle", () => configure({ ...PRICE, eagle: PRICE.par })],
+  const UNRESOLVED: [string, Record<string, string>, () => void][] = [
+    ["no plan", {}, () => {}],
+    ["a raw price id and forged tier", { priceId: PRICE.par, tier: "eagle" }, () => {}],
+    ["coach_pro", { plan: "coach_pro" }, () => {}],
+    ["an unconfigured plan", { plan: "birdie" }, () => configure({ ...PRICE, birdie: undefined })],
+    ["a duplicated plan price", { plan: "eagle" }, () => configure({ ...PRICE, eagle: PRICE.par })],
   ];
-  for (const [label, query, setup] of UNRESOLVED) {
-    it(`34. ${label} is rejected before customer creation, link or session`, async () => {
+  for (const [label, fields, setup] of UNRESOLVED) {
+    it(`34. ${label} is rejected before claim, customer creation, link or session`, async () => {
       setup();
-      const response = await checkout(query);
-      expect(response.status).toBe(307);
-      expect(response.headers.get("location")).toContain("/upgrade?error=missing-plan");
+      const response = await checkout(fields);
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe("https://www.swingpro-ai.com/upgrade?error=missing-plan");
       expect(state.customersCreated).toBe(0);
       expect(state.adminConstructions).toBe(0);
+      expect(state.rpcCalls).toEqual([]);
       expect(state.sessions).toEqual([]);
     });
   }
 
   it("35-36. a forged tier alongside a plan cannot change the server-resolved price or tier", async () => {
     state.linkedCustomer = "cus_TEST_0001";
-    await checkout(`?plan=par&tier=eagle&priceId=${PRICE.eagle}`);
+    await checkout({ plan: "par", tier: "eagle", priceId: PRICE.eagle });
     expect(state.sessions).toHaveLength(1);
     const session = state.sessions[0] as {
       line_items: unknown;
@@ -300,14 +354,54 @@ describe("checkout — plan selector only", () => {
     expect(session.line_items).toEqual([{ price: PRICE.par, quantity: 1 }]);
     expect(session.subscription_data.metadata).toEqual({ tier: "par", supabase_user_id: "user_TEST_0001" });
     expect(session.subscription_data.trial_period_days).toBe(7);
-    expect(session.success_url).toMatch(/\/dashboard\?upgraded=true$/);
-    expect(session.cancel_url).toMatch(/\/upgrade$/);
+    expect(session.success_url).toBe("https://www.swingpro-ai.com/dashboard?upgraded=true");
+    expect(session.cancel_url).toBe("https://www.swingpro-ai.com/upgrade");
   });
 
-  it("37-38. keeps the 7-day trial and the success/cancel destinations", () => {
-    expect(src).toContain("trial_period_days: 7");
-    expect(src).toContain("${SITE_URL}/dashboard?upgraded=true");
-    expect(src).toContain("${SITE_URL}/upgrade");
+  it("PRICING-1. the claim's durable customer is reused: no customer create and no link", async () => {
+    state.linkedCustomer = "cus_TEST_0001";
+    await checkout({ plan: "eagle" });
+    expect(state.customersCreated).toBe(0);
+    expect(state.rpcCalls.map((c) => c.fn)).not.toContain("billing_link_checkout_customer");
+    expect(state.sessions[0].customer).toBe("cus_TEST_0001");
+    expect(state.sessions[0].line_items).toEqual([{ price: PRICE.eagle, quantity: 1 }]);
+  });
+
+  it("PRICING-1. a claim with no customer creates one, links it with the claim token, then opens the Session", async () => {
+    await checkout({ plan: "birdie" });
+    expect(state.customersCreated).toBe(1);
+    const link = state.rpcCalls.find((c) => c.fn === "billing_link_checkout_customer");
+    expect(link?.args).toEqual({
+      p_user_id: "user_TEST_0001",
+      p_claim_token: "3f0c9a2e-7b1d-4c5e-9a8f-1d2e3f4a5b6c",
+      p_stripe_customer_id: "cus_TEST_NEW",
+    });
+    expect(state.order.indexOf("rpc:billing_link_checkout_customer")).toBeGreaterThan(state.order.indexOf("stripe:customers.create"));
+    expect(state.order.indexOf("stripe:sessions.create")).toBeGreaterThan(state.order.indexOf("rpc:billing_link_checkout_customer"));
+    expect(state.sessions[0].customer).toBe("cus_TEST_NEW");
+    expect(state.sessions[0].line_items).toEqual([{ price: PRICE.birdie, quantity: 1 }]);
+    // No direct public.users write remains in checkout.
+    expect(state.writes).toEqual([]);
+  });
+
+  it("PRICING-1. an unconfirmed customer link opens no Session", async () => {
+    for (const outcome of ["lost", "blocked", "customer_conflict", "not_found", "weird", null]) {
+      state.sessions = [];
+      state.linkOutcome = outcome;
+      const response = await checkout({ plan: "par" });
+      expect(response.status, String(outcome)).toBe(303);
+      expect(response.headers.get("location"), String(outcome)).toMatch(/^https:\/\/www\.swingpro-ai\.com\/upgrade\?checkout=/);
+      expect(state.sessions, String(outcome)).toEqual([]);
+    }
+  });
+
+  it("37-38. keeps the conditional 7-day trial and the fixed success/cancel destinations", () => {
+    expect(src).toContain("...(trialEligible ? { trial_period_days: 7 } : {})");
+    expect(src).toContain('const SUCCESS_URL = `${CANONICAL_ORIGIN}/dashboard?upgraded=true`;');
+    expect(src).toContain('const CANCEL_URL = `${CANONICAL_ORIGIN}/upgrade`;');
+    expect(src).toContain("success_url: SUCCESS_URL,");
+    expect(src).toContain("cancel_url: CANCEL_URL,");
+    expect(src).not.toContain("SITE_URL}");
     expect(src).toContain("line_items: [{ price: plan.priceId, quantity: 1 }]");
     expect(src).toContain("metadata: { tier: plan.tier, supabase_user_id: auth.userId }");
   });
@@ -327,8 +421,12 @@ describe("CheckoutButton and upgrade page", () => {
     expect(button).not.toContain("stripe-plan-authority");
   });
 
-  it("42-44. the URL carries plan= only", () => {
-    expect(button).toContain("`/api/stripe/checkout?plan=${encodeURIComponent(plan)}`");
+  it("42-44. the form carries plan only, by POST", () => {
+    expect(button).toContain('<form method="POST" action="/api/stripe/checkout"');
+    expect(button).toContain('<input type="hidden" name="plan" value={plan} />');
+    expect(button.match(/<input /g)).toHaveLength(1);
+    expect(button).not.toContain("href=");
+    expect(button).not.toContain("?plan=");
     expect(button).not.toContain("priceId=");
     expect(button).not.toContain("tier=");
   });
@@ -426,9 +524,9 @@ describe("webhook — tier is the price actually paid", () => {
     expect(state.writes[0].eq).toEqual(["stripe_customer_id", CUSTOMER]);
   });
 
-  it("56. checkout completed without a subscription persists status none and tier none", async () => {
+  it("56. checkout completed without a subscription writes no billing state (PRICING-1)", async () => {
     await deliver("checkout.session.completed", { subscription: null, customer: CUSTOMER });
-    expect(state.writes[0].patch).toEqual({ subscription_status: "none", subscription_tier: "none" });
+    expect(state.writes).toEqual([]);
   });
 
   it("57-58. updated persists the current mapped tier; a stale premium tier cannot survive", async () => {

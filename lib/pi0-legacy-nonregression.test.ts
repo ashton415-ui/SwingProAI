@@ -20,6 +20,8 @@ import {
   APPROVED_MIGRATIONS,
   PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME,
   SEC_COACH1_WRITE_AUTHORITY_FILENAME,
+  migrationsAuthoredBefore,
+  sortsAfterAll,
 } from "./migration-inventory";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -322,9 +324,18 @@ describe("PI-0 — V1 vocabulary and configuration", () => {
 // ─── Migrations ───────────────────────────────────────────────────────────────
 
 describe("PI-0 — existing migrations are unchanged", () => {
-  it("appends PI-0 as the last approved migration without reordering the others", () => {
-    expect(APPROVED_MIGRATIONS[APPROVED_MIGRATIONS.length - 1]).toBe(PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME);
-    expect(APPROVED_MIGRATIONS[APPROVED_MIGRATIONS.length - 2]).toBe(SEC_COACH1_WRITE_AUTHORITY_FILENAME);
+  // PI-0's historical contract: it was appended directly after SEC-COACH1 and
+  // after everything that existed when it was authored. "Globally last" is not
+  // part of that contract; it would expire the moment a later migration lands.
+  it("appends PI-0 directly after SEC-COACH1 without reordering the others", () => {
+    const at = APPROVED_MIGRATIONS.indexOf(PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME);
+    expect(at).toBeGreaterThan(0);
+    expect(APPROVED_MIGRATIONS.filter((m) => m === PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME)).toHaveLength(1);
+    expect(APPROVED_MIGRATIONS[at - 1]).toBe(SEC_COACH1_WRITE_AUTHORITY_FILENAME);
+    const earlier = migrationsAuthoredBefore(PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME);
+    expect(earlier).toEqual(APPROVED_MIGRATIONS.slice(0, at));
+    expect(earlier[earlier.length - 1]).toBe(SEC_COACH1_WRITE_AUTHORITY_FILENAME);
+    expect(sortsAfterAll(PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME, earlier)).toBe(true);
     expect(APPROVED_MIGRATIONS.slice().sort()).toEqual(APPROVED_MIGRATIONS);
   });
 

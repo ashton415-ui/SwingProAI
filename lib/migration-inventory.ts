@@ -173,6 +173,17 @@ export const PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME =
   "20260930125813_pi0_practice_intelligence_foundation.sql";
 
 /**
+ * PRICING-1: the billing checkout guard. One new private table
+ * (billing_checkout_guard: durable trial history and the single in-flight
+ * checkout claim) with RLS enabled, no policy and no browser privilege; a
+ * partial unique index on public.users.stripe_subscription_id; and six
+ * SECURITY INVOKER billing functions executable only by service_role. It adds
+ * no column, changes no existing grant or policy and rewrites no row.
+ */
+export const PRICING1_BILLING_CHECKOUT_GUARD_FILENAME =
+  "20261009020646_pricing1_billing_checkout_guard.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -201,6 +212,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   ENTITLEMENT_WRITE_AUTHORITY_FILENAME,
   SEC_COACH1_WRITE_AUTHORITY_FILENAME,
   PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME,
+  PRICING1_BILLING_CHECKOUT_GUARD_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
