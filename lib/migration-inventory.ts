@@ -184,6 +184,16 @@ export const PRICING1_BILLING_CHECKOUT_GUARD_FILENAME =
   "20261009020646_pricing1_billing_checkout_guard.sql";
 
 /**
+ * PRICING-1: public.users browser-role privilege hardening. Revokes DELETE,
+ * TRUNCATE, REFERENCES, TRIGGER and (PostgreSQL 17) MAINTAIN on public.users
+ * from anon and authenticated, leaving both with SELECT only under the
+ * existing RLS read policies. service_role, PUBLIC, policies, rows and the
+ * billing guard objects are untouched.
+ */
+export const PRICING1_HARDEN_PUBLIC_USERS_PRIVILEGES_FILENAME =
+  "20261009202013_pricing1_harden_public_users_privileges.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -213,6 +223,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   SEC_COACH1_WRITE_AUTHORITY_FILENAME,
   PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME,
   PRICING1_BILLING_CHECKOUT_GUARD_FILENAME,
+  PRICING1_HARDEN_PUBLIC_USERS_PRIVILEGES_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */
