@@ -3,6 +3,7 @@ import { resolveVerifiedAuth } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { resolveStripePlan } from "@/lib/billing/stripe-plan-authority";
 import { classifySubscriptionHistory } from "@/lib/billing/subscription-preflight";
+import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 import Stripe from "stripe";
 
 /**
@@ -239,6 +240,10 @@ export async function POST(req: NextRequest) {
   // Opening a Checkout Session is a side effect, so a cross-site form must not
   // be able to trigger one. The check runs before any credential is touched.
   if (req.headers.get("origin") !== CANONICAL_ORIGIN) return forbidden();
+
+  // Checkout hold: while new memberships are paused nothing below runs — no
+  // auth, profile, admin client, Stripe client, claim, customer or Session.
+  if (!CHECKOUT_AVAILABLE) return notice("paused");
 
   const auth = await resolveVerifiedAuth();
 

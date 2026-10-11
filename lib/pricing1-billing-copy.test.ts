@@ -10,6 +10,9 @@ import { fileURLToPath } from "node:url";
 // Signup only creates an account; the 7-day trial starts at Stripe Checkout,
 // which collects a card by default. These checks keep the misleading copy from
 // returning and pin the checkout condition that makes the card claim true.
+//
+// While the PRICING-1 checkout hold is in force no surface promotes the trial
+// at all: no checkout can start, so no trial or card promise is shown.
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel: string) => readFileSync(path.join(ROOT, rel), "utf8").replace(/\r\n/g, "\n");
@@ -21,19 +24,20 @@ const CHECKOUT = read("app/api/stripe/checkout/route.ts");
 
 const OLD_UPGRADE_TRIAL =
   "All plans include a 7-day free trial. A card is required at checkout; billing starts when your trial ends.";
-const NEW_UPGRADE_TRIAL =
+const HELD_UPGRADE_TRIAL =
   "Eligible first-time subscribers receive a 7-day free trial. A card is required at checkout; billing starts when the trial ends.";
-const NEW_SIGNUP_TRIAL = "7-day free trial for eligible first-time subscribers · Card required at checkout";
+const HELD_SIGNUP_TRIAL = "7-day free trial for eligible first-time subscribers · Card required at checkout";
 
 describe("PRICING-1 billing copy", () => {
-  it("signup promises no card-free trial and names where the trial starts", () => {
+  it("signup promises no card-free trial and, during the hold, no trial at all", () => {
     expect(SIGNUP).not.toContain("No Credit Card Required");
-    expect(SIGNUP).toContain(NEW_SIGNUP_TRIAL);
+    expect(SIGNUP).not.toContain(HELD_SIGNUP_TRIAL);
+    expect(SIGNUP).toContain("Create your free SwingProAI account");
   });
 
-  it("signup no longer promises a trial on every paid plan", () => {
+  it("signup no longer promises a trial on any paid plan", () => {
     expect(SIGNUP).not.toContain("7-day trial on paid plans");
-    expect(SIGNUP.match(/7-day/g)).toHaveLength(1);
+    expect(SIGNUP).not.toMatch(/7-day|free trial|card required/i);
   });
 
   it("the homepage CTA no longer claims signup starts a trial", () => {
@@ -41,10 +45,10 @@ describe("PRICING-1 billing copy", () => {
     expect(HOME).toMatch(/href="\/signup"[^>]*>\s*Get Started\s*</);
   });
 
-  it("the upgrade page states the card and billing terms without unbacked promises", () => {
+  it("the upgrade page makes no unbacked promises and, during the hold, no trial offer", () => {
     expect(UPGRADE).not.toContain("Cancel anytime");
     expect(UPGRADE).not.toContain("No hidden fees");
-    expect(UPGRADE).toContain(NEW_UPGRADE_TRIAL);
+    expect(UPGRADE).not.toContain(HELD_UPGRADE_TRIAL);
     expect(UPGRADE).toContain("Secured by Stripe");
   });
 
@@ -53,7 +57,7 @@ describe("PRICING-1 billing copy", () => {
       expect(source).not.toContain(OLD_UPGRADE_TRIAL);
       expect(source).not.toContain("All plans include a 7-day free trial");
     }
-    expect(UPGRADE.match(/7-day free trial/g)).toHaveLength(1);
+    expect(UPGRADE).not.toMatch(/7-day free trial/);
   });
 
   it("launch prices are unchanged and there is no annual plan", () => {

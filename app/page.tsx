@@ -65,7 +65,7 @@ export default function HomePage() {
           </h1>
 
           <p className="text-base md:text-lg text-gray-400 mb-10 max-w-2xl mx-auto leading-relaxed font-medium">
-            Professional-grade golf analytics powered by AI. Upload, analyze, and master your mechanics — from tempo and spine angle to 3D putting and AR smart glasses.
+            Professional-grade golf analytics powered by AI. Upload, analyze, and master your mechanics — from tempo and spine angle to your putting stroke.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -118,8 +118,8 @@ export default function HomePage() {
               {
                 icon: <Zap className="w-6 h-6 text-golf-green" />,
                 bg: "bg-golf-green/10",
-                title: "3D Putting Engine",
-                desc: "LiDAR / ARCore green reading with aim-line trajectory and real-time caddy suggestions.",
+                title: "AI Putting Analysis",
+                desc: "Upload a putting stroke and get AI feedback on your setup and stroke.",
               },
             ].map((f) => (
               <div

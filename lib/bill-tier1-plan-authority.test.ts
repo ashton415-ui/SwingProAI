@@ -39,6 +39,10 @@ const state = vi.hoisted(() => {
 
 vi.mock("server-only", () => ({}));
 
+// The shipped checkout hold is proven in lib/pricing1-checkout-hold.test.ts.
+// These tests pin price and tier binding on the reopened checkout path.
+vi.mock("@/lib/billing/checkout-availability", () => ({ CHECKOUT_AVAILABLE: true }));
+
 vi.mock("next/server", () => ({
   NextResponse: {
     json: (body: unknown, init?: { status?: number }) =>

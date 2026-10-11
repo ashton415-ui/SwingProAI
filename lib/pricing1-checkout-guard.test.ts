@@ -66,6 +66,12 @@ const state = vi.hoisted(() => {
 
 vi.mock("server-only", () => ({}));
 
+// The checkout hold (lib/billing/checkout-availability.ts) is closed in the
+// shipped code and is proven in lib/pricing1-checkout-hold.test.ts. These
+// tests pin the guarded checkout that runs once checkout is reopened, so they
+// see it open. A test-only module mock: nothing in the route can reopen it.
+vi.mock("@/lib/billing/checkout-availability", () => ({ CHECKOUT_AVAILABLE: true }));
+
 vi.mock("next/server", () => ({
   NextResponse: {
     json: (body: unknown, init?: { status?: number }) =>

@@ -1382,12 +1382,12 @@ export default function AnalyzePage() {
             {result._mode === "basic" && (
               <div className="bg-gradient-to-r from-golf-green/5 to-blue-500/5 border border-white/10 rounded-2xl p-4 flex items-center justify-between gap-4">
                 <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-golf-green mb-1">Unlock Full AI Analysis</p>
-                  <p className="text-xs text-gray-500">Get advanced biomechanics, launch monitor fusion, and unlimited swings with Birdie.</p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-golf-green mb-1">Membership Plans</p>
+                  <p className="text-xs text-gray-500">AI putting analysis is included with Birdie and Eagle.</p>
                 </div>
                 <Link href="/upgrade"
                   className="shrink-0 px-4 py-2 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all whitespace-nowrap">
-                  Upgrade
+                  View Plans
                 </Link>
               </div>
             )}

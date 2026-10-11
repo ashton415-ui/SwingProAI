@@ -106,7 +106,7 @@ export default function SignupPage() {
         <div className="flex items-center justify-center gap-2 mt-6">
           <Zap size={10} className="text-golf-green" fill="currentColor" />
           <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-gray-600">
-            7-day free trial for eligible first-time subscribers · Card required at checkout
+            Create your free SwingProAI account
           </p>
         </div>
       </div>

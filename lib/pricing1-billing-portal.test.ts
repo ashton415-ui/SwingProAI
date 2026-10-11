@@ -494,14 +494,11 @@ describe("Plan & Billing page contract", () => {
     expect(page.indexOf("<CheckoutButton")).toBeGreaterThan(cards);
   });
 
-  it("36. free or ineligible golfers keep the checkout path and launch prices", () => {
-    expect(page).toContain("<CheckoutButton");
+  it("36. free or ineligible golfers keep the plan cards and launch prices; checkout renders only when available", () => {
+    expect(page).toContain(") : CHECKOUT_AVAILABLE ? (\n                  <CheckoutButton");
     expect(page).toContain('price: "$7.99"');
     expect(page).toContain('price: "$14.99"');
     expect(page).toContain('price: "$24.99"');
-    expect(page).toContain(
-      "Eligible first-time subscribers receive a 7-day free trial. A card is required at checkout; billing starts when the trial ends.",
-    );
   });
 
   it("37. a canceled customer gets Manage billing and keeps the plan cards to resubscribe", () => {

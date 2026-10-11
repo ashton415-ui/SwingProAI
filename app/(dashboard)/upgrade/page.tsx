@@ -3,52 +3,40 @@ import { redirect } from "next/navigation";
 import { CheckCircle, CreditCard, Zap } from "lucide-react";
 import { CheckoutButton } from "@/components/CheckoutButton";
 import { canManageBilling } from "@/lib/billing/manage-billing-eligibility";
+import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 
+// Only capabilities the server actually grants per tier are listed. Putting
+// analysis and putting suggestions are server-gated to Birdie and Eagle; plan
+// details beyond that are being revised and are not promised here.
 const PLANS = [
   {
     id: "par" as const,
     name: "Par",
     price: "$7.99",
     period: "/ month",
-    target: "The Casual Improver",
-    popular: false,
-    features: [
-      "Up to 5 AI-powered video analyses per month",
-      "Core biometrics: tempo & spine angle feedback",
-      "Drill recommendations mapped to your swing flaws",
-      "Progress dashboard with historical swing metrics",
-    ],
+    target: "Entry Membership",
+    features: [] as string[],
   },
   {
     id: "birdie" as const,
     name: "Birdie",
     price: "$14.99",
     period: "/ month",
-    target: "The Dedicated Amateur",
-    popular: true,
-    features: [
-      "Unlimited swing analyses",
-      "Advanced biomechanics: hip sway, head drop, club path vectors",
-      "USGA-compliant handicap index tracking",
-      "Stroke equity analytics: FIR, GIR, putts per round",
-    ],
+    target: "Putting Membership",
+    features: ["AI putting stroke analysis", "Putting practice suggestions"],
   },
   {
     id: "eagle" as const,
     name: "Eagle",
     price: "$24.99",
     period: "/ month",
-    target: "The Competitive Player",
-    popular: false,
-    features: [
-      "Everything in Birdie, plus:",
-      "3D putting engine with LiDAR / ARCore green reading",
-      "Premium course maps with green undulation heatmaps",
-      "Real-time AI caddy with predictive club & aim suggestions",
-      "AR smart glasses HUD via OpenXR",
-    ],
+    target: "Full Membership",
+    features: ["Everything in Birdie"],
   },
 ];
+
+const PAUSED_MESSAGE =
+  "New memberships are temporarily paused while we update our plans. Your free account, swing analysis, and history are unaffected.";
 
 /** Statuses with a live Stripe subscription: these golfers manage, not buy. */
 const LIVE_SUBSCRIPTION_STATUSES = ["active", "trialing", "past_due"];
@@ -71,6 +59,7 @@ const CHECKOUT_NOTICES: Record<string, string> = {
   "existing-subscription": "You already have a subscription. Use Manage billing to review it.",
   unavailable: "Checkout is unavailable right now. Please try again shortly.",
   "auth-unavailable": "We couldn't confirm your session. Please try again shortly.",
+  paused: "Checkout did not start: new memberships are paused. You have not been charged.",
 };
 
 export default async function UpgradePage({
@@ -115,18 +104,27 @@ export default async function UpgradePage({
           <h1 className="text-4xl md:text-6xl font-black italic tracking-tighter uppercase text-white">
             Unlock Your Game
           </h1>
-          <p className="text-gray-500 mt-3 text-sm font-medium max-w-xl mx-auto">
-            Eligible first-time subscribers receive a 7-day free trial. A card is required at checkout; billing starts when the trial ends.
-          </p>
-          {isAdmin && (
+          {isAdmin && CHECKOUT_AVAILABLE && (
             <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-full text-red-400 text-[9px] font-black uppercase tracking-widest">
               Admin View — Checkout links are live Stripe sessions
             </div>
           )}
         </div>
 
+        {!CHECKOUT_AVAILABLE && (
+          <div
+            role="status"
+            className="max-w-xl mx-auto mb-8 px-5 py-4 rounded-2xl border border-golf-green/20 bg-golf-green/10 text-golf-green text-sm font-medium text-center"
+          >
+            {PAUSED_MESSAGE}
+          </div>
+        )}
+
         {billingNotice && (
-          <div className="max-w-xl mx-auto mb-8 px-5 py-4 rounded-2xl border border-amber-400/20 bg-amber-400/10 text-amber-300 text-sm font-medium text-center">
+          <div
+            role="status"
+            className="max-w-xl mx-auto mb-8 px-5 py-4 rounded-2xl border border-amber-400/20 bg-amber-400/10 text-amber-300 text-sm font-medium text-center"
+          >
             {billingNotice}
           </div>
         )}
@@ -168,20 +166,8 @@ export default async function UpgradePage({
             return (
               <div
                 key={plan.id}
-                className={`relative bg-golf-surface rounded-5xl p-8 border flex flex-col ${
-                  plan.popular
-                    ? "border-golf-green/40 shadow-xl shadow-golf-green/10"
-                    : "border-white/5"
-                }`}
+                className="relative bg-golf-surface rounded-5xl p-8 border border-white/5 flex flex-col"
               >
-                {plan.popular && (
-                  <div className="absolute -top-3.5 left-1/2 -translate-x-1/2">
-                    <span className="bg-golf-green text-golf-dark text-[9px] font-black uppercase tracking-widest px-4 py-1.5 rounded-full shadow-lg">
-                      Most Popular
-                    </span>
-                  </div>
-                )}
-
                 <div className="mb-8">
                   <h3 className="text-2xl font-black italic tracking-tighter uppercase text-white">
                     {plan.name}
@@ -202,22 +188,26 @@ export default async function UpgradePage({
                       {f}
                     </li>
                   ))}
+                  <li className="text-xs text-gray-600">Plan details are being updated.</li>
                 </ul>
 
                 {isCurrent ? (
                   <div className="w-full py-3.5 text-center bg-white/5 border border-white/10 text-gray-500 font-black uppercase tracking-widest rounded-2xl text-[10px]">
                     Current Plan
                   </div>
-                ) : (
+                ) : CHECKOUT_AVAILABLE ? (
                   <CheckoutButton
                     plan={plan.id}
                     label={`Get ${plan.name}`}
-                    className={`w-full py-3.5 font-black uppercase tracking-widest rounded-2xl transition-all text-[10px] disabled:opacity-60 ${
-                      plan.popular
-                        ? "bg-golf-green text-golf-dark hover:bg-[#22C55E] shadow-[0_0_20px_rgba(74,222,128,0.2)]"
-                        : "bg-white/5 border border-white/10 text-white hover:bg-white/10"
-                    }`}
+                    className="w-full py-3.5 font-black uppercase tracking-widest rounded-2xl transition-all text-[10px] disabled:opacity-60 bg-white/5 border border-white/10 text-white hover:bg-white/10"
                   />
+                ) : (
+                  <div
+                    aria-disabled="true"
+                    className="w-full min-h-[44px] py-3.5 flex items-center justify-center text-center bg-white/5 border border-white/10 text-gray-500 font-black uppercase tracking-widest rounded-2xl text-[10px] cursor-not-allowed"
+                  >
+                    Temporarily unavailable
+                  </div>
                 )}
               </div>
             );
