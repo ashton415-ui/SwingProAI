@@ -23,3 +23,8 @@
 ## Build Commands
 * Web Build: `npm run build`
 * Native/Mobile Build: No canonical native build/sync command is currently locked. Do not assume `npx cap sync`; follow separately verified architecture and build documentation when native implementation is explicitly authorized.
+
+## Development Protocol v2 (Candidate Reference)
+* `docs/DEV_PROTOCOL_V2_CANDIDATE.md`, `docs/AGENT_PLAYBOOK.md`, the read-only review agents in `.claude/agents/` and the workflow skills in `.claude/skills/` provide development workflow guidance only. The protocol is a CANDIDATE and is not yet adopted governance.
+* It is not blanket authorization. The Product Constitution, Launch Gates and the directives above remain authoritative and prevail on any conflict; all twelve hard launch requirements remain binding.
+* Implementation stays within owner-approved work-order boundaries. Commit, push, pull request, merge, vendor, database, firewall and production actions each remain separately authorized.
