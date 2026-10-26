@@ -30,6 +30,15 @@ import { computePuttingScoreFromAnalysisV1 } from "@/lib/putting-score-from-anal
 import { classifyAnalysisFamilyRoute } from "@/lib/analysis-family-router";
 import { canUsePuttingAnalysis, type SubscriptionTier } from "@/lib/entitlements";
 import {
+  resolveAnalysisAccess,
+  type AnalysisAccess,
+} from "@/lib/analysis-entitlement-authority";
+import {
+  ANALYSIS_OWNER_COLUMNS,
+  readOwnedAnalysisPayloads,
+  serializeAnalysisResult,
+} from "@/lib/analysis-result-read-authority";
+import {
   PUTTING_RESPONSE_SCHEMA,
   PUTTING_SYSTEM_INSTRUCTION,
   buildPersistedPuttingAnalysis,
@@ -491,12 +500,17 @@ function trustedAnalysisTable() {
   return createAdminClient().from("swing_analysis");
 }
 
-/** Best-effort failure write for the full-swing path, id- and owner-bound. */
+/**
+ * Best-effort failure write for the full-swing path, id- and owner-bound, and
+ * only from processing: it releases the claim this request holds and can never
+ * turn a completed analysis into a failed one.
+ */
 async function markAnalysisFailed(analysisId: string, authenticatedUserId: string): Promise<void> {
   try {
     await trustedAnalysisTable()
       .update({ status: "failed" })
       .eq("id", analysisId)
+      .eq("status", "processing")
       .eq("user_id", authenticatedUserId);
   } catch {
     // Best effort. A failed status write must not replace the response the
@@ -718,18 +732,25 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Parse body ────────────────────────────────────────────────────────────
-  let body: RequestBody;
+  let rawBody: unknown;
   try {
-    body = await req.json();
+    rawBody = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
+  // Valid JSON is not necessarily an object: `null` or an array would make the
+  // destructuring below throw outside any handler.
+  if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const body = rawBody as Partial<RequestBody>;
   const { analysisId, mediapipeMetrics: clientMetrics } = body;
 
   console.log("[analyze-swing] analysis id received");
 
-  if (!analysisId) {
+  if (typeof analysisId !== "string" || analysisId.length === 0) {
     return NextResponse.json({ error: "Missing analysisId" }, { status: 400 });
   }
 
@@ -737,7 +758,9 @@ export async function POST(req: NextRequest) {
   console.log("[analyze-swing] fetching analysis row");
   const { data: analysisRow, error: fetchErr } = await supabase
     .from("swing_analysis")
-    .select("*, swing_video:swing_videos(id, club, original_filename, video_url, storage_path, mime_type, file_size)")
+    // ENT-1C. The identity and core columns only: the result payload is read
+    // by the server after ownership is proved, never by the caller's session.
+    .select(`${ANALYSIS_OWNER_COLUMNS}, swing_video:swing_videos(id, club, original_filename, video_url, storage_path, mime_type, file_size)`)
     .eq("id", analysisId)
     .eq("user_id", user.id)
     .single();
@@ -806,6 +829,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // ENT-1C. The stored putting envelope the helper's cache check reads comes
+    // from the server-only payload read, bounded by this owned row and user,
+    // and only after the entitlement above has passed. The putting contract
+    // itself is unchanged.
+    const puttingPayloads = await readOwnedAnalysisPayloads([analysisId], user.id);
+    if (puttingPayloads === null) {
+      return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
+    }
+    (analysisRow as Record<string, unknown>).putting_analysis =
+      puttingPayloads.get(analysisId)?.putting_analysis ?? null;
+
     return await runPuttingAnalysis(supabase, analysisRow, analysisId, user.id);
   }
 
@@ -819,43 +853,81 @@ export async function POST(req: NextRequest) {
   }
 
   console.log("[analyze-swing] row status:", analysisRow.status);
-  // NOTE: we intentionally do NOT short-circuit on status === "complete".
-  // Returning cached data caused stale/generic results to be served forever.
-  // Every POST re-runs Gemini. The client-side useRef guard in ProcessingState
-  // ensures this endpoint is called at most once per page load.
+
+  // ── ENT-1A full-swing entitlement ────────────────────────────────────────
+  // Decided on the server from the caller's own users row, before anything is
+  // returned or run. Full swing is open to every legitimate account, FREE
+  // included; the decision also says which premium result classes this caller
+  // may receive. An unreadable or unrecognised state runs nothing and returns
+  // nothing — not even a stored result.
+  const entitlement = await resolveAnalysisAccess(supabase, user.id);
+  if (entitlement.status !== "allowed") {
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  const access = entitlement.access;
+
+  // A completed analysis is answered from the stored row. Gemini is never re-run
+  // for it, so a replayed or repeated request cannot spend a second model call.
   if (analysisRow.status === "complete") {
-    console.warn("[analyze-swing] row was already complete — re-running Gemini to refresh");
+    console.log("[analyze-swing] completed analysis served from the stored row");
+    return await completedResponse(analysisRow, user.id, access);
   }
 
-  // Mark as processing
-  let markErr: unknown = null;
-  try {
-    const { error } = await trustedAnalysisTable()
-      .update({ status: "processing" })
-      .eq("id", analysisId)
-      .eq("user_id", user.id);
-    markErr = error;
-  } catch {
-    markErr = true;
-  }
-
-  if (markErr) {
-    console.error("[analyze-swing] mark-processing update failed");
+  // Another request holds this row. It is not re-run, and nothing is written.
+  if (analysisRow.status === "processing") {
+    return inProgressResponse();
   }
 
   const geminiKey = resolveGeminiKey();
   console.log("[analyze-swing] Gemini key configured:", !!geminiKey);
   if (!geminiKey) {
+    // Checked before the claim, so a missing key leaves the row exactly as it
+    // was found instead of stranding it in processing or marking it failed.
     console.error("[analyze-swing] FATAL: no Gemini API key — set GEMINI_API_KEY or GOOGLE_AI_API_KEY in Vercel env vars");
-    await markAnalysisFailed(analysisId, user.id);
     return NextResponse.json(
       { error: "AI analysis is temporarily unavailable. Please try again later." },
       { status: 503 },
     );
   }
 
+  // ── ENT-1A atomic execution claim ────────────────────────────────────────
+  // One conditional UPDATE moves the row from a startable state to processing.
+  // Postgres re-checks the WHERE clause against the latest row version once it
+  // holds the row lock, so of any number of simultaneous requests exactly one
+  // sees its update affect the row; every other one affects zero rows. Only the
+  // request that claimed the row may call Gemini. The filters restate this row,
+  // this owner and the full-swing family rather than trusting the elevated
+  // client.
+  let claimedRows: unknown = null;
+  let claimFailed = false;
+  try {
+    const { data, error } = await trustedAnalysisTable()
+      .update({ status: "processing" })
+      .eq("id", analysisId)
+      .eq("user_id", user.id)
+      .or(FULL_SWING_FAMILY_FILTER)
+      .in("status", CLAIMABLE_STATUSES)
+      .select("id");
+    claimedRows = data;
+    claimFailed = Boolean(error);
+  } catch {
+    claimFailed = true;
+  }
+
+  if (claimFailed || !Array.isArray(claimedRows)) {
+    console.error("[analyze-swing] execution claim could not be recorded");
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+
+  if (claimedRows.length !== 1) {
+    // Zero rows: another request claimed it first, or it is no longer in a
+    // startable state. One owner-scoped re-read decides the answer; there is
+    // no retry loop and no Gemini call.
+    return await answerUnclaimedRow(supabase, analysisId, user.id, access);
+  }
+
   // ── Video metadata ────────────────────────────────────────────────────────
-  const videoRow = analysisRow.swing_video as {
+  const videoRow = analysisRow.swing_video as unknown as {
     id: string;
     club: string | null;
     original_filename: string | null;
@@ -881,14 +953,19 @@ export async function POST(req: NextRequest) {
   console.log("[analyze-swing] calling extractSwingMetrics (server-side: will return null fields)");
   const serverMetrics = await extractSwingMetrics(videoRow?.video_url ?? "");
 
-  // Merge: client-provided values take precedence over the server no-op
+  // Merge: client-provided values take precedence over the server no-op.
+  // ENT-1A. Every client value is spliced into the model prompt, so each one
+  // must be the shape the client's own measurement produces — a finite angle,
+  // or a "N.N:1" tempo — or it is dropped. Free text and oversized values never
+  // reach Gemini.
+  const client = clientMetrics !== null && typeof clientMetrics === "object" ? clientMetrics : undefined;
   const merged = {
-    spineAngle:       clientMetrics?.spineAngle       ?? serverMetrics.spineAngle,
-    hipRotation:      clientMetrics?.hipRotation      ?? serverMetrics.hipRotation,
-    shoulderRotation: clientMetrics?.shoulderRotation ?? serverMetrics.shoulderRotation,
-    tempoRatio:       clientMetrics?.tempoRatio       ?? serverMetrics.tempoRatio,
-    setupSpineAngle:  clientMetrics?.setupSpineAngle  ?? serverMetrics.setup.spineAngle,
-    impactSpineAngle: clientMetrics?.impactSpineAngle ?? serverMetrics.impact.spineAngle,
+    spineAngle:       clientAngle(client?.spineAngle)        ?? serverMetrics.spineAngle,
+    hipRotation:      clientAngle(client?.hipRotation)       ?? serverMetrics.hipRotation,
+    shoulderRotation: clientAngle(client?.shoulderRotation)  ?? serverMetrics.shoulderRotation,
+    tempoRatio:       clientTempoRatio(client?.tempoRatio)   ?? serverMetrics.tempoRatio,
+    setupSpineAngle:  clientAngle(client?.setupSpineAngle)   ?? serverMetrics.setup.spineAngle,
+    impactSpineAngle: clientAngle(client?.impactSpineAngle)  ?? serverMetrics.impact.spineAngle,
   };
 
   const hasRealMetrics = Object.values(merged).some((v) => v != null);
@@ -1140,14 +1217,16 @@ export async function POST(req: NextRequest) {
     };
 
 
-    const { data: updated, error: updateErr } = await trustedAnalysisTable()
+    // Completes only the row this request claimed: still processing, this
+    // owner. Exactly one affected row is proved rather than assumed.
+    const { data: completedRows, error: updateErr } = await trustedAnalysisTable()
       .update(payload)
       .eq("id", analysisId)
       .eq("user_id", user.id)
-      .select()
-      .single();
+      .eq("status", "processing")
+      .select();
 
-    if (updateErr) {
+    if (updateErr || !Array.isArray(completedRows) || completedRows.length !== 1) {
       console.error("[analyze-swing] analysis completion update failed");
       await markAnalysisFailed(analysisId, user.id);
       return NextResponse.json(
@@ -1156,7 +1235,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    console.log("[analyze-swing] complete — status:", updated?.status);
+    const completedRow = completedRows[0] as Record<string, unknown>;
+    console.log("[analyze-swing] complete — status:", completedRow.status);
+    // The stored row keeps every section; the response is the explicit
+    // authorized view, never the raw row.
+    const updated = serializeAnalysisResult(completedRow, access);
     return NextResponse.json({ message: "Analysis complete", data: updated });
 
   } catch {
@@ -1165,7 +1248,8 @@ export async function POST(req: NextRequest) {
       await trustedAnalysisTable()
         .update({ status: "failed" })
         .eq("id", analysisId)
-        .eq("user_id", user.id);
+        .eq("user_id", user.id)
+        .eq("status", "processing");
     } catch {
       console.error("[analyze-swing] failed-status update also failed");
     }
@@ -1174,4 +1258,89 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
+}
+
+// ── ENT-1A full-swing answers that never call Gemini ──────────────────────────
+
+const FULL_SWING_UNAVAILABLE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
+const IN_PROGRESS_COPY = "This analysis is already in progress. Please check back shortly.";
+const NOT_STARTABLE_COPY = "This analysis can't be started right now. Please refresh and try again.";
+
+/** States from which a full-swing analysis may be started (or retried). */
+const CLAIMABLE_STATUSES = ["pending", "failed"];
+
+/**
+ * The full-swing family as the router defines it: the explicit value, or null
+ * on legacy rows written before the column existed. Stated as a PostgREST
+ * filter so the claim restates the family without trusting the row it read.
+ */
+const FULL_SWING_FAMILY_FILTER = "analysis_family.is.null,analysis_family.eq.full_swing";
+
+/** A client-measured angle in degrees, or null when it is not one. */
+function clientAngle(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= -360 && value <= 360 ? value : null;
+}
+
+/** A client-measured tempo in the "N.N:1" form lib/biometrics produces, or null. */
+function clientTempoRatio(value: unknown): string | null {
+  return typeof value === "string" && /^\d{1,2}(\.\d{1,2})?:1$/.test(value) ? value : null;
+}
+
+/**
+ * A stored, completed row as this caller may see it: the owned columns plus
+ * the server-read payload, through the shared serializer. The joined video
+ * never enters the view.
+ */
+async function completedResponse(
+  row: Record<string, unknown>,
+  authenticatedUserId: string,
+  access: AnalysisAccess,
+): Promise<NextResponse> {
+  // The owner is the verified caller, never a value taken from the row; a row
+  // that does not belong to them is refused before any elevated read.
+  const id = typeof row.id === "string" ? row.id : "";
+  if (id.length === 0 || row.user_id !== authenticatedUserId) {
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  const payloads = await readOwnedAnalysisPayloads([id], authenticatedUserId);
+  if (payloads === null) {
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  const updated = serializeAnalysisResult({ ...row, ...payloads.get(id) }, access);
+  return NextResponse.json({ message: "Analysis complete", data: updated });
+}
+
+function inProgressResponse(): NextResponse {
+  return NextResponse.json({ error: IN_PROGRESS_COPY, status: "processing" }, { status: 409 });
+}
+
+/** The single re-read after a claim that affected no row. */
+async function answerUnclaimedRow(
+  supabase: RouteSupabaseClient,
+  analysisId: string,
+  authenticatedUserId: string,
+  access: AnalysisAccess,
+): Promise<NextResponse> {
+  try {
+    const { data, error } = await supabase
+      .from("swing_analysis")
+      .select(ANALYSIS_OWNER_COLUMNS)
+      .eq("id", analysisId)
+      .eq("user_id", authenticatedUserId)
+      .or(FULL_SWING_FAMILY_FILTER)
+      .maybeSingle();
+    const current = data as Record<string, unknown> | null;
+    if (error) {
+      return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+    }
+    if (current?.status === "complete") {
+      return await completedResponse(current, authenticatedUserId, access);
+    }
+    if (current?.status === "processing") {
+      return inProgressResponse();
+    }
+  } catch {
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  return NextResponse.json({ error: NOT_STARTABLE_COPY }, { status: 409 });
 }

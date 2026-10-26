@@ -45,7 +45,8 @@ export type V1ErrorCode =
   | "PRACTICE_SESSION_ALREADY_ACTIVE"
   | "PRACTICE_SESSION_NOT_ACTIVE"
   | "DRILL_NOT_FOUND"
-  | "IDEMPOTENCY_CONFLICT";
+  | "IDEMPOTENCY_CONFLICT"
+  | "ANALYSIS_NOT_FOUND";
 
 /** Every V1 response carries private, uncacheable semantics. See `v1Headers`. */
 export const V1_CACHE_CONTROL = "private, no-store";

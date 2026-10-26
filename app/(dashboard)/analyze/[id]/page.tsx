@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
+import { authorizeOwnedAnalysisRow } from "@/lib/analysis-result-read-authority";
 import AnalysisReport, { type AnalysisData } from "./AnalysisReport";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
@@ -29,12 +30,13 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) redirect("/login");
 
-  // Fetch analysis + joined video
+  // Fetch analysis + joined video. ENT-1C: this session read proves ownership
+  // and carries identity and core columns only; the result payload is read and
+  // serialized by the unified result-read authority below.
   const { data: row, error } = await supabase
     .from("swing_analysis")
     .select(`
-      id, status, score, feedback, analysis_family, equipment_snapshot,
-      swing_highlights, mechanical_deficiencies, metrics,
+      id, user_id, status, analysis_family, equipment_snapshot,
       swing_video:swing_videos (
         id, video_url, storage_path, original_filename, club, created_at
       )
@@ -79,14 +81,22 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
     videoSignedUrl = videoRow.video_url;
   }
 
+  // AnalysisData is a Client Component prop, so it is serialized to the browser
+  // in full. Every result field below comes from the authorized view.
+  const authorized = await authorizeOwnedAnalysisRow({ client: supabase, userId: user.id }, row);
+  if (!authorized) throw new Error("Analysis result temporarily unavailable.");
+  const view = authorized.result;
+
   const analysis: AnalysisData = {
-    id: row.id,
-    status: row.status,
-    score: row.score ?? null,
-    feedback: row.feedback ?? null,
-    swing_highlights: (row.swing_highlights as AnalysisData["swing_highlights"]) ?? null,
-    mechanical_deficiencies: (row.mechanical_deficiencies as AnalysisData["mechanical_deficiencies"]) ?? null,
-    metrics: (row.metrics as AnalysisData["metrics"]) ?? null,
+    id: view.id,
+    status: view.status,
+    score: view.score,
+    feedback: view.feedback,
+    swing_highlights: view.swing_highlights,
+    // A legacy string joint_coordinate renders through the report's own
+    // `?.joint ?? checkpoint` fallback.
+    mechanical_deficiencies: view.mechanical_deficiencies as unknown as AnalysisData["mechanical_deficiencies"],
+    metrics: view.metrics as AnalysisData["metrics"],
     swing_video: videoRow,
   };
 

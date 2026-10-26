@@ -734,11 +734,14 @@ describe("equipment slice source contract", () => {
   const FROZEN: Array<[string, string]> = [
     ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
     // Analysis request authority closure: five analysis-request error codes added.
-    ["lib/api/v1-response.ts", "300df9cc9bfab79f1425b24d84ac7b1cd51e464e62ef39947f4afe310ec4c86c"],
+    // ENT-1C: ANALYSIS_NOT_FOUND added for GET /api/v1/analyses/{id}.
+    ["lib/api/v1-response.ts", "dc54ca354d79f306c9a77bef717c7726234631050f637260453176035d9b6028"],
     // PI-1A: Practice Intelligence effective /me capability (six capabilities).
-    ["lib/api/me-dto.ts", "49db919fefb85d9e5412a75978fbb901fdc893b04cb3a1883412dfe4dce0e842"],
+    // ENT-1C: paid analysis capabilities and mode reported with subscription status.
+    ["lib/api/me-dto.ts", "b643a03f289feea8bb7639b840bd52b60c6a4d81020c243e846d37bb70faa48e"],
     ["app/api/v1/me/route.ts", "73d1a8a0195eae4978bd32ac73665c5c2992682f24281bca91c765c5b7cb5415"],
-    ["lib/api-v1-foundation.test.ts", "3dfa45e4d51e4e241c88c677fdb19274a52b5851d1eb98eebeb94ca6591d0779"],
+    // ENT-1C: /me paid-capability expectations follow subscription status.
+    ["lib/api-v1-foundation.test.ts", "8ba4332e5be229ae792a9dcea0462380a5993c300311babfac8213288bd0f547"],
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
     ["lib/equipment/catalog.ts", "88303c5b51838bd16562246a3ee27379b4e39feacddf0e9ab8c102cb63195a7e"],
     ["lib/equipment/club-display-name.ts", "6533d152a8bc8919e832f97669f35cab3a6f0249ffd5e538dc90be35bd9443d1"],

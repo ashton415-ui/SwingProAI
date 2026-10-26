@@ -327,12 +327,10 @@ describe("the full-swing report survives the family split unchanged", () => {
 // ─── The separate analysis_v2 equipment-fitting dependency survives ───────────
 
 describe("the separate analysis_v2 equipment-fitting dependency survives", () => {
-  it("still derives equipmentFitting from analysisV2", () => {
-    // analysisV2 lost its putting-classification use, not its only use. This
-    // pins the remaining one so a later cleanup cannot delete the declaration
-    // and silently break the Equipment Recommendations panel.
-    expect(pageSource).toContain(
-      "const equipmentFitting = (analysisV2?.equipment_fitting ?? null) as EquipmentFitting | null;"
-    );
+  it("still declares equipmentFitting for the Equipment Recommendations panel", () => {
+    // ENT-1C: analysis_v2 exists in no migration, so the authorized view never
+    // carries it and the fitting stays empty until a producer and contract
+    // exist. The declaration must survive so the panel keeps rendering.
+    expect(pageSource).toContain("const equipmentFitting = null as EquipmentFitting | null;");
   });
 });
