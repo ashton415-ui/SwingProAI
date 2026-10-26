@@ -189,3 +189,54 @@ export function canUsePracticeIntelligence(tier: unknown, status: unknown): bool
   const statusAllowed = status === "active" || status === "trialing";
   return tierAllowed && statusAllowed;
 }
+
+// ─── ENT-1C analysis-result capabilities ─────────────────────────────────────
+//
+// Each helper below is its own product contract, in the PI-1A form: both
+// arguments are `unknown` because both come from database columns, both are
+// matched by positive allow-list, and nothing here calls, aliases or derives
+// from another helper. Paid access needs a paying status as well as a tier:
+// active or trialing, with no grace period for past_due or canceled.
+//
+// coach_starter and coach_pro are deliberately absent. No billing path or
+// administrator workflow writes those tiers, so a coach label on a profile is
+// not evidence that anyone granted it. They gain these capabilities only when
+// an authoritative grant record exists.
+//
+// Core full-swing feedback is not gated by any helper here: every legitimate
+// account, FREE included, receives it.
+
+/** Equipment fitting from an analysis (Birdie / Eagle, paying). */
+export function canViewEquipmentFitting(tier: unknown, status: unknown): boolean {
+  const tierAllowed = tier === "birdie" || tier === "eagle";
+  const statusAllowed = status === "active" || status === "trialing";
+  return tierAllowed && statusAllowed;
+}
+
+/** Launch-monitor intelligence attached to an analysis (Birdie / Eagle, paying). */
+export function canViewLaunchMonitorIntelligence(tier: unknown, status: unknown): boolean {
+  const tierAllowed = tier === "birdie" || tier === "eagle";
+  const statusAllowed = status === "active" || status === "trialing";
+  return tierAllowed && statusAllowed;
+}
+
+/**
+ * Ultra-deep analysis (Eagle, paying). An entitlement only: whether a deeper
+ * analysis is actually produced is a property of the pipeline, not of this
+ * answer.
+ */
+export function canViewUltraDeepAnalysis(tier: unknown, status: unknown): boolean {
+  return tier === "eagle" && (status === "active" || status === "trialing");
+}
+
+/**
+ * The analysis depth a membership pays for. Anything that is not a paying
+ * Birdie or Eagle is "basic", so an unknown, lapsed or unproven tier never
+ * selects a paid depth.
+ */
+export function resolvePaidAnalysisMode(tier: unknown, status: unknown): AnalysisMode {
+  const paying = status === "active" || status === "trialing";
+  if (paying && tier === "eagle") return "ultra";
+  if (paying && tier === "birdie") return "advanced";
+  return "basic";
+}

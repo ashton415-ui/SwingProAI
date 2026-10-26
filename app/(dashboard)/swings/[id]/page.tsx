@@ -12,12 +12,22 @@ import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
 import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
 import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
 import { canUsePuttingAnalysis } from "@/lib/entitlements";
+import { authorizeOwnedAnalysisRow } from "@/lib/analysis-result-read-authority";
 import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
 import { resolvePuttingScorePresentation } from "@/lib/putting-score-presentation-eq5f-f";
 import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
+
+/** The swing_videos columns this page joins. */
+interface SwingVideoJoin {
+  club?: string | null;
+  title?: string | null;
+  original_filename?: string | null;
+  storage_path?: string | null;
+  video_url?: string | null;
+}
 
 /** The private bucket every swing video is uploaded to. Never made public. */
 const VIDEO_BUCKET = "swing-videos";
@@ -41,14 +51,32 @@ export default async function SwingDetailPage({
 
   const tier = (profile?.subscription_tier ?? "par") as SubscriptionTier;
 
-  const { data: swing } = await supabase
+  // ENT-1C. This session read proves ownership (id AND user_id) and carries
+  // identity and core columns only. The result payload is read and serialized
+  // by the unified result-read authority, so no raw row reaches anything below.
+  const { data: ownedRow } = await supabase
     .from("swing_analysis")
-    .select("*, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")
+    .select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")
     .eq("id", params.id)
     .eq("user_id", user.id)
     .single();
 
+  const authorized = ownedRow
+    ? await authorizeOwnedAnalysisRow({ client: supabase, userId: user.id }, ownedRow)
+    : null;
+  const joined = (ownedRow?.swing_video ?? null) as unknown as SwingVideoJoin | SwingVideoJoin[] | null;
+  const swing = authorized
+    ? {
+        ...authorized.result,
+        created_at: authorized.result.created_at ?? "",
+        swing_video: Array.isArray(joined) ? (joined[0] ?? null) : joined,
+      }
+    : null;
+
+  // An owned row whose payload cannot be read also ends here: EQ5F-B keeps
+  // this page free of thrown errors, so an outage presents as not-found.
   if (!swing) notFound();
+  const access = authorized!.access;
 
   // ── EQ5F-B analysis video replay — resolved here, on the server ─────────────
   //
@@ -84,7 +112,7 @@ export default async function SwingDetailPage({
     playbackUrl = videoRow.video_url;
   }
 
-  // Extract individual metrics from the jsonb metrics field
+  // Extract individual metrics from the authorized core metrics
   const metrics = swing.metrics as Record<string, unknown> | null;
   const scoringBreakdown = typeof metrics?.scoring_breakdown === "string" ? metrics.scoring_breakdown : null;
 
@@ -99,17 +127,20 @@ export default async function SwingDetailPage({
 
   const suggestions = Array.isArray(metrics?.suggestions) ? (metrics.suggestions as string[]) : null;
 
-  // v4 granular telemetry arrays
-  const highlights = (swing.swing_highlights ?? []) as HighlightItem[];
-  const deficiencies = (swing.mechanical_deficiencies ?? []) as DeficiencyItem[];
-  const detailedHtml = (swing.detailed_summary_html ?? null) as string | null;
+  // v4 granular telemetry arrays — core improvement feedback for every golfer
+  // (ENT-1C), already item-level allow-listed by the authority.
+  const highlights = swing.swing_highlights as HighlightItem[];
+  const deficiencies = swing.mechanical_deficiencies as DeficiencyItem[];
 
-  // v5 equipment fitting — from analysis_v2 jsonb if present
-  const analysisV2 = swing.analysis_v2 as Record<string, unknown> | null;
-  const equipmentFitting = (analysisV2?.equipment_fitting ?? null) as EquipmentFitting | null;
+  // No stored column carries a deep prose summary or an equipment fitting
+  // (detailed_summary_html and analysis_v2 exist in no migration), so the
+  // authorized view has neither and these stay empty until a producer and a
+  // contract exist.
+  const detailedHtml = null as string | null;
+  const equipmentFitting = null as EquipmentFitting | null;
 
-  // Entitlement check for equipment fitting
-  const hasEquipmentFitting = tier === "birdie" || tier === "eagle";
+  // Equipment fitting is its own paid capability, with a paying status.
+  const hasEquipmentFitting = access.equipmentFitting;
 
   // EQ5F-A. The club this analysis was taken with, read from the immutable
   // equipment snapshot the database wrote at insert. The legacy
@@ -360,19 +391,19 @@ export default async function SwingDetailPage({
 
           {/* v4: Swing Highlights */}
           <div className="mb-6">
-            <SwingHighlightsPanel tier={tier} highlights={highlights} />
+            <SwingHighlightsPanel highlights={highlights} />
           </div>
 
           {/* v4: Mechanical Deficiencies */}
           <div className="mb-6">
-            <MechanicalDeficienciesPanel tier={tier} deficiencies={deficiencies} />
+            <MechanicalDeficienciesPanel deficiencies={deficiencies} />
           </div>
 
           {/* v5: Equipment Recommendations — Birdie/Eagle gated */}
           <div className="mb-6">
             <EquipmentRecommendations
               fitting={hasEquipmentFitting ? equipmentFitting : null}
-              tier={tier === "coach_starter" || tier === "coach_pro" ? "birdie" : tier === "none" ? "par" : tier}
+              tier={hasEquipmentFitting ? tier : "par"}
             />
           </div>
 

@@ -84,7 +84,9 @@ export default async function DashboardPage() {
 
   const { data: swings } = await supabase
     .from("swing_analysis")
-    .select("*, swing_video:swing_videos(club, status, created_at)")
+    // ENT-1C. Explicit identity and core columns only: this page renders no
+    // result payload, and the payload columns are server-only (ENT-1D).
+    .select("id, user_id, status, score, tempo_ratio, created_at, analysis_family, equipment_snapshot, swing_video:swing_videos(club, status, created_at)")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
     .limit(10) as { data: SwingAnalysis[] | null };

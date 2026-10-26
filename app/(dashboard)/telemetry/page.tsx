@@ -2,6 +2,7 @@ import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
+import { authorizeOwnedAnalysisRows } from "@/lib/analysis-result-read-authority";
 import {
   Video, Target, CheckCircle2, Clock, AlertCircle, Loader2, Calendar,
   Activity, ArrowUpRight, AlertTriangle, Crosshair, Zap, ChevronRight,
@@ -684,13 +685,15 @@ export default async function TelemetryPage() {
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) redirect("/login");
 
-  const [swingResult, rangeResult] = await Promise.all([
+  // ENT-1C. This session read proves ownership and carries identity and core
+  // columns only. The result payload (metrics, highlights, deficiencies) is
+  // read and serialized by the unified result-read authority below.
+  const [ownedHistory, rangeResult] = await Promise.all([
     supabase
       .from("swing_analysis")
       .select(`
-        id, status, score, feedback, created_at, analysis_family, equipment_snapshot,
+        id, user_id, status, score, feedback, created_at, analysis_family, equipment_snapshot,
         spine_angle, hip_rotation, shoulder_rotation,
-        metrics, swing_highlights, mechanical_deficiencies,
         swing_video:swing_videos(club, original_filename)
       `)
       .eq("user_id", user.id)
@@ -704,6 +707,8 @@ export default async function TelemetryPage() {
       .order("completed_at", { ascending: false })
       .limit(50),
   ]);
+
+  const swingResult = await authorizeOwnedAnalysisRows({ client: supabase, userId: user.id }, ownedHistory);
 
   if (swingResult.error) console.error("[telemetry] swing_analysis error:", swingResult.error.message);
   if (rangeResult.error) console.error("[telemetry] range_sessions error:", rangeResult.error.message);
@@ -734,8 +739,8 @@ export default async function TelemetryPage() {
     const vid    = r.swing_video as unknown as RawVideo | RawVideo[];
     const video  = Array.isArray(vid) ? (vid[0] ?? null) : vid;
     const raw    = (r.metrics as Record<string, unknown> | null) ?? {};
-    const rawHL  = (r.swing_highlights as RawHL[] | null) ?? [];
-    const rawDF  = (r.mechanical_deficiencies as RawDF[] | null) ?? [];
+    const rawHL  = r.swing_highlights as RawHL[];
+    const rawDF  = r.mechanical_deficiencies as RawDF[];
 
     // Prefer dedicated numeric columns (written by API route from client measurements);
     // fall back to the JSONB metrics blob for records written before the dedicated columns existed.
@@ -760,7 +765,7 @@ export default async function TelemetryPage() {
 
     return {
       id:           r.id,
-      created_at:   r.created_at,
+      created_at:   r.created_at ?? "",
       status:       r.status,
       score:        r.score ?? null,
       feedback:     r.feedback ?? null,
