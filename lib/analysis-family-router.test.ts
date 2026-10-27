@@ -273,8 +273,8 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
       // runtime position; the precedence itself is asserted separately.
       "const geminiKey = resolveGeminiKey()",
       "extractSwingMetrics(",
-      "createSignedUrl(",
-      "await fetchVideoBytes(",
+      // ENT-1D: the owner-bound Storage load replaced the inline sign + fetch.
+      "loadOwnedSwingVideo(",
       "generateContent(",
     ]) {
       const at = anchor(site);
@@ -360,24 +360,34 @@ function puttingAnchor(needle: string): number {
 }
 
 describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
+  // ENT-1D: the unconditional processing write became an atomic execution
+  // claim, and the cached result is answered through the shared serializer.
   it("checks the semantically valid cache before any mutation or model call", () => {
     const cache = puttingAnchor("isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)");
-    expect(cache).toBeLessThan(puttingAnchor('status: "processing"'));
+    expect(cache).toBeLessThan(puttingAnchor("claimAnalysisExecution("));
     expect(cache).toBeLessThan(puttingAnchor("generateContent("));
     expect(puttingHelperSource.slice(cache, cache + 400)).toContain(
-      '{ message: "Analysis complete", data: analysisRow }',
+      "data: serializeAnalysisResult(analysisRow, PUTTING_RESULT_ACCESS)",
     );
   });
 
-  it("never reaches the model when the processing state cannot be recorded", () => {
-    const failure = puttingAnchor("if (puttingProcessingError) {");
-    expect(failure).toBeLessThan(puttingAnchor("generateContent("));
-    expect(puttingHelperSource.slice(failure, failure + 500)).toContain("await markFailed();");
+  it("never reaches the model when the claim cannot be taken or is lost", () => {
+    const unavailable = puttingAnchor('if (puttingClaim.outcome === "unavailable") {');
+    const notClaimed = puttingAnchor('if (puttingClaim.outcome === "not_claimed") {');
+    const dispatch = puttingAnchor("await markProviderDispatched(");
+    const model = puttingAnchor("generateContent(");
+    expect(unavailable).toBeLessThan(model);
+    expect(notClaimed).toBeLessThan(model);
+    expect(dispatch).toBeLessThan(model);
+    expect(puttingHelperSource.slice(unavailable, unavailable + 400)).toContain("status: 500");
+    // A refused dispatch never falls through to the model: it releases the
+    // claim (outage) or answers in progress (superseded).
+    expect(puttingHelperSource.slice(dispatch - 10, dispatch + 220)).toContain("return await dispatchRefused(");
   });
 
   it("requires usable video bytes before the model is called", () => {
-    expect(puttingAnchor("createSignedUrl(")).toBeLessThan(puttingAnchor("generateContent("));
-    expect(puttingAnchor("await fetchVideoBytes(")).toBeLessThan(puttingAnchor("generateContent("));
+    // ENT-1D: the owner-bound Storage load (lib/swing-video-source.ts).
+    expect(puttingAnchor("await loadOwnedSwingVideo(")).toBeLessThan(puttingAnchor("generateContent("));
     const noVideo = puttingAnchor("if (!inlineVideo) {");
     expect(noVideo).toBeLessThan(puttingAnchor("generateContent("));
     expect(puttingHelperSource.slice(noVideo, noVideo + 500)).toContain(
@@ -410,11 +420,15 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
     const assignedKeys = (payload.match(/^\s{8}([a-z_]+):/gm) ?? []).map((line) =>
       line.trim().replace(":", ""),
     );
+    // ENT-1D: processing_claim_proof is the holder's per-write claim proof,
+    // consumed by the database guard and never stored (20261027120000).
     expect(assignedKeys.slice().sort()).toEqual([
+      "processing_claim_proof",
       "putting_analysis",
       "putting_score",
       "status",
     ]);
+    expect(payload).toContain("processing_claim_proof: puttingClaimId,");
 
     for (const banned of [
       "putt_analytics",
@@ -483,16 +497,20 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
     // route's trusted writer, bound to this row and this owner. The Storage
     // read stays with the golfer's own session.
     expect(puttingHelperSource).not.toContain('await supabase\n    .from("swing_analysis")');
-    expect(puttingHelperSource).toContain("await supabase.storage");
-    for (const status of ["processing", "failed"]) {
-      const at = puttingHelperSource.indexOf(`.update({ status: "${status}" })`);
-      expect(at, `the ${status} write is missing`).toBeGreaterThan(-1);
-      const before = puttingHelperSource.slice(Math.max(0, at - 80), at);
-      expect(before, `the ${status} write must use the trusted writer`).toContain("trustedAnalysisTable()");
-      const after = puttingHelperSource.slice(at, at + 160);
-      expect(after).toContain('.eq("id", analysisId)');
-      expect(after).toContain('.eq("user_id", authenticatedUserId)');
-    }
+    // ENT-1D: the Storage read goes through the owner-bound loader, still on
+    // the golfer's own session client.
+    expect(puttingHelperSource).toContain("await loadOwnedSwingVideo(supabase, ");
+    // ENT-1D: the processing transition is the atomic claim in
+    // lib/analysis-execution-claim.ts (the server-only writer, bound to this
+    // row, owner and family); the completion write is fenced by the claim, and
+    // the failure write is the module's shared holder release (R1: it clears
+    // an undispatched lease), bound to this row, owner and claim.
+    expect(puttingHelperSource).toContain('family: "putting"');
+    expect(puttingHelperSource).toContain('.eq("processing_claim_id", puttingClaimId)');
+    expect(puttingHelperSource).not.toContain('.update({ status: "failed" })');
+    expect(puttingHelperSource).toContain(
+      "await releaseAnalysisClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId: puttingClaimId });",
+    );
   });
 
   it("persists only after structural and semantic validation succeed", () => {

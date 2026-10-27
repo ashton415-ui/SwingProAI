@@ -45,6 +45,8 @@ const repoRoot = path.join(__dirname, "..");
 const RESULT_PAGE = "app/(dashboard)/swings/[id]/page.tsx";
 const LEGACY_PAGE = "app/(dashboard)/analyze/[id]/page.tsx";
 const LEGACY_REPORT = "app/(dashboard)/analyze/[id]/AnalysisReport.tsx";
+// ENT-1D: the bucket, TTL and owner-bound key check live in the shared helper.
+const VIDEO_SOURCE = "lib/swing-video-source.ts";
 
 function readSource(relativePath: string): string {
   return readFileSync(path.join(repoRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
@@ -81,6 +83,7 @@ const SOURCES: Sources = {
   [RESULT_PAGE]: readSource(RESULT_PAGE),
   [LEGACY_PAGE]: readSource(LEGACY_PAGE),
   [LEGACY_REPORT]: readSource(LEGACY_REPORT),
+  [VIDEO_SOURCE]: readSource(VIDEO_SOURCE),
 };
 
 const pageSource = SOURCES[RESULT_PAGE];
@@ -111,13 +114,15 @@ const fullSwingRegion = (source: string = pageSource): string =>
 // ENT-1C: the owned-row read names its columns instead of `*`; the result
 // payload is read by the unified result-read authority, not this query.
 const VIDEO_SELECT =
-  '.select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")';
+  '.select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path)")';
 const OWNER_FILTER_ID = '.eq("id", params.id)';
 const OWNER_FILTER_USER = '.eq("user_id", user.id)';
 const OWNED_ROW_BOUNDARY = "if (!swing) notFound();";
-const BUCKET_CONSTANT = 'const VIDEO_BUCKET = "swing-videos";';
-const SIGN_CALL = ".createSignedUrl(videoRow.storage_path, 3600)";
-const SIGNED_PREFERENCE = "playbackUrl = signed?.signedUrl ?? null;";
+// ENT-1D: playback is the golfer's own canonical object only. video_url is
+// browser-written metadata and is never played back (lib/swing-video-source.ts).
+const BUCKET_CONSTANT = 'export const SWING_VIDEO_BUCKET = "swing-videos";';
+const HELPER_TTL = "expiresInSeconds = 3600,";
+const SIGN_CALL = "const playbackUrl = await signOwnedSwingVideoPlayback(supabase, videoRow?.storage_path, user.id);";
 const URL_FALLBACK = "playbackUrl = videoRow.video_url;";
 const REPLAY_GUARD = "{playbackUrl && (";
 const FAMILY_SPLIT = "{isPutt ? (";
@@ -146,7 +151,8 @@ describe("EQ5F-B canonical query", () => {
   it("adds no second analysis or video query", () => {
     expect(countOccurrences(pageCode, '.from("swing_analysis")')).toBe(1);
     expect(countOccurrences(pageCode, '.from("swing_videos")')).toBe(0);
-    expect(countOccurrences(pageCode, ".createSignedUrl(")).toBe(1);
+    expect(countOccurrences(pageCode, ".createSignedUrl(")).toBe(0);
+    expect(countOccurrences(pageCode, "signOwnedSwingVideoPlayback(")).toBe(1);
   });
 });
 
@@ -167,7 +173,7 @@ describe("EQ5F-B mints playback access only for an owned analysis", () => {
     const ownerId = pageCode.indexOf(OWNER_FILTER_ID);
     const ownerUser = pageCode.indexOf(OWNER_FILTER_USER);
     const boundary = pageCode.indexOf(OWNED_ROW_BOUNDARY);
-    const signing = pageCode.indexOf(".createSignedUrl(");
+    const signing = pageCode.indexOf("signOwnedSwingVideoPlayback(");
     expect(ownerId, "the id filter is missing").toBeGreaterThanOrEqual(0);
     expect(ownerUser, "the owner filter is missing").toBeGreaterThan(ownerId);
     expect(boundary, "the notFound boundary is missing").toBeGreaterThan(ownerUser);
@@ -189,24 +195,24 @@ describe("EQ5F-B mints playback access only for an owned analysis", () => {
 
 describe("EQ5F-B signing contract", () => {
   it("signs against the private swing-videos bucket", () => {
-    expect(pageSource).toContain(BUCKET_CONSTANT);
-    expect(pageCode).toContain(".from(VIDEO_BUCKET)");
+    expect(SOURCES[VIDEO_SOURCE]).toContain(BUCKET_CONSTANT);
+    expect(SOURCES[VIDEO_SOURCE]).toContain(".from(SWING_VIDEO_BUCKET).createSignedUrl(key, expiresInSeconds)");
   });
 
-  it("signs the storage path with a one-hour TTL", () => {
+  it("signs the owner-bound storage key with a one-hour TTL", () => {
     expect(pageSource).toContain(SIGN_CALL);
+    expect(SOURCES[VIDEO_SOURCE]).toContain(HELPER_TTL);
   });
 
-  it("prefers the signed URL and keeps video_url strictly beneath it", () => {
-    const signed = pageCode.indexOf(SIGNED_PREFERENCE);
-    const fallback = pageCode.indexOf(URL_FALLBACK);
-    expect(signed, "the signed-URL assignment is missing").toBeGreaterThanOrEqual(0);
-    expect(fallback, "the compatibility fallback is missing").toBeGreaterThan(signed);
-    expect(pageCode).toContain("if (playbackUrl === null &&");
+  it("never plays back browser-written video_url (ENT-1D)", () => {
+    expect(pageCode).not.toContain("video_url");
+    expect(pageCode).not.toContain(URL_FALLBACK);
   });
 
   it("resolves to null rather than throwing when nothing can be played", () => {
-    expect(pageCode).toContain("let playbackUrl: string | null = null;");
+    // The helper returns null for a non-canonical key, a signing failure or an
+    // unexpected URL (lib/swing-video-source.test.ts proves each).
+    expect(pageCode).toContain(SIGN_CALL);
     expect(pageCode).not.toContain("throw new Error");
   });
 
@@ -354,16 +360,16 @@ describe("EQ5F-B leaves the legacy route intact", () => {
 
   it("still redirects before it signs anything", () => {
     const guard = legacyCode.indexOf('if (row.analysis_family === "putting")');
-    const signing = legacyCode.indexOf("createSignedUrl");
+    const signing = legacyCode.indexOf("await signOwnedSwingVideoPlayback(");
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(signing, "the legacy redirect must precede legacy signing").toBeGreaterThan(guard);
   });
 
-  it("keeps the legacy bucket, TTL, precedence and fallback", () => {
-    expect(legacy).toContain('const BUCKET = "swing-videos";');
-    expect(legacy).toContain(".createSignedUrl(videoRow.storage_path, 3600)");
-    expect(legacy).toContain("videoSignedUrl = signed?.signedUrl ?? null;");
-    expect(legacy).toContain("if (!videoSignedUrl && videoRow?.video_url) {");
+  it("signs only the owner-bound key, with no video_url fallback (ENT-1D)", () => {
+    expect(legacy).toContain("const videoSignedUrl = await signOwnedSwingVideoPlayback(supabase, videoRow?.storage_path, user.id);");
+    expect(legacyCode).not.toContain("videoRow.video_url");
+    expect(legacyCode).not.toContain("videoRow?.video_url");
+    expect(legacyCode).not.toContain(".createSignedUrl(");
   });
 
   it("keeps the legacy player and its inline playback", () => {
@@ -398,22 +404,21 @@ const GUARDS: readonly Guard[] = [
     holds: (s) => {
       const code = stripComments(s[RESULT_PAGE]);
       const boundary = code.indexOf(OWNED_ROW_BOUNDARY);
-      const signing = code.indexOf(".createSignedUrl(");
+      const signing = code.indexOf("signOwnedSwingVideoPlayback(");
       return boundary >= 0 && signing > boundary;
     },
   },
   {
-    id: "the signed URL outranks the video_url fallback",
+    id: "video_url is never played back",
     holds: (s) => {
       const code = stripComments(s[RESULT_PAGE]);
-      const signed = code.indexOf(SIGNED_PREFERENCE);
-      const fallback = code.indexOf(URL_FALLBACK);
-      return signed >= 0 && fallback > signed;
+      return code.includes(SIGN_CALL) && !code.includes("video_url");
     },
   },
   {
     id: "the TTL is exactly one hour against the private bucket",
-    holds: (s) => s[RESULT_PAGE].includes(SIGN_CALL) && s[RESULT_PAGE].includes(BUCKET_CONSTANT),
+    holds: (s) =>
+      s[RESULT_PAGE].includes(SIGN_CALL) && s[VIDEO_SOURCE].includes(BUCKET_CONSTANT) && s[VIDEO_SOURCE].includes(HELPER_TTL),
   },
   {
     id: "exactly one video element exists",
@@ -466,7 +471,7 @@ const GUARDS: readonly Guard[] = [
     holds: (s) => {
       const code = stripComments(s[LEGACY_PAGE]);
       const guard = code.indexOf('if (row.analysis_family === "putting")');
-      const signing = code.indexOf("createSignedUrl");
+      const signing = code.indexOf("await signOwnedSwingVideoPlayback(");
       return guard >= 0 && signing > guard;
     },
   },
@@ -494,7 +499,7 @@ const REGRESSIONS: readonly Regression[] = [
         s,
         RESULT_PAGE,
         s[RESULT_PAGE].replace(
-          ", storage_path, video_url)\")",
+          ", storage_path)\")",
           ')")',
         ),
       ),
@@ -508,28 +513,24 @@ const REGRESSIONS: readonly Regression[] = [
       return withFile(
         s,
         RESULT_PAGE,
-        `${page.slice(0, boundary)}const early = await supabase.storage.from(VIDEO_BUCKET).createSignedUrl("x", 3600);\n  ${page.slice(boundary)}`,
+        `${page.slice(0, boundary)}const early = await signOwnedSwingVideoPlayback(supabase, "x", user.id);\n  ${page.slice(boundary)}`,
       );
     },
     breaks: ["signing follows the owned-row boundary"],
   },
   {
-    name: "video_url is promoted above the signed URL",
-    apply: (s) => {
-      const page = s[RESULT_PAGE];
-      const withoutFallback = page.replace(URL_FALLBACK, "");
-      return withFile(
+    name: "a video_url fallback is reintroduced",
+    apply: (s) =>
+      withFile(
         s,
         RESULT_PAGE,
-        withoutFallback.replace(SIGNED_PREFERENCE, `${URL_FALLBACK}\n    ${SIGNED_PREFERENCE}`),
-      );
-    },
-    breaks: ["the signed URL outranks the video_url fallback"],
+        s[RESULT_PAGE].replace(SIGN_CALL, `${SIGN_CALL}\n  const fallback = playbackUrl ?? (videoRow as { video_url?: string })?.video_url;`),
+      ),
+    breaks: ["video_url is never played back"],
   },
   {
     name: "the TTL is widened",
-    apply: (s) =>
-      withFile(s, RESULT_PAGE, s[RESULT_PAGE].replace(SIGN_CALL, ".createSignedUrl(videoRow.storage_path, 86400)")),
+    apply: (s) => withFile(s, VIDEO_SOURCE, s[VIDEO_SOURCE].replace(HELPER_TTL, "expiresInSeconds = 86400,")),
     breaks: ["the TTL is exactly one hour against the private bucket"],
   },
   {

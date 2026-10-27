@@ -403,8 +403,11 @@ const GUARDS: Guard[] = [
       if (start < 0 || end < 0) return false;
       const payload = helper.slice(start, end);
       const keys = (payload.match(/^\s{8}([a-z_]+):/gm) ?? []).map((l) => l.trim().replace(":", ""));
+      // ENT-1D adds the holder's claim proof, consumed by the database guard
+      // and never stored; the three success fields are otherwise unchanged.
       return (
-        keys.length === 3 &&
+        keys.length === 4 &&
+        keys.includes("processing_claim_proof") &&
         keys.includes("status") &&
         keys.includes("putting_analysis") &&
         keys.includes("putting_score")
@@ -880,7 +883,12 @@ const REGRESSIONS: Regression[] = [
     name: "the completion write drops the owner filter",
     apply: (s) => ({
       ...s,
-      route: s.route.replace('      .eq("user_id", authenticatedUserId)\n', ""),
+      // ENT-1D: targeted at the completion write itself, now that the fenced
+      // failure write earlier in the helper carries the same owner filter.
+      route: s.route.replace(
+        '      .eq("user_id", authenticatedUserId)\n      .eq("analysis_family", "putting")',
+        '      .eq("analysis_family", "putting")',
+      ),
     }),
     breaks: ["12. the completion write is bounded by row, owner, family and absent score"],
   },

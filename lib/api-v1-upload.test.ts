@@ -591,10 +591,17 @@ describe("frozen read-only dependencies", () => {
     // replaced by a request to POST /api/v1/analyses.
     // PRICING-1 checkout hold: presentation-only upsell copy correction; the
     // secured POST /api/v1/analyses request authority is unchanged.
-    ["app/(dashboard)/analyze/page.tsx", "f77ed679b2a5c0a3a95e31772c1423ddba30ef93ab57522870674b208af1be6c"],
+    // ENT-1D: a structured 409 for an analysis already running hands over to its report page.
+    // ENT-1D video sources: the upload file name is made canonical before the Storage upload.
+    // ENT-1D local acceptance: keyboard-reachable file inputs (sr-only) and a 44px upsell link.
+    // ENT-1D D1 and golfer experience: video file checks, recovery copy, honest plan/upgrade copy, Enter opens the chooser.
+    ["app/(dashboard)/analyze/page.tsx", "7933cd7b743558d7125242bb0bdf6f7d808c2ad4c948281e41aac3eb6110211b"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
-    ["app/(dashboard)/analyze/upload-actions.ts", "d8c3d8d912b57b298a327367a31e1896bf830c7759d6d7b2a716afae46e9e341"],
-    ["app/api/v1/upload/route.ts", "9a93cd1321312efcabe55562b29a1bb8d9eae2874ce74f874788b22eacfd086d"],
+    // ENT-1D video sources: video_url records the canonical key, never a public URL.
+    // ENT-1D video sources: canonical file name before upload (video_url already records the key).
+    ["app/(dashboard)/analyze/upload-actions.ts", "17a4c4354354952679e34abef475350999c2a80fed1c563a5b91a5be587c1c88"],
+    // ENT-1D video sources: the upload file name is made canonical before the Storage upload.
+    ["app/api/v1/upload/route.ts", "b2e1654ff51804fa64a8a68c153ba7ffd6eea7be557df3cb148047faa509c6d9"],
     ["app/api/v1/upload/complete/route.ts", "2687b38784a7fafcb693aca59cc20c6739890bc99503ecc267eae777c0c4cd4f"],
     ["package.json", "d9ed26be27ac949eedd8ef57c854d4204cec1b7b698605a91bef596205b8a705"],
     ["package-lock.json", "3010c0d60e3bf6aca7c40d92f17a2b4a09b773efa2c68ba2b0c7d40370d2f0ea"],

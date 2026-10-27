@@ -2,17 +2,16 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { authorizeOwnedAnalysisRow } from "@/lib/analysis-result-read-authority";
+import { classifyFailedAnalysisVideo, signOwnedSwingVideoPlayback } from "@/lib/swing-video-source";
 import AnalysisReport, { type AnalysisData } from "./AnalysisReport";
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
-const BUCKET = "swing-videos";
 
 interface SwingVideoRow {
   id: string;
-  video_url: string;
   storage_path: string | null;
   original_filename: string | null;
   club: string | null;
@@ -32,13 +31,17 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
 
   // Fetch analysis + joined video. ENT-1C: this session read proves ownership
   // and carries identity and core columns only; the result payload is read and
-  // serialized by the unified result-read authority below.
+  // serialized by the unified result-read authority below. It must carry every
+  // owner column (ANALYSIS_OWNER_COLUMNS): the authority takes score, feedback
+  // and the measurements from this row, so a column left out here renders as
+  // missing (a completed swing showed a score of 0 with no assessment).
   const { data: row, error } = await supabase
     .from("swing_analysis")
     .select(`
-      id, user_id, status, analysis_family, equipment_snapshot,
+      id, swing_video_id, user_id, club_id, status, analysis_family, equipment_snapshot, analysis_mode, created_at,
+      score, feedback, tempo_ratio, swing_speed_mph, spine_angle, hip_rotation, shoulder_rotation,
       swing_video:swing_videos (
-        id, video_url, storage_path, original_filename, club, created_at
+        id, storage_path, original_filename, club, created_at
       )
     `)
     .eq("id", id)
@@ -69,17 +72,10 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
   const video = (row.swing_video as unknown as SwingVideoRow | SwingVideoRow[] | null);
   const videoRow: SwingVideoRow | null = Array.isArray(video) ? (video[0] ?? null) : video;
 
-  // Generate a 1-hour signed URL for in-browser video playback
-  let videoSignedUrl: string | null = null;
-  if (videoRow?.storage_path) {
-    const { data: signed } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrl(videoRow.storage_path, 3600);
-    videoSignedUrl = signed?.signedUrl ?? null;
-  }
-  if (!videoSignedUrl && videoRow?.video_url) {
-    videoSignedUrl = videoRow.video_url;
-  }
+  // A 1-hour signed URL for in-browser playback of the golfer's own canonical
+  // Storage object, or none. Browser-written video_url is never played back:
+  // it is not a source (lib/swing-video-source.ts).
+  const videoSignedUrl = await signOwnedSwingVideoPlayback(supabase, videoRow?.storage_path, user.id);
 
   // AnalysisData is a Client Component prop, so it is serialized to the browser
   // in full. Every result field below comes from the authorized view.
@@ -100,6 +96,15 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
     swing_video: videoRow,
   };
 
+  // ENT-1D. A failed analysis whose stored video cannot be analysed is shown
+  // the upload-again guidance at once, rather than a Retry that would only be
+  // refused again. Decided from the object itself (no stored reason, no
+  // provider call); a failure that may be temporary keeps its Retry.
+  const failedReason =
+    view.status === "failed"
+      ? await classifyFailedAnalysisVideo(supabase, videoRow?.storage_path, user.id)
+      : null;
+
   const formattedDate = videoRow?.created_at
     ? new Date(videoRow.created_at).toLocaleDateString("en-US", {
         month: "short", day: "numeric", year: "numeric",
@@ -119,7 +124,7 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
       <div className="flex items-start gap-4 mb-8">
         <Link
           href="/swings"
-          className="mt-0.5 p-1.5 rounded-lg text-gray-600 hover:text-white hover:bg-white/5 transition-colors shrink-0"
+          className="-mt-2 -ml-2 min-w-11 min-h-11 flex items-center justify-center rounded-lg text-gray-600 hover:text-white hover:bg-white/5 transition-colors shrink-0"
           aria-label="Back to telemetry logs"
         >
           <ChevronLeft className="w-4 h-4" />
@@ -136,6 +141,7 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
         analysis={analysis}
         videoSignedUrl={videoSignedUrl}
         clubDisplayName={clubDisplayName}
+        failedReason={failedReason}
       />
     </div>
   );

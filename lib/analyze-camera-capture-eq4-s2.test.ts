@@ -260,7 +260,8 @@ describe("EQ4-S2 Analyze — camera surface source contract", () => {
   });
 
   it("keeps existing file import available", () => {
-    expect(analyzeSource).toContain('<input type="file" accept="video/*" className="hidden"');
+    // sr-only (not hidden) since ENT-1D local acceptance: keyboard-reachable import.
+    expect(analyzeSource).toContain('<input type="file" accept="video/*" className="sr-only"');
     expect(analyzeSource).toContain("Import Swing Video");
     expect(analyzeSource).toContain("Import Putting Stroke Video");
     expect(cameraSurfaceSource()).toContain("Choose Video Instead");
@@ -500,7 +501,7 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
     );
     expect(branchIdx, "expected the locked-Putter action branch").toBeGreaterThanOrEqual(0);
     const branch = analyzeSource.slice(branchIdx, analyzeSource.indexOf(") : (", branchIdx));
-    expect(branch).toContain("UPGRADE TO UNLOCK PUTTING");
+    expect(branch).toContain("PUTTING NOT IN YOUR PLAN");
     expect(branch).toContain("disabled");
     expect(branch).not.toContain("onClick");
   });

@@ -121,6 +121,20 @@ export type PuttingRecommendationResultV1 =
 const SOURCE_ANALYSIS_COLUMNS = "id, user_id, status, analysis_family, putting_analysis";
 
 /**
+ * ENT-1D. The ownership columns alone, for a caller that supplies a
+ * server-side envelope reader: putting_analysis is a server-only column once
+ * the result-privilege migration is applied, so the session never reads it.
+ */
+const SOURCE_OWNERSHIP_COLUMNS = "id, user_id, status, analysis_family";
+
+/**
+ * Reads the stored envelope of an analysis the caller has already been proved
+ * to own, through a server-only boundary bounded by that id and owner. Returns
+ * `undefined` when the read cannot be completed.
+ */
+type PuttingEnvelopeReader = (analysisId: string, userId: string) => Promise<unknown>;
+
+/**
  * The only columns the authority needs from the canonical catalog.
  *
  * The verification-prompt column is deliberately absent. Putting verification
@@ -197,6 +211,11 @@ export async function resolvePuttingDrillRecommendations(
     readonly userId: string;
     readonly tier: SubscriptionTier;
     readonly sourceAnalysisId: string;
+    /**
+     * ENT-1D. When supplied, the session read proves ownership only and the
+     * envelope comes from this server-side reader, after that proof.
+     */
+    readonly readEnvelope?: PuttingEnvelopeReader;
   },
 ): Promise<PuttingRecommendationResultV1> {
   if (!canUsePuttingRecommendations(params.tier)) return LOCKED;
@@ -206,7 +225,7 @@ export async function resolvePuttingDrillRecommendations(
     sourceOutcome = asOutcome(
       await client
         .from("swing_analysis")
-        .select(SOURCE_ANALYSIS_COLUMNS)
+        .select(params.readEnvelope ? SOURCE_OWNERSHIP_COLUMNS : SOURCE_ANALYSIS_COLUMNS)
         .eq("id", params.sourceAnalysisId)
         .eq("user_id", params.userId)
         .single(),
@@ -227,7 +246,17 @@ export async function resolvePuttingDrillRecommendations(
   if (row.analysis_family !== PUTTING_FAMILY) return UNAVAILABLE;
   if (row.status !== COMPLETED_STATUS) return UNAVAILABLE;
 
-  const persisted = row.putting_analysis;
+  // Ownership, family and completion are proved above, on the caller's own
+  // session; only then is the envelope read, by the server when a reader is
+  // supplied.
+  let persisted: unknown = row.putting_analysis;
+  if (params.readEnvelope) {
+    try {
+      persisted = await params.readEnvelope(row.id, row.user_id);
+    } catch {
+      return UNAVAILABLE;
+    }
+  }
   if (!isPersistedPuttingAnalysisV1(persisted)) return UNAVAILABLE;
 
   // Provenance comes from the row the authority actually proved, not from the
