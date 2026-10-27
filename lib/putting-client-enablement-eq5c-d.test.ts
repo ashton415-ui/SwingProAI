@@ -367,7 +367,7 @@ const GUARDS: Guard[] = [
         gate > tier &&
         run > gate &&
         code.includes(
-          "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
+          "Putting analysis isn't included with your current plan.",
         )
       );
     },
@@ -431,12 +431,12 @@ describe("EQ5C-D — frozen client copy", () => {
 
   it("uses the locked-plan refusal, worded exactly as the server 403", () => {
     expect(analyze).toContain(
-      "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
+      "Putting analysis isn't included with your current plan.",
     );
   });
 
   it("labels the locked and executable actions", () => {
-    expect(analyze).toContain("UPGRADE TO UNLOCK PUTTING");
+    expect(analyze).toContain("PUTTING NOT IN YOUR PLAN");
     expect(analyze).toContain("RUN PUTTING ANALYSIS");
     expect(analyze).toContain("RUN ANALYZER");
   });
@@ -659,7 +659,7 @@ const REGRESSIONS: Regression[] = [
     apply: (s) => ({
       ...s,
       api: s.api.replace(
-        '    if (!canUsePuttingAnalysis(currentTier)) {\n      return NextResponse.json(\n        {\n          error:\n            "Putting analysis isn\'t included with your current plan. Upgrade to unlock putting analysis.",\n        },\n        { status: 403 },\n      );\n    }\n',
+        '    if (!canUsePuttingAnalysis(currentTier)) {\n      return NextResponse.json(\n        {\n          error:\n            "Putting analysis isn\'t included with your current plan.",\n        },\n        { status: 403 },\n      );\n    }\n',
         "",
       ),
     }),

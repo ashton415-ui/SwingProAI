@@ -194,6 +194,53 @@ export const PRICING1_HARDEN_PUBLIC_USERS_PRIVILEGES_FILENAME =
   "20261009202013_pricing1_harden_public_users_privileges.sql";
 
 /**
+ * ENT-1D (1 of 4): the analysis execution lease. Four nullable columns on
+ * public.swing_analysis (processing_claim_id, processing_started_at,
+ * processing_heartbeat_at, provider_dispatched_at), a coherence CHECK, and a
+ * backfill marking already-processing rows as dispatched (never re-run
+ * automatically). Additive; no privilege, policy, trigger or function.
+ */
+export const ENT1D_ANALYSIS_EXECUTION_LEASE_FILENAME =
+  "20261026120000_ent1d_analysis_execution_lease.sql";
+
+/**
+ * ENT-1D (1b of 4): the execution claim proof column. A nullable uuid on
+ * public.swing_analysis that the claim holder sets on each write, a BEFORE
+ * trigger that consumes it (never stored) and a CHECK that it is null at rest.
+ * Inert: enforces nothing. Applied before the application that writes it.
+ */
+export const ENT1D_CLAIM_PROOF_COLUMN_FILENAME =
+  "20261026120050_ent1d_claim_proof_column.sql";
+
+/**
+ * ENT-1D (2 of 4): analysis result privileges. Browser roles lose every
+ * privilege on public.swing_analysis except authenticated SELECT on the
+ * identity and core-summary columns; PUBLIC and anon lose every privilege on
+ * public.swing_videos and authenticated keeps SELECT and INSERT there.
+ * service_role, policies, columns and rows are untouched. Applied only after
+ * the ENT-1C/ENT-1D application is deployed.
+ */
+export const ENT1D_ANALYSIS_RESULT_PRIVILEGES_FILENAME =
+  "20261026120100_ent1d_analysis_result_privileges.sql";
+
+/**
+ * ENT-1D (3 of 4): the execution claim guard (R1b, option C). Replaces the
+ * consuming guard body with the enforcing claim contract: status-only claims
+ * and unproved writes to a claimed row are refused. Applied only after the
+ * proof-writing application is deployed and older instances are drained.
+ */
+export const ENT1D_EXECUTION_CLAIM_GUARD_FILENAME =
+  "20261027120000_ent1d_execution_claim_guard.sql";
+
+/**
+ * ENT-1D (4 of 4): the swing video source guard. New or changed swing_videos
+ * rows must name a canonical key in the owner's folder and record video_url
+ * equal to it. Historical rows are unchanged; no data is rewritten.
+ */
+export const ENT1D_SWING_VIDEO_SOURCE_GUARD_FILENAME =
+  "20261027120100_ent1d_swing_video_source_guard.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -224,6 +271,11 @@ export const APPROVED_MIGRATIONS: string[] = [
   PI0_PRACTICE_INTELLIGENCE_FOUNDATION_FILENAME,
   PRICING1_BILLING_CHECKOUT_GUARD_FILENAME,
   PRICING1_HARDEN_PUBLIC_USERS_PRIVILEGES_FILENAME,
+  ENT1D_ANALYSIS_EXECUTION_LEASE_FILENAME,
+  ENT1D_CLAIM_PROOF_COLUMN_FILENAME,
+  ENT1D_ANALYSIS_RESULT_PRIVILEGES_FILENAME,
+  ENT1D_EXECUTION_CLAIM_GUARD_FILENAME,
+  ENT1D_SWING_VIDEO_SOURCE_GUARD_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

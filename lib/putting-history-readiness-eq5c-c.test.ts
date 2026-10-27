@@ -468,7 +468,8 @@ const LEGACY_DETAIL_GUARDS: Guard[] = [
     holds: (s) => {
       const code = detailHandler(s.detail);
       const guard = code.indexOf('if (row.analysis_family === "putting")');
-      const signed = code.indexOf("createSignedUrl");
+      // ENT-1D: playback is signed through the owner-bound helper.
+      const signed = code.indexOf("signOwnedSwingVideoPlayback");
       return guard >= 0 && signed > guard;
     },
   },

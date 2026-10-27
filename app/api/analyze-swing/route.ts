@@ -10,11 +10,14 @@
  *      via the optional `mediapipeMetrics` field in the request body, which the
  *      AnalysisReport client component should pre-compute and include.
  * 3. Merge server-side (null) and client-side metrics — client values win.
- * 4. Fetch the raw video bytes (up to MAX_INLINE_VIDEO_BYTES = 20 MB).
- *    Anything larger is skipped; Gemini still works from metadata + numbers.
+ * 4. Fetch the raw video bytes (up to MAX_ANALYSIS_VIDEO_BYTES = 14 MB).
+ *    ENT-1D: a video that cannot be loaded — missing, empty, oversized,
+ *    unrecognised, or not fetchable right now — ends the request before the
+ *    model is called. Client metrics never stand in for the video, and
+ *    nothing is scored or stored (videoLoadRefused).
  * 5. Call Gemini 1.5 Pro with:
  *    a) A world-class PGA coach system instruction with embedded diagnostic rules
- *    b) Inline video base64 (when within size budget)
+ *    b) Inline video base64
  *    c) Raw biomechanical numbers with plain-English clinical interpretations
  *    d) JSON-only response format
  * 6. Parse the JSON response, validate required fields, log any failures.
@@ -22,7 +25,12 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import {
+  GoogleGenerativeAI,
+  GoogleGenerativeAIFetchError,
+  SchemaType,
+  type Schema,
+} from "@google/generative-ai";
 import { createClient } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { extractSwingMetrics } from "@/lib/biometrics";
@@ -30,9 +38,26 @@ import { computePuttingScoreFromAnalysisV1 } from "@/lib/putting-score-from-anal
 import { classifyAnalysisFamilyRoute } from "@/lib/analysis-family-router";
 import { canUsePuttingAnalysis, type SubscriptionTier } from "@/lib/entitlements";
 import {
+  NO_PREMIUM_ACCESS,
   resolveAnalysisAccess,
   type AnalysisAccess,
 } from "@/lib/analysis-entitlement-authority";
+import {
+  claimAnalysisExecution,
+  markClaimOutcomeUnknown,
+  markProviderDispatched,
+  readExecutionState,
+  releaseAnalysisClaimAsFailed,
+  releaseUndispatchedClaimAsFailed,
+  type ExecutionFamily,
+} from "@/lib/analysis-execution-claim";
+import {
+  loadOwnedSwingVideo,
+  MAX_ANALYSIS_VIDEO_BYTES,
+  UNUSABLE_VIDEO_LOADS,
+  VIDEO_UNUSABLE_COPY,
+  VIDEO_UNUSABLE_STATUS,
+} from "@/lib/swing-video-source";
 import {
   ANALYSIS_OWNER_COLUMNS,
   readOwnedAnalysisPayloads,
@@ -55,10 +80,6 @@ export const maxDuration = 300;
 function resolveGeminiKey(): string | undefined {
   return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY;
 }
-
-// Inline video budget sent to Gemini. Videos larger than this are analysed
-// from metadata + MediaPipe numbers only — still high quality.
-const MAX_INLINE_VIDEO_BYTES = 20 * 1_048_576; // 20 MB
 
 // ── Request body ──────────────────────────────────────────────────────────────
 
@@ -102,54 +123,11 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-/** Fetch up to `limitBytes` from `url`. Returns null on network error or if the
- *  response is larger than the limit. */
-async function fetchVideoBytes(
-  url: string,
-  limitBytes: number,
-): Promise<{ buffer: ArrayBuffer; mimeType: string } | null> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
-
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    if (!res.ok) {
-      console.warn("[analyze-swing] video fetch failed:", res.status);
-      return null;
-    }
-
-    const contentLength = Number(res.headers.get("content-length") ?? "0");
-    if (contentLength > limitBytes) {
-      console.warn(
-        `[analyze-swing] video too large for inline (${(contentLength / 1_048_576).toFixed(1)} MB > ${limitBytes / 1_048_576} MB limit) — proceeding without video`,
-      );
-      return null;
-    }
-
-    const rawMime = res.headers.get("content-type") ?? "";
-    const mimeType = rawMime.includes("quicktime") ? "video/quicktime"
-                   : rawMime.includes("mp4")        ? "video/mp4"
-                   : "video/mp4";
-
-    const arrayBuf = await res.arrayBuffer();
-    if (arrayBuf.byteLength > limitBytes) {
-      console.warn("[analyze-swing] video exceeded inline limit after full download — skipping");
-      return null;
-    }
-
-    return { buffer: arrayBuf, mimeType };
-  } catch {
-    console.warn("[analyze-swing] video fetch error");
-    return null;
-  }
-}
-
 // ── Biomechanical interpretation rules ────────────────────────────────────────
-// Each rule maps a measured value to a plain-English clinical finding.
-// These are injected verbatim into the Gemini prompt so the model can
-// reference them when writing personalised coaching sentences.
+// Each rule maps a client-reported estimate to a plain-English reading of what
+// that value would indicate. ENT-1D: the values are computed on the golfer's
+// device and sent with the request, so the server cannot verify them; every
+// reading is framed as "if the estimate holds", never as a confirmed finding.
 
 function buildMetricsContext(metrics: {
   spineAngle?:       number | null;
@@ -159,7 +137,9 @@ function buildMetricsContext(metrics: {
   setupSpineAngle?:  number | null;
   impactSpineAngle?: number | null;
 }): string {
-  const lines: string[] = ["=== RAW BIOMECHANICAL MEASUREMENTS ==="];
+  const lines: string[] = [
+    "=== CLIENT-REPORTED ESTIMATES: what each value would indicate (not independently verified) ===",
+  ];
 
   // Spine angle at address
   if (metrics.spineAngle != null) {
@@ -172,18 +152,18 @@ function buildMetricsContext(metrics: {
     else              dx = "⚠ Excessive spine tilt (>50°). High risk of reverse pivot.";
     lines.push(`Spine Angle (address): ${s}° — ${dx}`);
   } else {
-    lines.push("Spine Angle: not measured — estimate from visual posture cues.");
+    lines.push("Spine Angle: not supplied — estimate from visual posture cues.");
   }
 
   // Early extension diagnosis (setup vs impact spine angle change)
   if (metrics.setupSpineAngle != null && metrics.impactSpineAngle != null) {
     const drop = metrics.setupSpineAngle - metrics.impactSpineAngle;
     if (drop > 5) {
-      lines.push(`Early Extension DETECTED: spine angle dropped ${drop.toFixed(1)}° from setup (${metrics.setupSpineAngle}°) to impact (${metrics.impactSpineAngle}°). Hips thrusting toward ball — causes blocks, pulls, and thin strikes. Must address immediately.`);
+      lines.push(`Early extension indicated by the estimates: spine angle drops ${drop.toFixed(1)}° from setup (${metrics.setupSpineAngle}°) to impact (${metrics.impactSpineAngle}°). If the video confirms it, hips are thrusting toward the ball — causes blocks, pulls, and thin strikes.`);
     } else if (drop < -5) {
-      lines.push(`Standing-Up DETECTED: spine angle increased ${Math.abs(drop).toFixed(1)}° at impact — losing posture through the ball. Causes topped shots and inconsistent contact.`);
+      lines.push(`Standing up indicated by the estimates: spine angle increases ${Math.abs(drop).toFixed(1)}° at impact. If the video confirms it, posture is lost through the ball — causes topped shots and inconsistent contact.`);
     } else {
-      lines.push(`Spine angle maintenance: stable within ${Math.abs(drop).toFixed(1)}° from address to impact. Good postural retention.`);
+      lines.push(`Spine angle maintenance: the estimates show it stable within ${Math.abs(drop).toFixed(1)}° from address to impact.`);
     }
   }
 
@@ -198,7 +178,7 @@ function buildMetricsContext(metrics: {
     else              dx = "⚠ Over-rotation risk (>105°). May introduce loop or loss of control.";
     lines.push(`Shoulder Rotation (top of swing): ${r}° — ${dx}`);
   } else {
-    lines.push("Shoulder Rotation: not measured — estimate from visual backswing extent.");
+    lines.push("Shoulder Rotation: not supplied — estimate from visual backswing extent.");
   }
 
   // Hip rotation at impact
@@ -212,7 +192,7 @@ function buildMetricsContext(metrics: {
     else              dx = "⚠ Possibly excessive hip rotation (>60°). Watch for early extension compensation.";
     lines.push(`Hip Rotation (impact): ${h}° — ${dx}`);
   } else {
-    lines.push("Hip Rotation: not measured — estimate from visual hip position at impact.");
+    lines.push("Hip Rotation: not supplied — estimate from visual hip position at impact.");
   }
 
   // X-Factor (shoulder turn relative to hip turn — power differential)
@@ -238,7 +218,7 @@ function buildMetricsContext(metrics: {
     }
     lines.push(`Tempo Ratio (backswing:downswing): ${t}${dx ? " — " + dx : ""}`);
   } else {
-    lines.push("Tempo Ratio: not measured — assess from visual rhythm of the swing.");
+    lines.push("Tempo Ratio: not supplied — assess from visual rhythm of the swing.");
   }
 
   return lines.join("\n");
@@ -272,28 +252,28 @@ const RESPONSE_SCHEMA = {
     },
     executive_summary: {
       type: SchemaType.STRING,
-      description: "3-5 authoritative coaching sentences citing exact measurements, faults, and ball-flight patterns",
+      description: "3-5 authoritative coaching sentences citing the estimates (named as estimates), visual observations, faults, and ball-flight patterns",
     },
     fault_tags: {
       type: SchemaType.ARRAY,
       items: { type: SchemaType.STRING },
       description: "2-4 snake_case fault identifiers, e.g. early_extension, restricted_backswing",
     },
-    spine_angle:       { type: SchemaType.NUMBER, description: "Echo exact measured value — do not re-estimate" },
-    hip_rotation:      { type: SchemaType.NUMBER, description: "Echo exact measured value — do not re-estimate" },
-    shoulder_rotation: { type: SchemaType.NUMBER, description: "Echo exact measured value — do not re-estimate" },
-    tempo_ratio:       { type: SchemaType.STRING, description: "e.g. '3.0:1' — echo measured value or estimate from video" },
+    spine_angle:       { type: SchemaType.NUMBER, description: "The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
+    hip_rotation:      { type: SchemaType.NUMBER, description: "The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
+    shoulder_rotation: { type: SchemaType.NUMBER, description: "The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
+    tempo_ratio:       { type: SchemaType.STRING, description: "e.g. '3.0:1'. The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
     highlights: {
       type: SchemaType.ARRAY,
       items: {
         type: SchemaType.OBJECT,
         properties: {
           title:       { type: SchemaType.STRING, description: "3-6 word headline for this strength" },
-          description: { type: SchemaType.STRING, description: "2-3 sentences citing measured data" },
+          description: { type: SchemaType.STRING, description: "2-3 sentences citing an estimate (named as an estimate) or a visual observation" },
         },
         required: ["title", "description"],
       },
-      description: "2-4 genuine strengths — each must cite a measured value or specific visual observation",
+      description: "2-4 genuine strengths — each must cite a supplied estimate or a specific visual observation",
     },
     deficiencies: {
       type: SchemaType.ARRAY,
@@ -301,11 +281,11 @@ const RESPONSE_SCHEMA = {
         type: SchemaType.OBJECT,
         properties: {
           title:       { type: SchemaType.STRING, description: "3-6 word headline naming the fault" },
-          description: { type: SchemaType.STRING, description: "3-4 sentences: measurement → fault → ball-flight → root cause" },
+          description: { type: SchemaType.STRING, description: "3-4 sentences: estimate or visual observation (with its source) → fault → ball-flight → root cause" },
         },
         required: ["title", "description"],
       },
-      description: "2-4 faults — each must follow: measurement → fault → ball-flight → root cause",
+      description: "2-4 faults — each must follow: estimate or visual observation (with its source) → fault → ball-flight → root cause",
     },
     drills: {
       type: SchemaType.ARRAY,
@@ -319,7 +299,7 @@ const RESPONSE_SCHEMA = {
         },
         required: ["name", "the_why", "the_how", "the_feel"],
       },
-      description: "One drill per deficiency — tailored to this golfer's exact measurements",
+      description: "One drill per deficiency — tailored to this golfer's estimates and what the video shows",
     },
     posture:     pillarSchema,
     swing_plane: pillarSchema,
@@ -361,28 +341,30 @@ YOUR CORE MANDATE
 ────────────────
 Every sentence of your output MUST be directly derivable from the GOLFER-SPECIFIC DATA block
 printed in the user prompt. Never substitute a template, a generic example, or a previous
-player's data. If you cannot trace a claim to a specific measured number or a visual
+player's data. If you cannot trace a claim to a supplied estimate or a visual
 observation from the video, do not write it.
 
-DIAGNOSTIC RULES (apply mechanically — no template substitution)
+DIAGNOSTIC RULES (apply only where the video supports the value — no template substitution)
 ────────────────────────────────────────────────────────────────
-• EARLY EXTENSION: spine_angle_setup − spine_angle_impact > 5° → diagnose confirmed early
-  extension. Cite the exact degree drop. Name the resulting ball flight pattern.
+• EARLY EXTENSION: spine_angle_setup − spine_angle_impact > 5° → indicates early
+  extension. Cite the estimated drop and whether the video supports it. Name the resulting
+  ball flight pattern.
 • RESTRICTED BACKSWING: shoulder_rotation < 80° → identify the specific restricting structure
-  (thoracic rotation, lead arm tension, grip pressure). State the exact measured value.
+  (thoracic rotation, lead arm tension, grip pressure). State the estimate and its source.
 • BODY BLOCK: hip_rotation_at_impact < 35° → diagnose arms racing the body. Name the ball
-  flight (block, push-draw, or thin contact). State the exact measured value.
+  flight (block, push-draw, or thin contact). State the estimate and its source.
 • CASTING / EARLY RELEASE: tempo_ratio < 2.5 → diagnose lag loss. Name the release timing
   fault and prescribe a one-movement rehearsal drill tied to this golfer's tempo number.
 • X-FACTOR DEFICIT: (shoulder_rotation − hip_rotation) < 30° → diagnose insufficient power
-  differential. Reference both measured values.
-Every deficiency output must follow: [exact measurement] → [mechanical fault] → [ball-flight consequence] → [specific drill name].
+  differential. Reference both estimates.
+Every deficiency output must follow: [estimate or visual observation, with its source] → [mechanical fault] → [ball-flight consequence] → [specific drill name].
+Apply a rule only when the video supports the value it rests on.
 
 SCORING ALGORITHM — MANDATORY DETERMINISTIC CALCULATION
 ──────────────────────────────────────────────────────────────────────────────────
 You MUST write out the mathematical formula in the 'scoring_breakdown' field BEFORE
 generating the final 'score' integer. Do NOT use intuition, prior examples, or creative
-reasoning. Apply every applicable adjustment mechanically and record the running total in
+reasoning. Apply every adjustment the evidence supports and record the running total in
 scoring_breakdown. The 'score' field must equal the final number you arrive at in
 scoring_breakdown — any mismatch is an error.
 
@@ -420,7 +402,7 @@ VERIFICATION REQUIREMENT: The scoring_breakdown string must show the full chain,
   e.g. "75 + 5 (Shoulders) - 5 (Early Ext) - 3 (Laid off) = 72".
   Copy the final clamped integer verbatim into the score field.
 
-If measurements are unavailable, estimate from video, state the estimated values
+If no estimates are supplied, estimate from video, state the estimated values
 explicitly in prose, and apply the same algorithm to those estimates.
 
 HANDICAP BANDS (for context after you compute the score)
@@ -432,21 +414,29 @@ HANDICAP BANDS (for context after you compute the score)
 
 COACHING STANDARDS
 ──────────────────
-• Name joints, planes, and degrees in every observation — never write "your swing plane is off" when you can write "your shaft is 8° above plane at P6".
-• Every deficiency entry must follow the chain: [exact measurement] → [mechanical fault] → [ball-flight consequence] → [root cause for this golfer].
-• Every highlight entry must cite measured data or a specific visual observation — never generic praise like "good tempo".
+• Name the joints, planes and swing positions involved in every observation — never write a vague "your swing plane is off". Give degrees only when they come from a supplied estimate (named as one) or are clearly readable from the video, and call a degree read from the video approximate.
+• Every deficiency entry must follow the chain: [estimate or visual observation, with its source] → [mechanical fault] → [ball-flight consequence] → [root cause for this golfer].
+• Every highlight entry must cite a supplied estimate or a specific visual observation — never generic praise like "good tempo".
 • The drills array must contain exactly one drill per deficiency. Each drill must be tailored to THIS golfer's numbers, not a generic prescription.
-• the_feel inside each drill must be a visceral, first-person kinesthetic cue tied to the measured fault — if hip_rotation is 28° the cue should describe what clearing frozen hips actually feels like for a body that has been blocking.
+• the_feel inside each drill must be a visceral, first-person kinesthetic cue tied to the identified fault — if hip_rotation is 28° the cue should describe what clearing frozen hips actually feels like for a body that has been blocking.
 • executive_summary must read like a paragraph from a PGA Tour coach's assessment letter — authoritative, detailed, and specific to this golfer's data.
 • The pro_cue must be the kind of one-liner a Tour coach whispers on the 18th tee (10 words max).
 
-CRITICAL CONSTRAINT — NUMERIC FIELDS
-─────────────────────────────────────
-When the RAW BIOMECHANICAL MEASUREMENTS section contains specific degree values for
-spine_angle, hip_rotation, or shoulder_rotation, you MUST output those EXACT numbers
-in the corresponding JSON fields. Do NOT round, adjust, or substitute your own estimate —
-these values are computer-vision measurements and must be preserved verbatim. Your role
-is to INTERPRET and DIAGNOSE these numbers in your prose, not to recalculate them.
+MEASUREMENT PROVENANCE — READ BEFORE USING ANY NUMBER
+──────────────────────────────────────────────────────
+Values in the CLIENT-REPORTED ESTIMATES sections were computed on the golfer's own
+device from this swing and sent with the request. They are estimates, NOT independently
+verified instrument measurements, and they may be wrong.
+• Call them estimates in your prose (e.g. "an estimated 32° spine angle"). Never present
+  them as precise, measured or verified.
+• Check every estimate against the attached video. Where the video disagrees, or the value
+  cannot be judged from the video, say so plainly in the relevant observation and state
+  your uncertainty. Never invent agreement, and never invent a more precise number.
+• Do not apply a scoring adjustment or diagnostic rule on the strength of an estimate the
+  video contradicts or cannot support; say that you did not.
+• In the spine_angle, hip_rotation, shoulder_rotation and tempo_ratio JSON fields, repeat a
+  supplied estimate as given and put any disagreement in the prose. When no estimate is
+  supplied, give your own visual estimate.
 `.trim();
 
 // ── EQ5C-B subscription-tier narrowing ───────────────────────────────────────
@@ -501,22 +491,26 @@ function trustedAnalysisTable() {
 }
 
 /**
- * Best-effort failure write for the full-swing path, id- and owner-bound, and
- * only from processing: it releases the claim this request holds and can never
- * turn a completed analysis into a failed one.
+ * Best-effort failure write for the full-swing path. ENT-1D: fenced by the
+ * claim this request holds, so a superseded request changes nothing and a
+ * completed analysis can never be turned into a failed one.
  */
-async function markAnalysisFailed(analysisId: string, authenticatedUserId: string): Promise<void> {
-  try {
-    await trustedAnalysisTable()
-      .update({ status: "failed" })
-      .eq("id", analysisId)
-      .eq("status", "processing")
-      .eq("user_id", authenticatedUserId);
-  } catch {
-    // Best effort. A failed status write must not replace the response the
-    // originating condition already decided.
-  }
+async function markAnalysisFailed(
+  analysisId: string,
+  authenticatedUserId: string,
+  claimId: string,
+): Promise<void> {
+  // releaseAnalysisClaimAsFailed never throws; a failed status write must not
+  // replace the response the originating condition already decided.
+  await releaseAnalysisClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId });
 }
+
+/**
+ * What a putting response may carry. The putting entitlement gate has already
+ * passed when any putting response is built, so the putting class is released
+ * and nothing else premium is.
+ */
+const PUTTING_RESULT_ACCESS: AnalysisAccess = Object.freeze({ ...NO_PREMIUM_ACCESS, puttingAnalysis: true });
 
 async function runPuttingAnalysis(
   supabase: RouteSupabaseClient,
@@ -532,83 +526,83 @@ async function runPuttingAnalysis(
     isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)
   ) {
     console.log("[analyze-swing] putting cache hit");
-    return NextResponse.json({ message: "Analysis complete", data: analysisRow });
+    // ENT-1D: the explicit authorized view, never the raw owned row.
+    return NextResponse.json({
+      message: "Analysis complete",
+      data: serializeAnalysisResult(analysisRow, PUTTING_RESULT_ACCESS),
+    });
   }
 
   console.log("[analyze-swing] putting analysis requested");
 
+  // ENT-1D. Set once this request holds the execution claim. Every status write
+  // below is fenced by it: a superseded request writes nothing, and no failure
+  // write can overwrite a completed putt.
+  let puttingClaimId: string | null = null;
+
   const markFailed = async (): Promise<void> => {
-    try {
-      await trustedAnalysisTable()
-        .update({ status: "failed" })
-        .eq("id", analysisId)
-        .eq("user_id", authenticatedUserId);
-    } catch {
-      // Best effort. A failed status write must not change the response the
-      // golfer already earned from the originating condition.
-    }
+    if (puttingClaimId === null) return;
+    // Best effort, and it never throws: a failed status write must not change
+    // the response the golfer already earned from the originating condition.
+    // The shared release clears an undispatched lease (ENT-1D R1) and keeps a
+    // dispatched one.
+    await releaseAnalysisClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId: puttingClaimId });
   };
 
   const puttingApiKey = resolveGeminiKey();
   if (!puttingApiKey) {
-    await markFailed();
+    // Checked before the claim, so the row is left exactly as it was found.
     return NextResponse.json(
       { error: "AI analysis is temporarily unavailable. Please try again later." },
       { status: 503 },
     );
   }
 
-  let puttingProcessingError: unknown = null;
-  try {
-    const { error } = await trustedAnalysisTable()
-      .update({ status: "processing" })
-      .eq("id", analysisId)
-      .eq("user_id", authenticatedUserId);
-    puttingProcessingError = error;
-  } catch {
-    // An unconstructable writer is a failure to record that work started.
-    puttingProcessingError = true;
-  }
+  // ENT-1D. One atomic claim per putt: only the request that takes it may call
+  // the model, so simultaneous requests cannot both spend a Gemini call and a
+  // losing request cannot fail the winner's completed row.
+  const puttingClaim = await claimAnalysisExecution({
+    analysisId,
+    userId: authenticatedUserId,
+    family: "putting",
+  });
 
-  if (puttingProcessingError) {
-    // Full swing logs this and continues. Putting deliberately does not: if the
-    // server cannot record that work started, it must not spend a Gemini call on
-    // a row whose state it is unable to track.
-    await markFailed();
+  if (puttingClaim.outcome === "unavailable") {
+    // If the server cannot record that work started, it must not spend a
+    // Gemini call on a row whose state it is unable to track.
     return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
   }
+  if (puttingClaim.outcome === "not_claimed") {
+    return await answerUnclaimed(supabase, analysisId, authenticatedUserId, "putting", PUTTING_RESULT_ACCESS);
+  }
+  puttingClaimId = puttingClaim.claimId;
 
+  // The golfer's own canonical object only, re-validated here; see
+  // lib/swing-video-source.ts. No other source is ever fetched.
   const puttingVideo = analysisRow.swing_video as { storage_path?: string | null } | null;
-  const storagePath =
-    typeof puttingVideo?.storage_path === "string" ? puttingVideo.storage_path : null;
+  const videoData = await loadOwnedSwingVideo(supabase, puttingVideo?.storage_path, authenticatedUserId, MAX_ANALYSIS_VIDEO_BYTES);
 
   let inlineVideo: { inlineData: { mimeType: string; data: string } } | null = null;
-  if (storagePath) {
-    const { data: signed } = await supabase.storage
-      .from("swing-videos")
-      .createSignedUrl(storagePath, 3600);
-    if (signed?.signedUrl) {
-      const videoData = await fetchVideoBytes(signed.signedUrl, MAX_INLINE_VIDEO_BYTES);
-      if (videoData) {
-        inlineVideo = {
-          inlineData: {
-            mimeType: videoData.mimeType,
-            data: arrayBufferToBase64(videoData.buffer),
-          },
-        };
-      }
-    }
+  if (videoData.status === "ok") {
+    inlineVideo = {
+      inlineData: {
+        mimeType: videoData.mimeType,
+        data: arrayBufferToBase64(videoData.buffer),
+      },
+    };
   }
 
   if (!inlineVideo) {
     // There is no text-only putting fallback. Without the stroke itself, any
     // observation would be invention from equipment identity alone.
     console.error("[analyze-swing] putting requires video");
-    await markFailed();
-    return NextResponse.json(
-      { error: "We couldn't read your video. Please try again." },
-      { status: 500 },
-    );
+    return await videoLoadRefused(analysisId, authenticatedUserId, puttingClaimId, videoData.status);
+  }
+
+  // The last step before the provider: if this request no longer holds the
+  // claim, it does not call the model.
+  if (!(await markProviderDispatched({ analysisId, userId: authenticatedUserId, claimId: puttingClaimId }))) {
+    return await dispatchRefused(analysisId, authenticatedUserId, puttingClaimId);
   }
 
   let puttingParsed: unknown;
@@ -618,7 +612,9 @@ async function runPuttingAnalysis(
       systemInstruction: PUTTING_SYSTEM_INSTRUCTION,
     });
     const equipmentContext = buildTrustedEquipmentContext(analysisRow.equipment_snapshot);
-    const puttingResult = await puttingModel.generateContent({
+    let puttingResult;
+    try {
+      puttingResult = await puttingModel.generateContent({
       contents: [
         {
           role: "user",
@@ -632,6 +628,15 @@ async function runPuttingAnalysis(
         maxOutputTokens: 4096,
       },
     });
+    } catch (providerError) {
+      // ENT-1D. No definite answer from the provider: it may have run, so the
+      // putt is stalled, never released for a retry.
+      if (!isDefiniteProviderRejection(providerError)) {
+        await markClaimOutcomeUnknown({ analysisId, userId: authenticatedUserId, claimId: puttingClaimId });
+        return stalledResponse();
+      }
+      throw providerError;
+    }
     // Deliberately not named rawText, and never logged.
     const puttingRawText = puttingResult.response.text();
     puttingParsed = JSON.parse(puttingRawText);
@@ -682,10 +687,14 @@ async function runPuttingAnalysis(
         status: "complete",
         putting_analysis: persistedPuttingAnalysis,
         putting_score: puttingScore,
+        // ENT-1D: the holder's claim, proved in the row (migration 20261027120000).
+        processing_claim_proof: puttingClaimId,
       })
       .eq("id", analysisId)
       .eq("user_id", authenticatedUserId)
       .eq("analysis_family", "putting")
+      .eq("status", "processing")
+      .eq("processing_claim_id", puttingClaimId)
       .is("putting_score", null)
       .select();
 
@@ -713,7 +722,10 @@ async function runPuttingAnalysis(
     );
   }
 
-  return NextResponse.json({ message: "Analysis complete", data: puttingUpdatedRows[0] });
+  return NextResponse.json({
+    message: "Analysis complete",
+    data: serializeAnalysisResult(puttingUpdatedRows[0] as Record<string, unknown>, PUTTING_RESULT_ACCESS),
+  });
 }
 
 
@@ -760,7 +772,7 @@ export async function POST(req: NextRequest) {
     .from("swing_analysis")
     // ENT-1C. The identity and core columns only: the result payload is read
     // by the server after ownership is proved, never by the caller's session.
-    .select(`${ANALYSIS_OWNER_COLUMNS}, swing_video:swing_videos(id, club, original_filename, video_url, storage_path, mime_type, file_size)`)
+    .select(`${ANALYSIS_OWNER_COLUMNS}, swing_video:swing_videos(id, club, original_filename, storage_path, mime_type, file_size)`)
     .eq("id", analysisId)
     .eq("user_id", user.id)
     .single();
@@ -823,7 +835,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
+            "Putting analysis isn't included with your current plan.",
         },
         { status: 403 },
       );
@@ -873,10 +885,9 @@ export async function POST(req: NextRequest) {
     return await completedResponse(analysisRow, user.id, access);
   }
 
-  // Another request holds this row. It is not re-run, and nothing is written.
-  if (analysisRow.status === "processing") {
-    return inProgressResponse();
-  }
+  // A processing row is not answered here: the claim below decides, so a
+  // live claim answers 409 and an expired claim whose holder never reached the
+  // model can be recovered (ENT-1D).
 
   const geminiKey = resolveGeminiKey();
   console.log("[analyze-swing] Gemini key configured:", !!geminiKey);
@@ -890,48 +901,34 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── ENT-1A atomic execution claim ────────────────────────────────────────
-  // One conditional UPDATE moves the row from a startable state to processing.
-  // Postgres re-checks the WHERE clause against the latest row version once it
-  // holds the row lock, so of any number of simultaneous requests exactly one
-  // sees its update affect the row; every other one affects zero rows. Only the
-  // request that claimed the row may call Gemini. The filters restate this row,
-  // this owner and the full-swing family rather than trusting the elevated
-  // client.
-  let claimedRows: unknown = null;
-  let claimFailed = false;
-  try {
-    const { data, error } = await trustedAnalysisTable()
-      .update({ status: "processing" })
-      .eq("id", analysisId)
-      .eq("user_id", user.id)
-      .or(FULL_SWING_FAMILY_FILTER)
-      .in("status", CLAIMABLE_STATUSES)
-      .select("id");
-    claimedRows = data;
-    claimFailed = Boolean(error);
-  } catch {
-    claimFailed = true;
-  }
+  // ── ENT-1A / ENT-1D atomic execution claim ──────────────────────────────
+  // One conditional UPDATE takes the row for this request, with a fresh claim
+  // id. Postgres re-checks the WHERE clause against the latest row version once
+  // it holds the row lock, so of any number of simultaneous requests exactly
+  // one takes it; every other one affects zero rows. Only the holder may call
+  // Gemini, and every later write it makes is fenced by its claim id. The
+  // filters restate this row, this owner and the full-swing family rather than
+  // trusting the elevated client (lib/analysis-execution-claim.ts).
+  const claim = await claimAnalysisExecution({ analysisId, userId: user.id, family: "full_swing" });
 
-  if (claimFailed || !Array.isArray(claimedRows)) {
+  if (claim.outcome === "unavailable") {
     console.error("[analyze-swing] execution claim could not be recorded");
     return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
   }
 
-  if (claimedRows.length !== 1) {
-    // Zero rows: another request claimed it first, or it is no longer in a
-    // startable state. One owner-scoped re-read decides the answer; there is
-    // no retry loop and no Gemini call.
-    return await answerUnclaimedRow(supabase, analysisId, user.id, access);
+  if (claim.outcome === "not_claimed") {
+    // Another request holds it, it is finished, or it cannot be started. One
+    // owner-bound read decides the answer; there is no retry loop and no
+    // Gemini call.
+    return await answerUnclaimed(supabase, analysisId, user.id, "full_swing", access);
   }
+  const claimId = claim.claimId;
 
   // ── Video metadata ────────────────────────────────────────────────────────
   const videoRow = analysisRow.swing_video as unknown as {
     id: string;
     club: string | null;
     original_filename: string | null;
-    video_url: string;
     storage_path: string | null;
     mime_type: string | null;
     file_size: number | null;
@@ -949,13 +946,16 @@ export async function POST(req: NextRequest) {
 
   // ── Step 2: extractSwingMetrics (server-side = null; client values override) ─
   // The function guards on `typeof window === "undefined"` and returns all-null.
-  // Real measurements come from the client via `mediapipeMetrics` in the body.
+  // Client-computed estimates arrive via `mediapipeMetrics` in the body; the
+  // server cannot verify them and labels them as estimates in the prompt.
+  // No URL is passed: the server-side call never loads a video, and
+  // browser-written video_url is never a source on the server.
   console.log("[analyze-swing] calling extractSwingMetrics (server-side: will return null fields)");
-  const serverMetrics = await extractSwingMetrics(videoRow?.video_url ?? "");
+  const serverMetrics = await extractSwingMetrics("");
 
   // Merge: client-provided values take precedence over the server no-op.
   // ENT-1A. Every client value is spliced into the model prompt, so each one
-  // must be the shape the client's own measurement produces — a finite angle,
+  // must be the shape the client's own estimate produces — a finite angle,
   // or a "N.N:1" tempo — or it is dropped. Free text and oversized values never
   // reach Gemini.
   const client = clientMetrics !== null && typeof clientMetrics === "object" ? clientMetrics : undefined;
@@ -972,30 +972,25 @@ export async function POST(req: NextRequest) {
   console.log("[analyze-swing] metrics available:", hasRealMetrics);
 
   // ── Step 4: fetch video bytes for inline Gemini input ─────────────────────
-  // Generate a 1-hour signed URL from Supabase Storage (the public URL may
-  // require auth headers that the fetch inside Vercel can't send).
-  let videoPayload: { inlineData: { mimeType: string; data: string } } | null = null;
-
-  if (videoRow?.storage_path) {
-    const BUCKET = "swing-videos";
-    const { data: signed } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrl(videoRow.storage_path, 3600);
-
-    const fetchUrl = signed?.signedUrl ?? videoRow.video_url;
-    console.log("[analyze-swing] fetching video for inline (limit:", MAX_INLINE_VIDEO_BYTES / 1_048_576, "MB)");
-    const videoData = await fetchVideoBytes(fetchUrl, MAX_INLINE_VIDEO_BYTES);
-
-    if (videoData) {
-      videoPayload = {
-        inlineData: {
-          mimeType: videoData.mimeType,
-          data: arrayBufferToBase64(videoData.buffer),
-        },
-      };
-      console.log("[analyze-swing] video loaded inline:", (videoData.buffer.byteLength / 1_048_576).toFixed(1), "MB");
-    }
+  // Only the golfer's own canonical Storage object, re-validated and signed on
+  // the golfer's session, downloaded from the configured Storage endpoint with
+  // redirects refused (lib/swing-video-source.ts). There is no fallback to any
+  // other URL, and none to a text-only analysis: without the swing itself,
+  // every observation and score would be invented, whatever metrics the
+  // client sent (ENT-1D D1).
+  console.log("[analyze-swing] fetching video for inline (limit:", MAX_ANALYSIS_VIDEO_BYTES / 1_048_576, "MB)");
+  const videoData = await loadOwnedSwingVideo(supabase, videoRow?.storage_path, user.id, MAX_ANALYSIS_VIDEO_BYTES);
+  if (videoData.status !== "ok") {
+    console.error("[analyze-swing] full swing requires video:", videoData.status);
+    return await videoLoadRefused(analysisId, user.id, claimId, videoData.status);
   }
+  const videoPayload = {
+    inlineData: {
+      mimeType: videoData.mimeType,
+      data: arrayBufferToBase64(videoData.buffer),
+    },
+  };
+  console.log("[analyze-swing] video loaded inline:", (videoData.buffer.byteLength / 1_048_576).toFixed(1), "MB");
 
   // ── Step 5: build Gemini request ──────────────────────────────────────────
   const metricsContext = buildMetricsContext(merged);
@@ -1007,25 +1002,23 @@ export async function POST(req: NextRequest) {
     `╚══════════════════════════════════════════════════════════════╝`,
     `Session: ${clubLabel} ${sizeLabel}`,
     ``,
-    `EXACT COMPUTER-VISION MEASUREMENTS (use verbatim in numeric JSON fields):`,
-    merged.spineAngle       != null ? `  Spine Angle (address):    ${merged.spineAngle}°` : `  Spine Angle (address):    NOT MEASURED — estimate from video`,
-    merged.hipRotation      != null ? `  Hip Rotation (impact):    ${merged.hipRotation}°` : `  Hip Rotation (impact):    NOT MEASURED — estimate from video`,
-    merged.shoulderRotation != null ? `  Shoulder Rotation (top):  ${merged.shoulderRotation}°` : `  Shoulder Rotation (top):  NOT MEASURED — estimate from video`,
-    merged.tempoRatio       != null ? `  Tempo Ratio:              ${merged.tempoRatio}` : `  Tempo Ratio:              NOT MEASURED — estimate from video`,
+    `CLIENT-REPORTED ESTIMATES (computed on the golfer's device; not independently verified — check each against the video):`,
+    merged.spineAngle       != null ? `  Spine Angle (address):    ${merged.spineAngle}°` : `  Spine Angle (address):    NOT SUPPLIED — estimate from video`,
+    merged.hipRotation      != null ? `  Hip Rotation (impact):    ${merged.hipRotation}°` : `  Hip Rotation (impact):    NOT SUPPLIED — estimate from video`,
+    merged.shoulderRotation != null ? `  Shoulder Rotation (top):  ${merged.shoulderRotation}°` : `  Shoulder Rotation (top):  NOT SUPPLIED — estimate from video`,
+    merged.tempoRatio       != null ? `  Tempo Ratio:              ${merged.tempoRatio}` : `  Tempo Ratio:              NOT SUPPLIED — estimate from video`,
     merged.setupSpineAngle  != null && merged.impactSpineAngle != null
       ? `  Spine angle change (setup→impact): ${merged.setupSpineAngle}° → ${merged.impactSpineAngle}° (${(merged.setupSpineAngle - merged.impactSpineAngle).toFixed(1)}° drop)`
       : `  Spine angle change: insufficient frame data`,
     ``,
-    `DIAGNOSTIC FINDINGS FROM MEASUREMENTS:`,
+    `WHAT THE ESTIMATES WOULD INDICATE (confirm against the video before relying on any of it):`,
     metricsContext,
   ].join("\n");
 
   const userPrompt = [
     exactValuesBlock,
     ``,
-    videoPayload
-      ? `You have the actual swing video attached. Use it to visually verify the measured numbers above and add observations about grip, alignment, ball position, and any visual cues the numbers do not capture. Do NOT contradict the measured values — they are ground truth.`
-      : `No video was attached (file too large for inline). Base ALL visual observations on the measurements above. Be explicit about which findings come from the numbers vs. your inference.`,
+    `You have the actual swing video attached. Check each client-reported estimate above against it, and add observations about grip, alignment, ball position, and anything the estimates do not capture. Where the video and an estimate disagree, or an estimate cannot be judged from the video, say so and state your uncertainty — do not force agreement and do not invent a more precise number.`,
     ``,
     `Now apply the DYNAMIC SCORING ALGORITHM and output the JSON object. No markdown, no preamble.`,
   ].join("\n");
@@ -1039,22 +1032,38 @@ export async function POST(req: NextRequest) {
 
     // Build explicit content parts so the SDK never misinterprets a bare string
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const contentParts: any[] = [];
-    if (videoPayload) contentParts.push(videoPayload);
-    contentParts.push({ text: userPrompt });
+    const contentParts: any[] = [videoPayload, { text: userPrompt }];
 
-    console.log("[analyze-swing] calling gemini-2.5-flash — parts:", contentParts.length, videoPayload ? "(video + text)" : "(text only)");
+    console.log("[analyze-swing] calling gemini-2.5-flash — parts:", contentParts.length, "(video + text)");
     console.log("[analyze-swing] prompt length (chars):", userPrompt.length);
 
-    const result = await model.generateContent({
-      contents: [{ role: "user", parts: contentParts }],
-      generationConfig: {
-        responseMimeType: "application/json",  // required alongside responseSchema
-        responseSchema:   RESPONSE_SCHEMA as Schema, // enforces structure at API level — no markdown fences possible
-        temperature: 0.0,
-        maxOutputTokens: 8192,
-      },
-    });
+    // ENT-1D. The last step before the provider: if this request no longer
+    // holds the claim, it does not call the model.
+    if (!(await markProviderDispatched({ analysisId, userId: user.id, claimId }))) {
+      return await dispatchRefused(analysisId, user.id, claimId);
+    }
+
+    let result;
+    try {
+      result = await model.generateContent({
+        contents: [{ role: "user", parts: contentParts }],
+        generationConfig: {
+          responseMimeType: "application/json",  // required alongside responseSchema
+          responseSchema:   RESPONSE_SCHEMA as Schema, // enforces structure at API level — no markdown fences possible
+          temperature: 0.0,
+          maxOutputTokens: 8192,
+        },
+      });
+    } catch (providerError) {
+      // ENT-1D. No definite answer from the provider: it may have run, so the
+      // analysis is stalled, never released for a retry.
+      if (!isDefiniteProviderRejection(providerError)) {
+        console.error("[analyze-swing] provider outcome unknown");
+        await markClaimOutcomeUnknown({ analysisId, userId: user.id, claimId });
+        return stalledResponse();
+      }
+      throw providerError;
+    }
     const rawText = result.response.text();
 
     // responseSchema guarantees clean JSON — log length so we can verify in Vercel
@@ -1138,8 +1147,11 @@ export async function POST(req: NextRequest) {
       };
     };
 
-    // Client-measured values are ground truth; fall back to Gemini's output only
-    // when the client scan produced nothing (video too large / scan timed out).
+    // Stored numeric fields keep the client-reported estimate when one was sent
+    // (the model puts any disagreement with the video in the prose), else the
+    // model's own visual estimate. Neither is an independently verified
+    // measurement, and no column records which one a value is: see
+    // docs/ENT1D_ROLLOUT_NOTES.md (measurement provenance).
     const finalSpineAngle       = toNum(merged.spineAngle       ?? report.spine_angle);
     const finalHipRotation      = toNum(merged.hipRotation      ?? report.hip_rotation);
     const finalShoulderRotation = toNum(merged.shoulderRotation ?? report.shoulder_rotation);
@@ -1214,21 +1226,24 @@ export async function POST(req: NextRequest) {
       metrics,
       swing_highlights,
       mechanical_deficiencies,
+      // ENT-1D: the holder's claim, proved in the row (migration 20261027120000).
+      processing_claim_proof: claimId,
     };
 
 
     // Completes only the row this request claimed: still processing, this
-    // owner. Exactly one affected row is proved rather than assumed.
+    // owner, this claim. Exactly one affected row is proved rather than assumed.
     const { data: completedRows, error: updateErr } = await trustedAnalysisTable()
       .update(payload)
       .eq("id", analysisId)
       .eq("user_id", user.id)
       .eq("status", "processing")
+      .eq("processing_claim_id", claimId)
       .select();
 
     if (updateErr || !Array.isArray(completedRows) || completedRows.length !== 1) {
       console.error("[analyze-swing] analysis completion update failed");
-      await markAnalysisFailed(analysisId, user.id);
+      await markAnalysisFailed(analysisId, user.id, claimId);
       return NextResponse.json(
         { error: "We couldn't save your analysis. Please try again." },
         { status: 400 },
@@ -1244,13 +1259,7 @@ export async function POST(req: NextRequest) {
 
   } catch {
     console.error("[analyze-swing] analysis pipeline failed");
-    try {
-      await trustedAnalysisTable()
-        .update({ status: "failed" })
-        .eq("id", analysisId)
-        .eq("user_id", user.id)
-        .eq("status", "processing");
-    } catch {
+    if (!(await releaseAnalysisClaimAsFailed({ analysisId, userId: user.id, claimId }))) {
       console.error("[analyze-swing] failed-status update also failed");
     }
     return NextResponse.json(
@@ -1266,22 +1275,65 @@ const FULL_SWING_UNAVAILABLE_COPY = "Analysis is temporarily unavailable. Please
 const IN_PROGRESS_COPY = "This analysis is already in progress. Please check back shortly.";
 const NOT_STARTABLE_COPY = "This analysis can't be started right now. Please refresh and try again.";
 
-/** States from which a full-swing analysis may be started (or retried). */
-const CLAIMABLE_STATUSES = ["pending", "failed"];
+const STALLED_COPY =
+  "This analysis was interrupted after it started and can't be finished. Please record the swing again for a new analysis.";
 
 /**
- * The full-swing family as the router defines it: the explicit value, or null
- * on legacy rows written before the column existed. Stated as a PostgREST
- * filter so the claim restates the family without trusting the row it read.
+ * ENT-1D. HTTP statuses at which the provider necessarily refused the request
+ * before any model ran, so a later attempt duplicates nothing:
+ *
+ *   401  UNAUTHENTICATED — the API key was not accepted
+ *   403  PERMISSION_DENIED — the key may not call this model or method
+ *   404  NOT_FOUND — the model or method does not exist
+ *
+ * Each is decided by authentication or routing, before a model is selected.
+ *
+ * Everything else is an unknown outcome and is never retried for the same
+ * analysis. That deliberately includes 400 (an argument such as an
+ * undecodable video may be rejected after processing began) and 429 (a rate
+ * limit such as output tokens may be enforced after admission): the
+ * repository holds no provider evidence that either means "no work done".
+ * Also unknown: 408 and 499 (deadline / cancellation), every 5xx, any other
+ * or missing status, and every non-HTTP error (transport failure, abort,
+ * timeout, body read failure). Widening this list needs provider evidence.
  */
-const FULL_SWING_FAMILY_FILTER = "analysis_family.is.null,analysis_family.eq.full_swing";
+const DEFINITE_REJECTION_STATUSES: readonly number[] = [401, 403, 404];
 
-/** A client-measured angle in degrees, or null when it is not one. */
+/**
+ * True only for a non-OK HTTP response the SDK actually received
+ * (GoogleGenerativeAIFetchError carries its status) whose status is on the
+ * allow-list above. Matched by class, not by name: the SDK does not set error
+ * names.
+ *
+ * A response that arrived in full but is unusable (blocked, bad finish reason,
+ * not JSON) is a different, known outcome: the SDK raises it from
+ * response.text(), and JSON.parse from the body, after this call returns, so
+ * it never reaches this classifier and is released as a definite failure.
+ * Nothing here claims exactly-once provider execution.
+ */
+function isDefiniteProviderRejection(error: unknown): boolean {
+  return (
+    error instanceof GoogleGenerativeAIFetchError &&
+    typeof error.status === "number" &&
+    DEFINITE_REJECTION_STATUSES.includes(error.status)
+  );
+}
+
+/**
+ * The family as the router defines it, for the owner-scoped re-read: the
+ * explicit value, or null on legacy full-swing rows.
+ */
+const FAMILY_FILTER: Record<ExecutionFamily, string> = {
+  full_swing: "analysis_family.is.null,analysis_family.eq.full_swing",
+  putting: "analysis_family.eq.putting",
+};
+
+/** A client-computed angle estimate in degrees, or null when it is not one. */
 function clientAngle(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= -360 && value <= 360 ? value : null;
 }
 
-/** A client-measured tempo in the "N.N:1" form lib/biometrics produces, or null. */
+/** A client-computed tempo estimate in the "N.N:1" form lib/biometrics produces, or null. */
 function clientTempoRatio(value: unknown): string | null {
   return typeof value === "string" && /^\d{1,2}(\.\d{1,2})?:1$/.test(value) ? value : null;
 }
@@ -1314,33 +1366,105 @@ function inProgressResponse(): NextResponse {
   return NextResponse.json({ error: IN_PROGRESS_COPY, status: "processing" }, { status: 409 });
 }
 
-/** The single re-read after a claim that affected no row. */
-async function answerUnclaimedRow(
+/**
+ * ENT-1D. The holder reached the provider and then stopped reporting: the
+ * provider outcome is unknown, so the analysis is never re-run automatically
+ * (lib/analysis-execution-claim.ts).
+ */
+function stalledResponse(): NextResponse {
+  return NextResponse.json({ error: STALLED_COPY, status: "stalled" }, { status: 409 });
+}
+
+/**
+ * The dispatch mark was not confirmed, so the model is not called. The
+ * refusal may have been an outage, a takeover, or a write that persisted but
+ * whose response was lost — the three cannot be told apart here. The claim is
+ * released as failed only if it is still this request's AND no dispatch is
+ * recorded for it; then nothing reached the provider and a retry is safe.
+ * Otherwise the row is left alone: in progress, then stalled for an operator,
+ * never automatically re-runnable.
+ */
+async function dispatchRefused(
+  analysisId: string,
+  authenticatedUserId: string,
+  claimId: string,
+): Promise<NextResponse> {
+  if (await releaseUndispatchedClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId })) {
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  return inProgressResponse();
+}
+
+/**
+ * ENT-1D D1. The golfer's video could not be loaded, so nothing is analysed.
+ * Reached before the dispatch mark: no provider call has been made and none
+ * is made now. Only an undispatched claim this request still holds is
+ * released, lease cleared; nothing is scored or stored, and a completed
+ * analysis is never touched (the release is fenced to this request's
+ * processing claim).
+ *
+ * Two answers, because the golfer's way forward differs:
+ *   - the video itself is unusable (no object, empty, oversized, not a
+ *     recognised video): 422 `video_unusable`, and the copy asks for a new
+ *     upload — re-sending the same object cannot help;
+ *   - the service could not fetch it (signing, an untrusted URL, a failed or
+ *     timed-out download): 503 with the temporary-unavailability copy, and a
+ *     retry of the same video may succeed.
+ */
+async function videoLoadRefused(
+  analysisId: string,
+  authenticatedUserId: string,
+  claimId: string,
+  loadStatus: string,
+): Promise<NextResponse> {
+  if (!(await releaseUndispatchedClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId }))) {
+    return inProgressResponse();
+  }
+  if (UNUSABLE_VIDEO_LOADS.has(loadStatus)) {
+    return NextResponse.json({ error: VIDEO_UNUSABLE_COPY, status: VIDEO_UNUSABLE_STATUS }, { status: 422 });
+  }
+  return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+}
+
+/** The single answer for a request that did not get the claim. */
+async function answerUnclaimed(
   supabase: RouteSupabaseClient,
   analysisId: string,
   authenticatedUserId: string,
+  family: ExecutionFamily,
   access: AnalysisAccess,
 ): Promise<NextResponse> {
+  const state = await readExecutionState({ analysisId, userId: authenticatedUserId, family });
+  switch (state) {
+    case "in_progress":
+      return inProgressResponse();
+    case "stalled":
+      return stalledResponse();
+    case "not_startable":
+    case "not_found":
+      return NextResponse.json({ error: NOT_STARTABLE_COPY }, { status: 409 });
+    case "unavailable":
+      return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+    case "complete":
+      break;
+  }
+  // Finished by another request: answer from the stored result, read as on
+  // every other path: owned columns on the caller's session, payload on the
+  // server.
   try {
     const { data, error } = await supabase
       .from("swing_analysis")
       .select(ANALYSIS_OWNER_COLUMNS)
       .eq("id", analysisId)
       .eq("user_id", authenticatedUserId)
-      .or(FULL_SWING_FAMILY_FILTER)
+      .or(FAMILY_FILTER[family])
       .maybeSingle();
     const current = data as Record<string, unknown> | null;
-    if (error) {
+    if (error || current?.status !== "complete") {
       return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
     }
-    if (current?.status === "complete") {
-      return await completedResponse(current, authenticatedUserId, access);
-    }
-    if (current?.status === "processing") {
-      return inProgressResponse();
-    }
+    return await completedResponse(current, authenticatedUserId, access);
   } catch {
     return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
   }
-  return NextResponse.json({ error: NOT_STARTABLE_COPY }, { status: 409 });
 }

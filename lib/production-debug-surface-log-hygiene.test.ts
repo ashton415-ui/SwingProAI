@@ -445,8 +445,9 @@ describe("analyze-swing functional anchors", () => {
   });
 
   it("keeps the Storage and parsing flow", () => {
-    expect(apiSource).toContain("createSignedUrl");
-    expect(apiSource).toContain("MAX_INLINE_VIDEO_BYTES");
+    // ENT-1D: Storage signing and download live in lib/swing-video-source.ts.
+    expect(apiSource).toContain("loadOwnedSwingVideo(");
+    expect(apiSource).toContain("MAX_ANALYSIS_VIDEO_BYTES");
     expect(apiSource).toContain("JSON.parse(rawText)");
     expect(apiSource).toContain("requiredFields");
   });
@@ -455,7 +456,11 @@ describe("analyze-swing functional anchors", () => {
     expect(apiSource).toContain('status: "processing"');
     // Written inside an aligned object literal, so match on shape not spacing.
     expect(apiSource).toMatch(/status:\s+"complete"/);
-    expect(apiSource).toContain('status: "failed"');
+    // ENT-1D R1: every failure write now goes through the claim module's
+    // holder release (full swing and putting alike), where the write lives.
+    expect(apiSource).toContain("await releaseAnalysisClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId: puttingClaimId });");
+    expect(apiSource).toContain("releaseAnalysisClaimAsFailed({ analysisId, userId: user.id, claimId })");
+    expect(readSource("lib/analysis-execution-claim.ts")).toContain('status: "failed"');
     expect(apiSource).toContain('{ message: "Analysis complete", data: updated }');
   });
 

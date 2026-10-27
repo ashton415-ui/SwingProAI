@@ -283,7 +283,7 @@ describe("Analyze auth/session source contract — preprocessing left untouched"
     expect(analyzeSource).toContain("const MAX_SEGMENT_SECONDS = 15");
 
     const body = getTrimmedBlobBody();
-    expect(body).toContain("18 * 1024 * 1024");
+    expect(body).toContain("file.size <= MAX_ANALYSIS_VIDEO_BYTES");
     expect(body).toContain("captureStream");
     expect(body).toContain("new MediaRecorder");
     expect(body).toContain('mimeType: "video/webm"');

@@ -49,12 +49,24 @@ const state = vi.hoisted(() => ({
   claimBarrier: null as null | (() => Promise<void>),
   geminiCalls: 0,
   prompts: [] as string[],
+  // The whole provider request and model configuration, as the route built them.
+  providerRequests: [] as Record<string, any>[],
+  modelConfigs: [] as Record<string, any>[],
   geminiImpl: null as null | (() => Promise<string>),
   log: [] as string[],
   adminUpdates: [] as { patch: Record<string, unknown>; filters: string[] }[],
   adminReads: [] as { columns: string; filters: string[] }[],
   sessionSelects: [] as { table: string; columns: string }[],
   sessionPayloadReads: [] as { table: string; columns: string }[],
+  videoAvailable: false,
+  signingOutage: false,
+  beforeDispatch: null as null | (() => void),
+  adminUpdateErrorOnce: false,
+  dispatchPersistsThenErrors: false,
+  failedWriteErrors: false,
+  beforeFailedWrite: null as null | (() => void),
+  geminiTextThrows: null as null | (() => unknown),
+  outcomeUnknownWriteErrors: false,
 }));
 
 vi.mock("@/utils/supabase/server", () => ({
@@ -89,15 +101,25 @@ vi.mock("next/headers", () => ({
 vi.mock("@google/generative-ai", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@google/generative-ai")>();
   class GoogleGenerativeAI {
-    getGenerativeModel() {
+    getGenerativeModel(config: Record<string, any>) {
+      state.modelConfigs.push(config);
       return {
         generateContent: async (request: { contents: { parts: { text?: string }[] }[] }) => {
           state.geminiCalls += 1;
+          state.providerRequests.push(request as Record<string, any>);
           state.prompts.push(
             request.contents.flatMap((c) => c.parts.map((p) => p.text ?? "")).join(String.fromCharCode(10)),
           );
           const text = state.geminiImpl ? await state.geminiImpl() : JSON.stringify(validReport());
-          return { response: { text: () => text } };
+          const textThrows = state.geminiTextThrows;
+          return {
+            response: {
+              text: () => {
+                if (textThrows) throw textThrows();
+                return text;
+              },
+            },
+          };
         },
       };
     }
@@ -153,6 +175,7 @@ import {
   serializeAnalysisResult,
 } from "@/lib/analysis-result-read-authority";
 import { toMeResponse, type MeProfileRow } from "@/lib/api/me-dto";
+import { ANALYSIS_EXECUTION_COLUMNS } from "@/lib/analysis-execution-claim";
 import { buildPersistedPuttingAnalysis, isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import { computePuttingScoreFromAnalysisV1 } from "@/lib/putting-score-from-analysis-eq5f-e";
 import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
@@ -233,9 +256,30 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: unknown }> {
     this.filters.push((row) => values.includes(row[column]));
     return this;
   }
+  lt(column: string, value: string) {
+    this.filterLog.push(`lt:${column}=${value}`);
+    this.filters.push((row) => {
+      const v = row[column];
+      return typeof v === "string" && Date.parse(v) < Date.parse(value);
+    });
+    return this;
+  }
   is(column: string, value: null) {
     this.filterLog.push(`is:${column}=${String(value)}`);
     this.filters.push((row) => row[column] === value);
+    return this;
+  }
+  gt(column: string, value: string) {
+    this.filterLog.push(`gt:${column}=${value}`);
+    this.filters.push((row) => {
+      const v = row[column];
+      return typeof v === "string" && Date.parse(v) > Date.parse(value);
+    });
+    return this;
+  }
+  not(column: string, operator: "is", value: null) {
+    this.filterLog.push(`not.${operator}:${column}=${String(value)}`);
+    this.filters.push((row) => row[column] !== value);
     return this;
   }
   or(expression: string) {
@@ -316,7 +360,7 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: unknown }> {
               created_at: "2026-10-01T00:00:00.000Z",
               original_filename: null,
               video_url: "",
-              storage_path: null,
+              storage_path: state.videoAvailable ? `${a.user_id}/clip.mp4` : null,
               mime_type: null,
               file_size: null,
             };
@@ -343,6 +387,24 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: unknown }> {
     state.adminUpdates.push({ patch: { ...patch }, filters: [...this.filterLog] });
 
     if (patch.status === "processing" && state.claimBarrier) await state.claimBarrier();
+    if (patch.status === undefined && "provider_dispatched_at" in patch && state.beforeDispatch) state.beforeDispatch();
+    if (patch.status === "failed" && state.beforeFailedWrite) state.beforeFailedWrite();
+    if (state.outcomeUnknownWriteErrors && patch.processing_heartbeat_at === "1970-01-01T00:00:00.000Z") {
+      return { data: null, error: { code: "XX000", message: "write failed" } };
+    }
+    if (patch.status === "failed" && state.failedWriteErrors) {
+      return { data: null, error: { code: "XX000", message: "release failed" } };
+    }
+    if (state.dispatchPersistsThenErrors && patch.status === undefined && "provider_dispatched_at" in patch) {
+      state.dispatchPersistsThenErrors = false;
+      // The write lands; its response is lost.
+      for (const row of state.analyses.filter((r) => this.filters.every((f) => f(r)))) Object.assign(row, patch);
+      return { data: null, error: { code: "57P01", message: "connection lost" } };
+    }
+    if (state.adminUpdateErrorOnce && patch.status === undefined) {
+      state.adminUpdateErrorOnce = false;
+      return { data: null, error: { code: "XX000", message: "write failed" } };
+    }
     if (patch.status === "processing" && state.claimError) {
       return { data: null, error: { code: "XX000", message: "claim failed" } };
     }
@@ -371,9 +433,14 @@ function makeSessionClient() {
     from: (table: string) => new FakeQuery("session", table),
     storage: {
       from: () => ({
-        createSignedUrl: async () => {
+        createSignedUrl: async (path: string) => {
           state.log.push("storage.sign");
-          return { data: null, error: { message: "no object" } };
+          // The exact form Storage mints for the configured project
+          // (lib/swing-video-source.ts accepts nothing else).
+          if (state.signingOutage) return { data: null, error: { message: "internal error", statusCode: "500" } };
+          return state.videoAvailable
+            ? { data: { signedUrl: `https://storage.invalid/storage/v1/object/sign/swing-videos/${path}?token=synthetic.token` }, error: null }
+            : { data: null, error: { message: "Object not found", statusCode: "404" } };
         },
       }),
     },
@@ -468,6 +535,21 @@ function completeRow(overrides: Row = {}): Row {
   });
 }
 
+const OTHER_CLAIM = "0d000000-0000-4000-8000-0000000000d1";
+
+/** A row another request holds, last heard from `ageSeconds` ago. */
+function liveClaimRow(options: { dispatched: boolean; ageSeconds?: number; family?: string | null }): Row {
+  const at = new Date(Date.now() - (options.ageSeconds ?? 5) * 1000).toISOString();
+  return pendingRow({
+    status: "processing",
+    analysis_family: options.family === undefined ? "full_swing" : options.family,
+    processing_claim_id: OTHER_CLAIM,
+    processing_started_at: at,
+    processing_heartbeat_at: at,
+    provider_dispatched_at: options.dispatched ? at : null,
+  });
+}
+
 function setMember(tier: unknown, status: unknown, userId = OWNER): void {
   state.users = state.users.filter((u) => u.id !== userId);
   state.users.push({ id: userId, subscription_tier: tier, subscription_status: status });
@@ -529,6 +611,25 @@ function findElements(node: unknown, type: unknown, found: React.ReactElement[] 
   return found;
 }
 
+/** An MP4 container signature followed by filler: recognised, never decoded. */
+const SYNTHETIC_CLIP = new Uint8Array(4096);
+SYNTHETIC_CLIP.set([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
+
+/**
+ * The only network this suite answers: the owner's object at the exact signed
+ * Storage URL the fake client mints. Anything else is logged and refused.
+ */
+function storageOnlyFetch(body: Uint8Array<ArrayBuffer>) {
+  return vi.fn(async (url: RequestInfo | URL) => {
+    if (String(url).startsWith("https://storage.invalid/storage/v1/object/sign/swing-videos/")) {
+      state.log.push("storage.download");
+      return new Response(body, { status: 200, headers: { "content-type": "video/mp4" } });
+    }
+    state.log.push("fetch");
+    throw new Error("network is not available in this suite");
+  });
+}
+
 beforeEach(() => {
   state.users = [];
   state.analyses = [pendingRow()];
@@ -544,21 +645,29 @@ beforeEach(() => {
   state.claimBarrier = null;
   state.geminiCalls = 0;
   state.prompts = [];
+  state.providerRequests = [];
+  state.modelConfigs = [];
   state.geminiImpl = null;
   state.log = [];
   state.adminUpdates = [];
   state.adminReads = [];
   state.sessionSelects = [];
   state.sessionPayloadReads = [];
+  // ENT-1D D1: every analysis needs the golfer's own video, so the default
+  // owned row has one; the D1 suite removes it.
+  state.videoAvailable = true;
+  state.signingOutage = false;
+  state.beforeDispatch = null;
+  state.adminUpdateErrorOnce = false;
+  state.dispatchPersistsThenErrors = false;
+  state.failedWriteErrors = false;
+  state.beforeFailedWrite = null;
+  state.geminiTextThrows = null;
+  state.outcomeUnknownWriteErrors = false;
   setMember("none", "none");
   vi.stubEnv("GEMINI_API_KEY", "synthetic-key");
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => {
-      state.log.push("fetch");
-      throw new Error("network is not available in this suite");
-    }),
-  );
+  vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://storage.invalid");
+  vi.stubGlobal("fetch", storageOnlyFetch(SYNTHETIC_CLIP));
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -568,8 +677,8 @@ afterEach(() => {
   expect(state.log, "no network traffic").not.toContain("fetch");
   // Every elevated read is bounded by the verified owner.
   for (const r of state.adminReads) {
-    expect(r.columns).toBe(ANALYSIS_PAYLOAD_COLUMNS);
-    expect(r.filters.some((f) => f.startsWith("in:id="))).toBe(true);
+    expect([ANALYSIS_PAYLOAD_COLUMNS, ANALYSIS_EXECUTION_COLUMNS]).toContain(r.columns);
+    expect(r.filters.some((f) => f.startsWith("in:id=") || f.startsWith("eq:id="))).toBe(true);
     expect(r.filters.filter((f) => f.startsWith("eq:user_id="))).toHaveLength(1);
   }
   vi.unstubAllEnvs();
@@ -811,17 +920,32 @@ describe("C. authentication and cross-user access", () => {
     expect(state.adminUpdates).toEqual([]);
   });
 
-  it("every write restates the row, the owner and the family", async () => {
+  it("every write restates the row, the owner and the family, and is fenced by the claim", async () => {
     setMember("eagle", "active");
     await post({ analysisId: ANALYSIS_ID });
-    const [claim, completion] = state.adminUpdates;
+    const [claim, dispatch, completion] = state.adminUpdates;
     expect(claim.filters).toEqual([
       `eq:id=${ANALYSIS_ID}`,
       `eq:user_id=${OWNER}`,
       "or:analysis_family.is.null,analysis_family.eq.full_swing",
       "in:status=pending|failed",
     ]);
-    expect(completion.filters).toEqual([`eq:id=${ANALYSIS_ID}`, `eq:user_id=${OWNER}`, "eq:status=processing"]);
+    const claimId = claim.patch.processing_claim_id as string;
+    expect(claimId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(dispatch.filters).toEqual([
+      `eq:id=${ANALYSIS_ID}`,
+      `eq:user_id=${OWNER}`,
+      "eq:status=processing",
+      `eq:processing_claim_id=${claimId}`,
+      "is:provider_dispatched_at=null",
+    ]);
+    expect(completion.filters).toEqual([
+      `eq:id=${ANALYSIS_ID}`,
+      `eq:user_id=${OWNER}`,
+      "eq:status=processing",
+      `eq:processing_claim_id=${claimId}`,
+    ]);
+    expect(state.adminUpdates).toHaveLength(3);
     expect(state.log.filter((l) => l.startsWith("session.update"))).toEqual([]);
   });
 });
@@ -844,8 +968,9 @@ describe("D. duplicate Gemini execution is prevented", () => {
     ]);
   });
 
-  it("a processing analysis answers 409 with no model call and no write", async () => {
-    state.analyses = [pendingRow({ status: "processing" })];
+  it("a live processing analysis answers 409 with no model call and no change", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true })];
+    const before = structuredClone(storedRow());
     const response = await post({ analysisId: ANALYSIS_ID });
     expect(response.status).toBe(409);
     expect(await json(response)).toEqual({
@@ -853,7 +978,7 @@ describe("D. duplicate Gemini execution is prevented", () => {
       status: "processing",
     });
     expect(state.geminiCalls).toBe(0);
-    expect(state.adminUpdates).toEqual([]);
+    expect(storedRow()).toEqual(before);
   });
 
   it("two simultaneous requests for one pending analysis cause at most one model call", async () => {
@@ -861,7 +986,9 @@ describe("D. duplicate Gemini execution is prevented", () => {
     state.claimBarrier = deferredBarrier(2);
     const [a, b] = await Promise.all([post({ analysisId: ANALYSIS_ID }), post({ analysisId: ANALYSIS_ID })]);
     expect(state.geminiCalls).toBe(1);
-    expect(claimUpdates()).toHaveLength(2);
+    // Both attempted the fresh claim; exactly one held it.
+    expect(claimUpdates().filter((u) => u.filters.includes("in:status=pending|failed"))).toHaveLength(2);
+    expect(new Set(claimUpdates().map((u) => u.patch.processing_claim_id)).has(storedRow().processing_claim_id)).toBe(true);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     expect(storedRow().status).toBe("complete");
   });
@@ -938,9 +1065,9 @@ describe("E. failures are safe and never call Gemini without a claim", () => {
     expect(state.adminUpdates).toEqual([]);
   });
 
-  it("a model error marks the claimed row failed, not complete", async () => {
+  it("a definite provider rejection marks the claimed row failed, not complete", async () => {
     state.geminiImpl = async () => {
-      throw new Error("model unavailable");
+      throw new GoogleGenerativeAIFetchError("permission denied", 403);
     };
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
     expect(storedRow().status).toBe("failed");
@@ -1010,7 +1137,7 @@ describe("G. putting keeps its own contract", () => {
     const response = await post({ analysisId: ANALYSIS_ID });
     expect(response.status).toBe(403);
     expect((await json(response)).error).toBe(
-      "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
+      "Putting analysis isn't included with your current plan.",
     );
     expect(state.adminReads).toEqual([]);
     expect(state.geminiCalls).toBe(0);
@@ -1019,11 +1146,12 @@ describe("G. putting keeps its own contract", () => {
   it("the putting gate still reads the tier alone; the envelope is read on the server after it", async () => {
     setMember("birdie", "past_due");
     state.analyses = [pendingRow({ analysis_family: "putting" })];
+    state.videoAvailable = false;
     const response = await post({ analysisId: ANALYSIS_ID });
-    // Entitled by tier, as before; without a stroke video the existing
-    // pipeline refuses before any model call.
-    expect(response.status).toBe(500);
-    expect((await json(response)).error).toBe("We couldn't read your video. Please try again.");
+    // Entitled by tier, as before; without a stroke video the pipeline refuses
+    // before any model call, with the one unusable-video answer (ENT-1D D1).
+    expect(response.status).toBe(422);
+    expect(await json(response)).toEqual({ error: VIDEO_UNUSABLE_COPY, status: "video_unusable" });
     expect(state.sessionSelects.filter((s) => s.table === "users")).toEqual([
       { table: "users", columns: "subscription_tier" },
     ]);
@@ -1162,9 +1290,220 @@ describe("J. client-supplied metrics are validated before the prompt", () => {
   });
 });
 
-// ─── K. Legacy /api/v1/analyze ────────────────────────────────────────────────
+// ─── J3. client values reach the provider as labelled, unverified estimates ────
+//
+// These tests read the request the route actually built and handed to the
+// (mocked) provider. They prove prompt construction only — not what a real
+// model does with it.
 
-describe("K. /api/v1/analyze selects paid depth only from a paying membership", () => {
+describe("J3. client-supplied values are presented to the provider as unverified estimates", () => {
+  const MEASURED = { spineAngle: 31.5, hipRotation: 40, shoulderRotation: 88, tempoRatio: "3.1:1", setupSpineAngle: 38, impactSpineAngle: 30 };
+  const OVERCLAIMS = [
+    "ground truth",
+    "EXACT COMPUTER-VISION",
+    "computer-vision measurements",
+    "use verbatim",
+    "must be preserved verbatim",
+    "do not re-estimate",
+    "Do NOT contradict",
+    "DETECTED",
+    "RAW BIOMECHANICAL MEASUREMENTS",
+    "Echo exact measured value",
+    "stored labelled",
+    "apply mechanically",
+    "adjustment mechanically",
+    "diagnose confirmed",
+    "Cite the exact",
+    "8° above plane",
+  ];
+  const schemaText = () => JSON.stringify(state.providerRequests[0].generationConfig.responseSchema);
+  const systemText = () => String(state.modelConfigs.at(-1)?.systemInstruction ?? "");
+  const userText = () =>
+    (state.providerRequests[0].contents[0].parts as { text?: string }[]).map((p) => p.text ?? "").join("\n");
+
+  it("the request carries the video, the supplied values unchanged, and their provenance", async () => {
+    expect((await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED })).status).toBe(200);
+    expect(state.providerRequests).toHaveLength(1);
+    const parts = state.providerRequests[0].contents[0].parts as { inlineData?: { mimeType: string } }[];
+    expect(parts[0].inlineData?.mimeType).toBe("video/mp4");
+    const prompt = userText();
+    expect(prompt).toContain("CLIENT-REPORTED ESTIMATES (computed on the golfer's device; not independently verified — check each against the video):");
+    for (const line of [
+      "Spine Angle (address):    31.5°",
+      "Hip Rotation (impact):    40°",
+      "Shoulder Rotation (top):  88°",
+      "Tempo Ratio:              3.1:1",
+      "Spine angle change (setup→impact): 38° → 30° (8.0° drop)",
+    ]) expect(prompt).toContain(line);
+    expect(prompt).toContain("=== CLIENT-REPORTED ESTIMATES: what each value would indicate (not independently verified) ===");
+    expect(prompt).toContain("Early extension indicated by the estimates: spine angle drops 8.0° from setup (38°) to impact (30°). If the video confirms it,");
+    expect(prompt).toContain("Where the video and an estimate disagree, or an estimate cannot be judged from the video, say so and state your uncertainty — do not force agreement and do not invent a more precise number.");
+  });
+
+  it("no part of the request presents the values as verified or forbids questioning them", async () => {
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
+    const all = [userText(), systemText(), schemaText()].join("\n");
+    for (const claim of OVERCLAIMS) expect(all, claim).not.toContain(claim);
+  });
+
+  it("the system instruction requires uncertainty, not agreement, when the video and an estimate differ", async () => {
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
+    const sys = systemText();
+    expect(sys).toContain("MEASUREMENT PROVENANCE — READ BEFORE USING ANY NUMBER");
+    expect(sys).toContain("They are estimates, NOT independently\nverified instrument measurements, and they may be wrong.");
+    expect(sys).toContain("Never invent agreement, and never invent a more precise number.");
+    expect(sys).toContain("Do not apply a scoring adjustment or diagnostic rule on the strength of an estimate the\n  video contradicts or cannot support");
+  });
+
+  it("the numeric output fields ask for the estimate as given, with disagreement in the prose", async () => {
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
+    const props = state.providerRequests[0].generationConfig.responseSchema.properties as Record<string, { description: string }>;
+    for (const field of ["spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio"]) {
+      expect(props[field].description, field).toContain("The client-reported estimate when one is supplied, repeated as given");
+      expect(props[field].description, field).toContain("put any disagreement with the video in the prose");
+    }
+  });
+
+  it("without client values the prompt says none were supplied and draws no conclusion from them", async () => {
+    await post({ analysisId: ANALYSIS_ID });
+    const prompt = userText();
+    expect(prompt).toContain("Spine Angle (address):    NOT SUPPLIED — estimate from video");
+    expect(prompt).toContain("Tempo Ratio:              NOT SUPPLIED — estimate from video");
+    expect(prompt).not.toContain("indicated by the estimates");
+  });
+
+  it("valid client values are preserved in the stored row; the model's differing numbers do not replace them", async () => {
+    // The (mocked) model answers 31 / 44 / 92 / "3:1"; the client sent other values.
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
+    const row = storedRow();
+    expect([row.spine_angle, row.hip_rotation, row.shoulder_rotation, row.tempo_ratio]).toEqual([31.5, 40, 88, 3.1]);
+  });
+});
+
+// ─── J2. no usable video, no analysis (ENT-1D D1) ─────────────────────────────
+
+const VIDEO_UNUSABLE_COPY =
+  "We couldn't read a swing from this video, so it wasn't analysed and no score was saved. Please upload the swing again as an MP4, MOV or WebM video.";
+
+/** What a refused attempt must leave: failed, unscored, lease cleared, never dispatched. */
+function expectRefusedUnscored(): void {
+  const row = storedRow();
+  expect(row.status).toBe("failed");
+  for (const col of ["score", "feedback", "metrics", "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "putting_analysis", "putting_score"]) {
+    expect(row[col], col).toBeNull();
+  }
+  for (const col of ["processing_claim_id", "processing_started_at", "processing_heartbeat_at", "provider_dispatched_at"]) {
+    expect(row[col] ?? null, col).toBeNull();
+  }
+}
+
+describe("J2. an analysis without a usable video is refused before the provider", () => {
+  const MEASURED = { spineAngle: 31.5, hipRotation: 40, shoulderRotation: 88, tempoRatio: "3.1:1", setupSpineAngle: 32, impactSpineAngle: 30 };
+
+  it.each([
+    ["no stored object (signing refused)", () => { state.videoAvailable = false; }],
+    ["an empty object", () => { vi.stubGlobal("fetch", storageOnlyFetch(new Uint8Array(0))); }],
+    ["an object under the minimum size", () => { vi.stubGlobal("fetch", storageOnlyFetch(SYNTHETIC_CLIP.subarray(0, 512))); }],
+    ["bytes that are not a recognised video container", () => { vi.stubGlobal("fetch", storageOnlyFetch(new Uint8Array(4096).fill(0x41))); }],
+    ["an object over the analysis limit", () => { vi.stubGlobal("fetch", storageOnlyFetch(new Uint8Array(14 * 1_048_576 + 1))); }],
+    ["an object that is gone by download time", () => {
+      vi.stubGlobal("fetch", vi.fn(async () => { state.log.push("storage.download"); return new Response("gone", { status: 404 }); }));
+    }],
+    ["an image in an ftyp box (HEIC)", () => {
+      const heic = new Uint8Array(4096); heic.set([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63]);
+      vi.stubGlobal("fetch", storageOnlyFetch(heic));
+    }],
+  ])("full swing, %s: 422, no model call, nothing scored, claim released", async (_label, arrange) => {
+    arrange();
+    // Complete client measurements are sent on purpose: they are not proof
+    // that the swing was observed, so they cannot stand in for the video.
+    const response = await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
+    expect(response.status).toBe(422);
+    expect(await json(response)).toEqual({ error: VIDEO_UNUSABLE_COPY, status: "video_unusable" });
+    expect(state.geminiCalls).toBe(0);
+    expect(state.prompts).toEqual([]);
+    expectRefusedUnscored();
+  });
+
+  it.each([
+    ["Storage signing is down", () => { state.signingOutage = true; }],
+    ["the download fails on the service side", () => {
+      vi.stubGlobal("fetch", vi.fn(async () => { state.log.push("storage.download"); return new Response("busy", { status: 503 }); }));
+    }],
+  ])("full swing, %s: 503 temporarily unavailable (retryable), no model call, nothing scored", async (_label, arrange) => {
+    arrange();
+    const response = await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
+    expect(response.status).toBe(503);
+    expect(await json(response)).toEqual({ error: "Analysis is temporarily unavailable. Please try again shortly." });
+    expect(state.geminiCalls).toBe(0);
+    expectRefusedUnscored();
+    // The same video succeeds once the service is back.
+    state.videoAvailable = true; state.signingOutage = false;
+    vi.stubGlobal("fetch", storageOnlyFetch(SYNTHETIC_CLIP));
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+  });
+
+  it("the same refusal for an entitled putt", async () => {
+    puttWithVideo();
+    vi.stubGlobal("fetch", storageOnlyFetch(new Uint8Array(4096).fill(0x41)));
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(422);
+    expect((await json(response)).status).toBe("video_unusable");
+    expect(state.geminiCalls).toBe(0);
+    expectRefusedUnscored();
+  });
+
+  it("a refused row is retryable once the video is usable, and only then is the provider called", async () => {
+    state.videoAvailable = false;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(422);
+    expect(state.geminiCalls).toBe(0);
+    state.videoAvailable = true;
+    const retry = await post({ analysisId: ANALYSIS_ID });
+    expect(retry.status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+    expect(storedRow().status).toBe("complete");
+  });
+
+  it("a completed analysis is served from the stored row even when its video is gone", async () => {
+    state.analyses = [completeRow()];
+    state.videoAvailable = false;
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    expect((await json(response)).data.score).toBe(72);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().status).toBe("complete");
+  });
+
+  it("a superseded holder's refusal changes nothing it no longer holds", async () => {
+    state.videoAvailable = false;
+    state.failedWriteErrors = true; // the guarded release does not land
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("processing");
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().provider_dispatched_at ?? null).toBeNull();
+  });
+
+  it("the route keeps no text-only path and gates on the load before the dispatch mark", () => {
+    const route = readFileSync(path.join(__dirname, "..", "app/api/analyze-swing/route.ts"), "utf8");
+    expect(route).not.toContain("proceeding without inline video");
+    expect(route).not.toContain("(text only)");
+    expect(route).not.toContain("No video was attached");
+    const fullSwingLoad = route.indexOf("const videoData = await loadOwnedSwingVideo(supabase, videoRow?.storage_path");
+    const gate = route.indexOf('if (videoData.status !== "ok") {', fullSwingLoad);
+    const dispatch = route.indexOf("markProviderDispatched({ analysisId, userId: user.id, claimId })", fullSwingLoad);
+    expect(fullSwingLoad).toBeGreaterThan(0);
+    expect(gate).toBeGreaterThan(fullSwingLoad);
+    expect(gate).toBeLessThan(dispatch);
+    expect(route.slice(gate, gate + 200)).toContain("return await videoLoadRefused(analysisId, user.id, claimId, videoData.status);");
+    expect(route).toMatch(/async function videoLoadRefused[\s\S]*?releaseUndispatchedClaimAsFailed/);
+  });
+});
+
+// ─── K. /api/v1/analyze is retired (ENT-1D) ───────────────────────────────────
+
+describe("K. /api/v1/analyze no longer reaches any provider", () => {
   const legacy = (body: unknown) =>
     legacyAnalyzePOST(
       new Request("https://www.swingpro-ai.com/api/v1/analyze", {
@@ -1175,63 +1514,36 @@ describe("K. /api/v1/analyze selects paid depth only from a paying membership", 
     );
   const clip = { videoData: "AAAA", mimeType: "video/mp4" };
 
-  function backendReturns(): void {
+  function backendWouldAnswer(): void {
     vi.stubEnv("AI_BACKEND_URL", "https://backend.invalid");
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
         state.log.push("backend");
-        return new Response(
-          JSON.stringify({
-            data: {
-              score: 80,
-              overall_feedback: "ok",
-              swing_highlights: [{ ...HIGHLIGHT, hidden: "UNCLASSIFIED-SECRET" }],
-              mechanical_deficiencies: [DEFICIENCY],
-            },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
+        return new Response("{}", { status: 200 });
       }),
     );
   }
 
-  it("an unreadable profile runs nothing", async () => {
-    state.users = [];
-    backendReturns();
-    expect((await legacy(clip)).status).toBe(503);
+  it("401 without a session", async () => {
+    state.sessionUserId = null;
+    backendWouldAnswer();
+    expect((await legacy(clip)).status).toBe(401);
     expect(state.log).not.toContain("backend");
   });
 
   it.each([
-    ["eagle", "past_due"],
-    ["coach_pro", "active"],
-    ["par", "active"],
-  ])("%s / %s gets the basic path and never reaches the paid backend", async (tier, status) => {
+    ["eagle", "active"],
+    ["birdie", "trialing"],
+    ["none", "none"],
+  ])("%s / %s receives 410 and no backend call, whatever the backend configuration", async (tier, status) => {
     setMember(tier, status);
-    backendReturns();
-    const body = await json(await legacy(clip));
-    expect(body._mode).toBe("basic");
+    backendWouldAnswer();
+    const response = await legacy(clip);
+    expect(response.status).toBe(410);
+    expect((await json(response)).error).toContain("POST /api/v1/analyses");
     expect(state.log).not.toContain("backend");
-  });
-
-  it.each([
-    ["birdie", "active", "advanced"],
-    ["eagle", "trialing", "ultra"],
-  ])("%s / %s gets %s depth with item-level allow-listed sections", async (tier, status, mode) => {
-    setMember(tier, status);
-    backendReturns();
-    const body = await json(await legacy(clip));
-    expect(body._mode).toBe(mode);
-    expect(body.swing_highlights).toEqual([HIGHLIGHT]);
-    expectNoSentinels(JSON.stringify(body));
-  });
-
-  it("backend failure text is never relayed", async () => {
-    setMember("eagle", "active");
-    vi.stubEnv("AI_BACKEND_URL", "https://backend.invalid");
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("internal trace: secret-host:5432", { status: 500 })));
-    expect(JSON.stringify(await json(await legacy(clip)))).not.toContain("secret-host");
+    expect(state.sessionSelects).toEqual([]);
   });
 });
 
@@ -1473,5 +1785,920 @@ describe("Q. native/web consistency and failure states", () => {
     state.analyses = [completeRow()];
     state.adminReadError = true;
     await expect(SwingDetailPage({ params: { id: ANALYSIS_ID } })).rejects.toThrow("NEXT_NOT_FOUND");
+  });
+});
+
+// ─── R. Lease recovery, stalls and fencing (ENT-1D) ───────────────────────────
+
+import {
+  ANALYSIS_LEASE_SECONDS,
+  claimAnalysisExecution,
+  heartbeatAnalysisClaim,
+  markProviderDispatched,
+  readExecutionState,
+  releaseAnalysisClaimAsFailed,
+} from "@/lib/analysis-execution-claim";
+
+const STALE = ANALYSIS_LEASE_SECONDS + 60;
+
+describe("R. execution lease: recovery without duplicate provider calls", () => {
+  it("an expired claim whose holder never reached the model is recovered, with one model call", async () => {
+    state.analyses = [liveClaimRow({ dispatched: false, ageSeconds: STALE })];
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+    expect(storedRow().status).toBe("complete");
+    expect(storedRow().processing_claim_id).not.toBe(OTHER_CLAIM);
+    const takeover = state.adminUpdates.find((u) => u.filters.includes("is:provider_dispatched_at=null") && u.filters.includes("eq:status=processing") && u.patch.status === "processing");
+    expect(takeover?.filters.some((f) => f.startsWith("lt:processing_heartbeat_at="))).toBe(true);
+  });
+
+  it("an expired claim that had reached the model is stalled: 409, no model call, no change", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true, ageSeconds: STALE })];
+    const before = structuredClone(storedRow());
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    const body = await json(response);
+    expect(body.status).toBe("stalled");
+    expect(body.error).not.toMatch(/checkout|upgrade|subscription/i);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow()).toEqual(before);
+  });
+
+  it("a live undispatched claim is not taken over", async () => {
+    state.analyses = [liveClaimRow({ dispatched: false, ageSeconds: 30 })];
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().processing_claim_id).toBe(OTHER_CLAIM);
+  });
+
+  it("two requests racing to recover one expired claim cause one model call", async () => {
+    state.analyses = [liveClaimRow({ dispatched: false, ageSeconds: STALE })];
+    state.claimBarrier = deferredBarrier(2);
+    const [a, b] = await Promise.all([post({ analysisId: ANALYSIS_ID }), post({ analysisId: ANALYSIS_ID })]);
+    expect(state.geminiCalls).toBe(1);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+  });
+
+  it("a holder whose claim was superseded before dispatch never calls the model", async () => {
+    // Another request takes the row over between this claim and its dispatch.
+    state.beforeDispatch = () => {
+      storedRow().processing_claim_id = OTHER_CLAIM;
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().processing_claim_id).toBe(OTHER_CLAIM);
+    expect(storedRow().status).toBe("processing");
+  });
+
+  it("a superseded holder's completion and failure writes change nothing", async () => {
+    state.geminiImpl = async () => {
+      // An operator released the row and another request claimed it mid-call.
+      storedRow().processing_claim_id = OTHER_CLAIM;
+      return JSON.stringify(validReport());
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(400);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().processing_claim_id).toBe(OTHER_CLAIM);
+    expect(storedRow().score).toBeNull();
+  });
+
+  it("a model error after a takeover cannot fail the new holder's row", async () => {
+    state.geminiImpl = async () => {
+      storedRow().processing_claim_id = OTHER_CLAIM;
+      throw new GoogleGenerativeAIFetchError("permission denied", 403);
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("processing");
+  });
+
+  it("a completed analysis is never claimed again, whatever its lease columns say", async () => {
+    state.analyses = [completeRow({ processing_claim_id: OTHER_CLAIM, processing_heartbeat_at: "2026-01-01T00:00:00.000Z", processing_started_at: "2026-01-01T00:00:00.000Z", provider_dispatched_at: null })];
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(0);
+    expect(state.adminUpdates).toEqual([]);
+  });
+});
+
+describe("R2. claim module primitives", () => {
+  const target = { analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" as const };
+
+  it("claims from pending once; a second claim is refused", async () => {
+    const first = await claimAnalysisExecution(target);
+    expect(first.outcome).toBe("claimed");
+    expect(await claimAnalysisExecution(target)).toEqual({ outcome: "not_claimed" });
+  });
+
+  it("dispatch, heartbeat and release are honoured only for the current claim", async () => {
+    const claim = await claimAnalysisExecution(target);
+    if (claim.outcome !== "claimed") throw new Error("fixture");
+    const held = { analysisId: ANALYSIS_ID, userId: OWNER, claimId: claim.claimId };
+    const stranger = { ...held, claimId: OTHER_CLAIM };
+    expect(await heartbeatAnalysisClaim(stranger)).toBe(false);
+    expect(await markProviderDispatched(stranger)).toBe(false);
+    expect(await releaseAnalysisClaimAsFailed(stranger)).toBe(false);
+    expect(await heartbeatAnalysisClaim(held)).toBe(true);
+    expect(await markProviderDispatched(held)).toBe(true);
+    // Dispatch is recorded once; a second dispatch is refused.
+    expect(await markProviderDispatched(held)).toBe(false);
+    expect(await releaseAnalysisClaimAsFailed({ ...held, userId: OTHER })).toBe(false);
+    expect(await releaseAnalysisClaimAsFailed(held)).toBe(true);
+    expect(storedRow().status).toBe("failed");
+    // Released means no longer held.
+    expect(await heartbeatAnalysisClaim(held)).toBe(false);
+  });
+
+  it("R1: an undispatched release clears the whole lease; a dispatched release keeps it", async () => {
+    const first = await claimAnalysisExecution(target);
+    if (first.outcome !== "claimed") throw new Error("fixture");
+    expect(await releaseAnalysisClaimAsFailed({ ...target, claimId: first.claimId })).toBe(true);
+    expect(storedRow()).toMatchObject({
+      status: "failed",
+      processing_claim_id: null,
+      processing_started_at: null,
+      processing_heartbeat_at: null,
+      provider_dispatched_at: null,
+    });
+
+    const second = await claimAnalysisExecution(target);
+    if (second.outcome !== "claimed") throw new Error("fixture");
+    const held = { ...target, claimId: second.claimId };
+    expect(await markProviderDispatched(held)).toBe(true);
+    expect(await releaseAnalysisClaimAsFailed(held)).toBe(true);
+    expect(storedRow().status).toBe("failed");
+    expect(storedRow().processing_claim_id).toBe(second.claimId);
+    expect(storedRow().provider_dispatched_at).not.toBeNull();
+    const kept = state.adminUpdates.at(-1);
+    expect(kept?.patch).toEqual({ status: "failed", processing_claim_proof: second.claimId });
+    expect(kept?.filters).toContain("not.is:provider_dispatched_at=null");
+    expect(kept?.filters).toContain("gt:processing_heartbeat_at=1970-01-01T00:00:00.000Z");
+
+    // An unknown outcome is released by neither branch: it stays stalled.
+    storedRow().status = "pending";
+    const third = await claimAnalysisExecution(target);
+    if (third.outcome !== "claimed") throw new Error("fixture");
+    const unknown = { ...target, claimId: third.claimId };
+    expect(await markProviderDispatched(unknown)).toBe(true);
+    expect(await markClaimOutcomeUnknown(unknown)).toBe(true);
+    expect(await releaseAnalysisClaimAsFailed(unknown)).toBe(false);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().processing_claim_id).toBe(third.claimId);
+
+    // ENT-1D R1b: every holder write states the claim it is fenced on as the
+    // in-row proof the database guard checks (migration 20261027120000).
+    const holderWrites = state.adminUpdates.filter((u) => u.filters.some((f) => f.startsWith("eq:processing_claim_id=")));
+    expect(holderWrites.length).toBeGreaterThan(5);
+    for (const write of holderWrites) {
+      const fenced = write.filters.find((f) => f.startsWith("eq:processing_claim_id="))?.slice("eq:processing_claim_id=".length);
+      expect(write.patch.processing_claim_proof, JSON.stringify(write.filters)).toBe(fenced);
+    }
+  });
+
+  it("never claims another golfer's analysis or another family", async () => {
+    expect(await claimAnalysisExecution({ ...target, userId: OTHER })).toEqual({ outcome: "not_claimed" });
+    expect(await claimAnalysisExecution({ ...target, family: "putting" })).toEqual({ outcome: "not_claimed" });
+    expect(storedRow().status).toBe("pending");
+  });
+
+  it("reads state as in progress, stalled, complete or not startable", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true })];
+    expect(await readExecutionState(target)).toBe("in_progress");
+    state.analyses = [liveClaimRow({ dispatched: true, ageSeconds: STALE })];
+    expect(await readExecutionState(target)).toBe("stalled");
+    state.analyses = [liveClaimRow({ dispatched: false, ageSeconds: STALE })];
+    expect(await readExecutionState(target)).toBe("in_progress");
+    state.analyses = [completeRow()];
+    expect(await readExecutionState(target)).toBe("complete");
+    state.analyses = [pendingRow({ status: "uploaded" })];
+    expect(await readExecutionState(target)).toBe("not_startable");
+    expect(await readExecutionState({ ...target, userId: OTHER })).toBe("not_found");
+    state.adminReadError = true;
+    expect(await readExecutionState(target)).toBe("unavailable");
+  });
+
+  it("an unconstructable writer is unavailable, never a claim", async () => {
+    state.adminThrows = true;
+    expect(await claimAnalysisExecution(target)).toEqual({ outcome: "unavailable" });
+    expect(await markProviderDispatched({ analysisId: ANALYSIS_ID, userId: OWNER, claimId: OTHER_CLAIM })).toBe(false);
+  });
+});
+
+// ─── S. Putting: the same claim, the same fencing ────────────────────────────
+
+function puttingModelResponse(): string {
+  return JSON.stringify({
+    summary: "The stroke is compact and repeatable, with a settled lower body throughout.",
+    setup_alignment: { assessment: "sound", observation: "The eyes sit over the ball at address." },
+    stroke_path: { assessment: "arc", observation: "The path appears to arc gently inside." },
+    face_at_impact: { assessment: "appears_square", observation: "Face at impact appears square to the path." },
+    tempo_rhythm: { assessment: "smooth", observation: "The rhythm looks smooth and unhurried." },
+    stroke_symmetry: { assessment: "balanced", observation: "Backswing and through-stroke look evenly matched." },
+    stability: { assessment: "stable", observation: "The head stays quiet from address to finish." },
+    primary_finding: "Alignment and stability are the strengths of this stroke.",
+    practice_focus: "Work on maintaining a quieter lower body throughout the stroke.",
+  });
+}
+
+function puttWithVideo(): void {
+  setMember("birdie", "active");
+  state.analyses = [pendingRow({ analysis_family: "putting" })];
+  state.videoAvailable = true;
+  state.geminiImpl = async () => puttingModelResponse();
+}
+
+describe("S. putting execution is claimed and fenced", () => {
+  it("an entitled putt completes once, and the response is the authorized view", async () => {
+    puttWithVideo();
+    const response = await post({ analysisId: ANALYSIS_ID });
+    const body = await json(response);
+    expect(response.status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+    expect(storedRow().status).toBe("complete");
+    expect(body.data.putting_analysis.summary).toContain("compact and repeatable");
+    expect(body.data.swing_video).toBeUndefined();
+    expectNoSentinels(JSON.stringify(body));
+  });
+
+  it("two simultaneous putts cause one model call, and the loser cannot fail the winner", async () => {
+    puttWithVideo();
+    state.claimBarrier = deferredBarrier(2);
+    const [a, b] = await Promise.all([post({ analysisId: ANALYSIS_ID }), post({ analysisId: ANALYSIS_ID })]);
+    expect(state.geminiCalls).toBe(1);
+    // The loser answers 409, or (reading after the winner finished) the stored
+    // result. Never a second run, and never a failure of the winner.
+    expect([a.status, b.status]).toContain(200);
+    for (const status of [a.status, b.status]) expect([200, 409]).toContain(status);
+    expect(storedRow().status).toBe("complete");
+  });
+
+  it("a repeated putt after completion is served from the stored result", async () => {
+    puttWithVideo();
+    await post({ analysisId: ANALYSIS_ID });
+    const replay = await post({ analysisId: ANALYSIS_ID });
+    expect(replay.status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+    expectNoSentinels(JSON.stringify(await json(replay)));
+  });
+
+  it("a putt held by a live claim answers 409 with no model call", async () => {
+    puttWithVideo();
+    state.analyses = [liveClaimRow({ dispatched: true, family: "putting" })];
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+  });
+
+  it("a stalled putt is never re-run automatically", async () => {
+    puttWithVideo();
+    state.analyses = [liveClaimRow({ dispatched: true, ageSeconds: STALE, family: "putting" })];
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("stalled");
+    expect(state.geminiCalls).toBe(0);
+  });
+
+  it("a superseded putting holder cannot complete or fail the row", async () => {
+    puttWithVideo();
+    state.geminiImpl = async () => {
+      storedRow().processing_claim_id = OTHER_CLAIM;
+      return puttingModelResponse();
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(400);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().putting_score).toBeNull();
+  });
+
+  it("a putt that cannot be claimed (writer down) never reaches the model", async () => {
+    puttWithVideo();
+    state.claimError = true;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(state.geminiCalls).toBe(0);
+  });
+});
+
+// ─── T. Migration contract (offline; no SQL is executed) ──────────────────────
+
+describe("T. ENT-1D migrations agree with the application", () => {
+  const lease = read("supabase/migrations/20261026120000_ent1d_analysis_execution_lease.sql");
+  const privileges = read("supabase/migrations/20261026120100_ent1d_analysis_result_privileges.sql");
+  const grantBlock = privileges.slice(privileges.indexOf("grant select ("), privileges.indexOf("on table public.swing_analysis to authenticated;"));
+  const granted = grantBlock
+    .replace("grant select (", "")
+    .replace(")", "")
+    .split(",")
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  it("grants authenticated exactly the session-readable columns the application uses", () => {
+    expect([...granted].sort()).toEqual(ANALYSIS_OWNER_COLUMNS.split(",").map((c) => c.trim()).sort());
+    for (const payload of Array.from(PAYLOAD_COLUMNS)) expect(granted).not.toContain(payload);
+    for (const lease of ["processing_claim_id", "processing_started_at", "processing_heartbeat_at", "provider_dispatched_at"]) {
+      expect(granted).not.toContain(lease);
+    }
+  });
+
+  it("every application session read of swing_analysis stays inside the grant", () => {
+    const reads: [string, RegExp][] = [
+      ["app/(dashboard)/dashboard/page.tsx", /\.from\("swing_analysis"\)\s*(?:\/\/[^\n]*\n\s*)*\.select\("([^"]+)"\)/],
+      ["app/(dashboard)/swings/[id]/page.tsx", /\.from\("swing_analysis"\)\s*\.select\("([^"]+)"\)/],
+      ["app/(dashboard)/analyze/[id]/page.tsx", /\.from\("swing_analysis"\)\s*\.select\(`([^`]+)`\)/],
+      ["app/(dashboard)/telemetry/page.tsx", /\.from\("swing_analysis"\)\s*\.select\(`([^`]+)`\)/],
+    ];
+    for (const [file, pattern] of reads) {
+      const match = read(file).match(pattern);
+      expect(match, file).not.toBeNull();
+      const columns = requestedColumns(match![1]) ?? ["*"];
+      for (const column of columns) expect(granted, `${file}: ${column}`).toContain(column);
+    }
+    const requestColumns = read("lib/api/v1-analysis-dto.ts").match(/ANALYSIS_REQUEST_COLUMNS =\s*"([^"]+)"/);
+    for (const column of requestedColumns(requestColumns![1]) ?? ["*"]) expect(granted).toContain(column);
+  });
+
+  it("the legacy report page hands the authority every owner column (no score of 0, no blank assessment)", () => {
+    // authorizeOwnedAnalysisRow takes the core scalars from the session row it is
+    // given; a column missing from that select renders as missing. Found by local
+    // browser acceptance: a completed swing scored 77 showed "0 · NEEDS WORK".
+    const match = read("app/(dashboard)/analyze/[id]/page.tsx").match(/\.from\("swing_analysis"\)\s*\.select\(`([^`]+)`\)/);
+    const selected = requestedColumns(match![1]) ?? [];
+    for (const column of ANALYSIS_OWNER_COLUMNS.split(",").map((c) => c.trim())) {
+      expect(selected, column).toContain(column);
+    }
+  });
+
+  it("the putting recommendation source read on the session is ownership-only when a server reader is supplied", () => {
+    const authority = read("lib/putting-recommendation-authority-eq5e-c.ts");
+    const ownership = authority.match(/SOURCE_OWNERSHIP_COLUMNS = "([^"]+)"/);
+    for (const column of requestedColumns(ownership![1]) ?? ["*"]) expect(granted).toContain(column);
+    expect(read("app/(dashboard)/swings/[id]/page.tsx")).toContain("readEnvelope:");
+  });
+
+  it("revokes from PUBLIC, anon and authenticated at table and column level, and keeps service_role", () => {
+    expect(privileges).toContain("revoke all privileges on table public.swing_analysis from public, anon, authenticated;");
+    expect(privileges).toContain("revoke all privileges on table public.swing_videos from public, anon;");
+    expect(privileges).toContain("revoke delete, truncate, references, trigger on table public.swing_videos from authenticated;");
+    expect(privileges).toContain("revoke maintain on table public.swing_videos from authenticated");
+    expect(privileges).toContain("pg_catalog.aclexplode(a.attacl)");
+    expect(privileges).toMatch(/service_role lost/);
+    const code = privileges.split("\n").filter((line) => !line.trimStart().startsWith("--")).join("\n");
+    expect(code).not.toMatch(/\bgrant\b[^;]*\bto (anon|public)\b/i);
+    expect(code).not.toMatch(/\brevoke\b[^;]*\bfrom\b[^;]*\bservice_role\b/i);
+  });
+
+  it("is version-aware about MAINTAIN and refuses to run before the lease migration", () => {
+    expect(privileges).toContain("server_version_num')::integer >= 170000");
+    expect(privileges).toContain("ENT1D-PRIV-PRE-1");
+    expect(privileges.indexOf("processing_claim_id")).toBeLessThan(privileges.indexOf("revoke all privileges"));
+  });
+
+  it("the lease migration is additive and never makes a legacy processing row re-runnable", () => {
+    const leaseCode = lease.split("\n").filter((line) => !line.trimStart().startsWith("--")).join("\n");
+    expect(leaseCode).not.toMatch(/\b(grant|revoke|drop|create (or replace )?function|create trigger)\b/i);
+    expect(lease).toContain("provider_dispatched_at = pg_catalog.now()");
+    expect(lease).toContain("where status = 'processing'");
+    expect(lease).toContain("swing_analysis_processing_claim_shape");
+  });
+
+  it("neither migration contains transaction control or touches another table's data", () => {
+    for (const sql of [lease, privileges]) {
+      const code = sql.split("\n").filter((line) => !line.trimStart().startsWith("--")).join("\n");
+      expect(code).not.toMatch(/^\s*(begin|commit|rollback)\s*;/im);
+      expect(code).not.toMatch(/^\s*(delete\s+from|truncate\s+(table\s+)?public)\b/im);
+    }
+  });
+
+  it("every ENT-1D migration bounds lock waits to its own transaction and refuses to run without it", () => {
+    const files = [
+      "20261026120000_ent1d_analysis_execution_lease.sql",
+      "20261026120050_ent1d_claim_proof_column.sql",
+      "20261026120100_ent1d_analysis_result_privileges.sql",
+      "20261027120000_ent1d_execution_claim_guard.sql",
+      "20261027120100_ent1d_swing_video_source_guard.sql",
+    ];
+    for (const file of files) {
+      const sql = read(`supabase/migrations/${file}`);
+      const statements = sql.split("\n").filter((line) => line.trim() && !line.trimStart().startsWith("--"));
+      // The first statement is the transaction-local limit; the second proves it is active.
+      expect(statements[0], file).toBe("set local lock_timeout = '3s';");
+      expect(statements[1], file).toBe("do $lock_timeout$");
+      expect(sql.match(/lock_timeout = '3s'/g), file).toHaveLength(1);
+      expect(sql, file).toContain("ENT1D-LOCK-TIMEOUT");
+      expect(sql, file).not.toMatch(/^\s*(set|reset)\s+(session\s+)?lock_timeout\b/im);
+      expect(sql, file).not.toMatch(/^\s*(begin|commit|rollback)\s*;/im);
+    }
+  });
+});
+
+// ─── U. Review follow-ups (ENT-1D) ────────────────────────────────────────────
+
+import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
+import { readdirSync, statSync } from "node:fs";
+
+describe("U. pre-lease claims, dispatch outages and the envelope reader", () => {
+  it("a processing row with no claim (taken by pre-lease code) is stalled, never claimed, never re-run", async () => {
+    state.analyses = [pendingRow({ status: "processing" })];
+    const target = { analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" as const };
+    expect(await readExecutionState(target)).toBe("stalled");
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("stalled");
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().processing_claim_id ?? null).toBeNull();
+  });
+
+  it("a dispatch write refused by an outage releases the claim as failed and answers 503", async () => {
+    state.beforeDispatch = () => {
+      state.adminUpdateErrorOnce = true;
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(503);
+    expect(await json(response)).toEqual({ error: "Analysis is temporarily unavailable. Please try again shortly." });
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().status).toBe("failed");
+    // Nothing reached the provider, so the golfer's retry runs it exactly once.
+    state.beforeDispatch = null;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+  });
+
+  const owned = () => completeRow({ analysis_family: "putting", putting_analysis: { unrelated: "UNCLASSIFIED-SECRET" } });
+
+  it("with a server reader, the session read is ownership-only and the reader's envelope is used", async () => {
+    state.analyses = [owned()];
+    const result = await resolvePuttingDrillRecommendations(makeSessionClient() as never, {
+      userId: OWNER,
+      tier: "birdie",
+      sourceAnalysisId: ANALYSIS_ID,
+      readEnvelope: async () => undefined,
+    });
+    expect(result).toEqual({ status: "unavailable" });
+    const read = state.sessionSelects.find((s) => s.table === "swing_analysis");
+    expect(read?.columns).toBe("id, user_id, status, analysis_family");
+    expect(state.sessionPayloadReads).toEqual([]);
+  });
+
+  it("a reader that throws, or returns an invalid envelope, is unavailable, never a recommendation", async () => {
+    state.analyses = [owned()];
+    for (const readEnvelope of [
+      async () => {
+        throw new Error("payload read failed");
+      },
+      async () => ({ not: "an envelope" }),
+    ]) {
+      const result = await resolvePuttingDrillRecommendations(makeSessionClient() as never, {
+        userId: OWNER,
+        tier: "birdie",
+        sourceAnalysisId: ANALYSIS_ID,
+        readEnvelope,
+      });
+      expect(result).toEqual({ status: "unavailable" });
+    }
+  });
+
+  it("the reader is never consulted for another golfer's analysis", async () => {
+    state.analyses = [owned()];
+    state.sessionUserId = OTHER;
+    let consulted = false;
+    const result = await resolvePuttingDrillRecommendations(makeSessionClient() as never, {
+      userId: OTHER,
+      tier: "birdie",
+      sourceAnalysisId: ANALYSIS_ID,
+      readEnvelope: async () => {
+        consulted = true;
+        return undefined;
+      },
+    });
+    expect(result).toEqual({ status: "unavailable" });
+    expect(consulted).toBe(false);
+  });
+});
+
+describe("U2. repository-wide: no session read of swing_analysis can outgrow the grant", () => {
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(path.join(ROOT, dir))) {
+      const rel = `${dir}/${entry}`;
+      const full = path.join(ROOT, rel);
+      if (statSync(full).isDirectory()) {
+        if (entry !== "node_modules" && !entry.startsWith(".")) walk(rel);
+      } else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
+        files.push(rel);
+      }
+    }
+  };
+  for (const dir of ["app", "lib", "components", "utils"]) walk(dir);
+
+  it("never selects * on swing_analysis", () => {
+    for (const file of files) {
+      const source = read(file);
+      expect(source, file).not.toMatch(/\.from\("swing_analysis"\)\s*\.select\(\s*["'`]\s*\*/);
+    }
+  });
+
+  it("every embed of swing_analysis names only granted columns", () => {
+    const privileges = read("supabase/migrations/20261026120100_ent1d_analysis_result_privileges.sql");
+    const block = privileges.slice(privileges.indexOf("grant select ("), privileges.indexOf("on table public.swing_analysis to authenticated;"));
+    const granted = block.replace("grant select (", "").replace(")", "").split(",").map((c) => c.trim()).filter(Boolean);
+    let embeds = 0;
+    for (const file of files) {
+      for (const match of Array.from(read(file).matchAll(/(?<![.\w])swing_analysis\(([^)]*)\)/g))) {
+        embeds += 1;
+        for (const column of match[1].split(",").map((c) => c.trim()).filter(Boolean)) {
+          expect(granted, `${file}: ${column}`).toContain(column);
+        }
+      }
+    }
+    expect(embeds).toBeGreaterThan(0);
+  });
+});
+
+// ─── V. Ambiguous dispatch writes and stalled-state presentation (ENT-1D) ─────
+
+import { releaseUndispatchedClaimAsFailed } from "@/lib/analysis-execution-claim";
+import {
+  GoogleGenerativeAIAbortError,
+  GoogleGenerativeAIError,
+  GoogleGenerativeAIFetchError,
+  GoogleGenerativeAIResponseError,
+} from "@google/generative-ai";
+import { markClaimOutcomeUnknown } from "@/lib/analysis-execution-claim";
+
+describe("V. a dispatch mark that was not confirmed never leads to a provider call or a re-runnable row", () => {
+  it("a dispatch write that persists but returns an error: no model call, marker kept, row not re-runnable", async () => {
+    state.dispatchPersistsThenErrors = true;
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("processing");
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().provider_dispatched_at).not.toBeNull();
+    // A new request cannot claim it, now or after the lease.
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    storedRow().processing_heartbeat_at = new Date(Date.now() - STALE * 1000).toISOString();
+    const later = await post({ analysisId: ANALYSIS_ID });
+    expect(later.status).toBe(409);
+    expect((await json(later)).status).toBe("stalled");
+    expect(state.geminiCalls).toBe(0);
+  });
+
+  it("the same ambiguity on a putt: no model call, never re-runnable", async () => {
+    puttWithVideo();
+    state.dispatchPersistsThenErrors = true;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().provider_dispatched_at).not.toBeNull();
+  });
+
+  it("an unsuccessful release after a refused dispatch: no model call, row untouched beyond its claim", async () => {
+    state.adminUpdateErrorOnce = true; // the dispatch write fails and does not land
+    state.failedWriteErrors = true; // and so does the release
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().provider_dispatched_at).toBeNull();
+    // Nothing reached the provider, so after the lease it is safely recoverable.
+    state.failedWriteErrors = false;
+    storedRow().processing_heartbeat_at = new Date(Date.now() - STALE * 1000).toISOString();
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+  });
+
+  it("a concurrent ownership change during the release: the newer claim is untouched", async () => {
+    state.adminUpdateErrorOnce = true;
+    state.beforeFailedWrite = () => {
+      storedRow().processing_claim_id = OTHER_CLAIM;
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().processing_claim_id).toBe(OTHER_CLAIM);
+  });
+
+  it("the undispatched release requires the same claim, processing, and no dispatch", async () => {
+    const claim = await claimAnalysisExecution({ analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" });
+    if (claim.outcome !== "claimed") throw new Error("fixture");
+    const held = { analysisId: ANALYSIS_ID, userId: OWNER, claimId: claim.claimId };
+    const release = state.adminUpdates.length;
+    expect(await releaseUndispatchedClaimAsFailed({ ...held, claimId: OTHER_CLAIM })).toBe(false);
+    expect(await markProviderDispatched(held)).toBe(true);
+    expect(await releaseUndispatchedClaimAsFailed(held)).toBe(false);
+    expect(storedRow().status).toBe("processing");
+    const filters = state.adminUpdates.slice(release).find((u) => u.patch.status === "failed")?.filters;
+    expect(filters).toEqual([
+      `eq:id=${ANALYSIS_ID}`,
+      `eq:user_id=${OWNER}`,
+      "eq:status=processing",
+      `eq:processing_claim_id=${OTHER_CLAIM}`,
+      "is:provider_dispatched_at=null",
+    ]);
+  });
+
+  it("the provider is never called unless the dispatch write confirmed exactly one row", async () => {
+    // Covered above for errors; here the write succeeds but matches nothing.
+    state.beforeDispatch = () => {
+      storedRow().provider_dispatched_at = new Date().toISOString();
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(state.geminiCalls).toBe(0);
+  });
+});
+
+describe("V2. stalled analyses are presented as stalled, not as in progress", () => {
+  it("/swings/[id] shows the interruption, not the in-progress banner, for a stalled analysis", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true, ageSeconds: STALE })];
+    const html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    expect(html).toContain("interrupted");
+    expect(html).toContain("Record again");
+    expect(html).not.toContain("AI analysis in progress");
+    expect(html).not.toMatch(/claim|dispatch|lease/i);
+  });
+
+  it("/swings/[id] keeps the in-progress banner for live work, and none for pending or complete", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true })];
+    let html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    expect(html).toContain("AI analysis in progress");
+    expect(html).not.toContain("interrupted");
+    state.analyses = [completeRow()];
+    html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    expect(html).not.toContain("interrupted");
+    expect(html).not.toContain("AI analysis in progress");
+    state.analyses = [pendingRow()];
+    html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    expect(html).toContain("Analysis queued");
+    expect(html).not.toContain("interrupted");
+    expect(html).not.toContain("AI analysis in progress");
+  });
+
+  it("/swings/[id] for another golfer's analysis is not found, with no elevated read", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true, ageSeconds: STALE })];
+    state.sessionUserId = OTHER;
+    await expect(SwingDetailPage({ params: { id: ANALYSIS_ID } })).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(state.adminReads).toEqual([]);
+  });
+
+  it("/swings/[id] shows a pre-lease processing row as stalled", async () => {
+    state.analyses = [pendingRow({ status: "processing" })];
+    const html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    expect(html).toContain("interrupted");
+  });
+
+  // The two client components need a DOM to run their effects, and no DOM
+  // environment is installed; their 409 branches are pinned by source here.
+  it("the inline /analyze flow hands a running analysis to its report page and never retries a stalled one", () => {
+    const page = read("app/(dashboard)/analyze/page.tsx");
+    const block = page.slice(page.indexOf("if (!analysisRes.ok) {"), page.indexOf("const { data: updatedRow }"));
+    expect(block).toContain('if (analysisRes.status === 409 && err.status === "processing") {');
+    expect(block).toContain("router.push(`/analyze/${analysisRow.id}`);");
+    expect(block).not.toContain('"stalled"');
+    expect(block).toContain("throw new Error(err.error ?? `Analysis failed (${analysisRes.status})`);");
+  });
+
+  it("the report page shows a stalled analysis without a Retry action", () => {
+    const report = read("app/(dashboard)/analyze/[id]/AnalysisReport.tsx");
+    const stalled = report.slice(report.indexOf("if (stalledNotice) {"), report.indexOf("if (inProgressNotice) {"));
+    expect(stalled).toContain("Analysis Interrupted");
+    expect(stalled).not.toMatch(/Retry|setAttempt|onClick/);
+    expect(report).toContain('httpStatus === 409 && res.status === "stalled"');
+  });
+});
+
+// ─── W. Provider calls without a definite answer (ENT-1D) ─────────────────────
+
+describe("W. a provider call that ends without a definite answer is stalled, never retryable", () => {
+  for (const [label, error] of [
+    ["a transport failure", () => new TypeError("fetch failed")],
+    ["an abort or timeout", () => Object.assign(new Error("The operation was aborted"), { name: "AbortError" })],
+  ] as const) {
+    it(`full swing: ${label} after dispatch leaves the analysis stalled at once`, async () => {
+      state.geminiImpl = async () => {
+        throw error();
+      };
+      const response = await post({ analysisId: ANALYSIS_ID });
+      expect(response.status).toBe(409);
+      expect((await json(response)).status).toBe("stalled");
+      expect(storedRow().status).toBe("processing");
+      expect(storedRow().provider_dispatched_at).not.toBeNull();
+      // Neither an immediate nor a later request runs it again.
+      state.geminiImpl = null;
+      const again = await post({ analysisId: ANALYSIS_ID });
+      expect(again.status).toBe(409);
+      expect((await json(again)).status).toBe("stalled");
+      expect(state.geminiCalls).toBe(1);
+    });
+  }
+
+  it("putting: a transport failure after dispatch leaves the putt stalled, never retryable", async () => {
+    puttWithVideo();
+    state.geminiImpl = async () => {
+      throw new TypeError("fetch failed");
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("stalled");
+    state.geminiImpl = async () => puttingModelResponse();
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(state.geminiCalls).toBe(1);
+    expect(storedRow().status).toBe("processing");
+  });
+
+  it("putting: a definite provider rejection is released as failed and may be retried", async () => {
+    puttWithVideo();
+    state.geminiImpl = async () => {
+      throw new GoogleGenerativeAIFetchError("permission denied", 403);
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    state.geminiImpl = async () => puttingModelResponse();
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(2);
+  });
+
+  it("an SDK network or abort error carries no status and is an unknown outcome; a plain object with a status is not trusted", async () => {
+    for (const thrown of [
+      new GoogleGenerativeAIError("[GoogleGenerativeAI Error]: Error fetching from https://example.invalid: fetch failed"),
+      new GoogleGenerativeAIAbortError("Request aborted"),
+      Object.assign(new Error("not an SDK error"), { status: 503 }),
+    ]) {
+      state.analyses = [pendingRow()];
+      state.geminiImpl = async () => {
+        throw thrown;
+      };
+      const response = await post({ analysisId: ANALYSIS_ID });
+      expect(response.status).toBe(409);
+      expect((await json(response)).status).toBe("stalled");
+      expect(JSON.stringify(await (await post({ analysisId: ANALYSIS_ID })).json())).not.toMatch(/example\.invalid|fetch failed|aborted|SDK/);
+    }
+  });
+
+  it("an unusable model response (not JSON) is a definite failure", async () => {
+    state.geminiImpl = async () => "not json";
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+  });
+});
+
+// ─── X. Provider uncertainty: explicit allow-list for definite rejection ──────
+
+const UNKNOWN_PROVIDER_ERRORS: [string, () => unknown][] = [
+  ["HTTP 408", () => new GoogleGenerativeAIFetchError("request timeout", 408)],
+  ["HTTP 499", () => new GoogleGenerativeAIFetchError("cancelled", 499)],
+  ["HTTP 500", () => new GoogleGenerativeAIFetchError("internal", 500)],
+  ["HTTP 502", () => new GoogleGenerativeAIFetchError("bad gateway", 502)],
+  ["HTTP 503", () => new GoogleGenerativeAIFetchError("unavailable", 503)],
+  ["HTTP 504", () => new GoogleGenerativeAIFetchError("deadline exceeded", 504)],
+  ["HTTP 400", () => new GoogleGenerativeAIFetchError("invalid argument", 400)],
+  ["HTTP 429", () => new GoogleGenerativeAIFetchError("resource exhausted", 429)],
+  ["missing status", () => new GoogleGenerativeAIFetchError("no status")],
+  ["unlisted 4xx (409)", () => new GoogleGenerativeAIFetchError("conflict", 409)],
+  ["SDK network error", () => new GoogleGenerativeAIError("Error fetching from https://example.invalid: fetch failed")],
+  ["SDK abort", () => new GoogleGenerativeAIAbortError("Request aborted")],
+];
+
+const DEFINITE_PROVIDER_ERRORS: [string, () => unknown][] = [
+  ["HTTP 401", () => new GoogleGenerativeAIFetchError("unauthenticated", 401)],
+  ["HTTP 403", () => new GoogleGenerativeAIFetchError("permission denied", 403)],
+  ["HTTP 404", () => new GoogleGenerativeAIFetchError("not found", 404)],
+];
+
+describe("X. full swing: provider uncertainty is stalled; only allow-listed rejections are retryable", () => {
+  it.each(UNKNOWN_PROVIDER_ERRORS)("%s → stalled, claim kept, never claimable or retryable", async (_label, error) => {
+    state.geminiImpl = async () => {
+      throw error();
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("stalled");
+    const held = storedRow().processing_claim_id;
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().provider_dispatched_at).not.toBeNull();
+    // The golfer retries: no claim is taken, no model call is made.
+    state.geminiImpl = null;
+    const retry = await post({ analysisId: ANALYSIS_ID });
+    expect(retry.status).toBe(409);
+    expect((await json(retry)).status).toBe("stalled");
+    expect(await claimAnalysisExecution({ analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" })).toEqual({
+      outcome: "not_claimed",
+    });
+    expect(storedRow().processing_claim_id).toBe(held);
+    expect(state.geminiCalls).toBe(1);
+    // A stale holder's writes cannot touch this claim.
+    const stale = { analysisId: ANALYSIS_ID, userId: OWNER, claimId: OTHER_CLAIM };
+    expect(await releaseAnalysisClaimAsFailed(stale)).toBe(false);
+    expect(await markClaimOutcomeUnknown(stale)).toBe(false);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().processing_claim_id).toBe(held);
+  });
+
+  it.each(DEFINITE_PROVIDER_ERRORS)("%s → released as failed; the golfer's retry runs once more", async (_label, error) => {
+    state.geminiImpl = async () => {
+      throw error();
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    state.geminiImpl = null;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(2);
+  });
+
+  it("a fully received but blocked response is a known failure, not an uncertain one", async () => {
+    state.geminiImpl = async () => {
+      throw new GoogleGenerativeAIResponseError("Candidate was blocked due to SAFETY");
+    };
+    // The stand-in raises it from generateContent, i.e. inside the classified
+    // call: it is not on the allow-list, so it is treated conservatively.
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("stalled");
+  });
+
+  it("a fully received response that is not JSON is released as a definite failure", async () => {
+    state.geminiImpl = async () => "<html>not json</html>";
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+  });
+});
+
+describe("X2. putting: the same allow-list", () => {
+  it.each(UNKNOWN_PROVIDER_ERRORS)("%s → stalled putt, never claimable or retryable", async (_label, error) => {
+    puttWithVideo();
+    state.geminiImpl = async () => {
+      throw error();
+    };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(409);
+    expect((await json(response)).status).toBe("stalled");
+    state.geminiImpl = async () => puttingModelResponse();
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(await claimAnalysisExecution({ analysisId: ANALYSIS_ID, userId: OWNER, family: "putting" })).toEqual({
+      outcome: "not_claimed",
+    });
+    expect(state.geminiCalls).toBe(1);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().putting_score).toBeNull();
+  });
+
+  it.each(DEFINITE_PROVIDER_ERRORS)("%s → putt released as failed; a retry runs once more", async (_label, error) => {
+    puttWithVideo();
+    state.geminiImpl = async () => {
+      throw error();
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    state.geminiImpl = async () => puttingModelResponse();
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(2);
+  });
+});
+
+// ─── Y. Fully received but unusable responses; a failed unknown-outcome mark ──
+
+describe("Y. a response that arrived in full but is unusable is a known failure", () => {
+  it("full swing: response.text() raising a blocked-candidate error after a resolved call → failed, retryable", async () => {
+    state.geminiTextThrows = () => new GoogleGenerativeAIResponseError("Candidate was blocked due to SAFETY");
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    state.geminiTextThrows = null;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(2);
+  });
+
+  it("putting: response.text() raising after a resolved call → failed, retryable", async () => {
+    puttWithVideo();
+    state.geminiTextThrows = () => new GoogleGenerativeAIResponseError("Candidate was blocked due to SAFETY");
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    state.geminiTextThrows = null;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(2);
+  });
+
+  it("putting: a fully received response that is not JSON → failed", async () => {
+    puttWithVideo();
+    state.geminiImpl = async () => "<html>not json</html>";
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    expect(state.geminiCalls).toBe(1);
+  });
+
+  it("an unknown outcome whose stall mark cannot be written is still never claimable, and stalls after the lease", async () => {
+    state.outcomeUnknownWriteErrors = true;
+    state.geminiImpl = async () => {
+      throw new GoogleGenerativeAIFetchError("unavailable", 503);
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(storedRow().status).toBe("processing");
+    expect(storedRow().provider_dispatched_at).not.toBeNull();
+    expect(await claimAnalysisExecution({ analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" })).toEqual({
+      outcome: "not_claimed",
+    });
+    storedRow().processing_heartbeat_at = new Date(Date.now() - STALE * 1000).toISOString();
+    expect(await claimAnalysisExecution({ analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" })).toEqual({
+      outcome: "not_claimed",
+    });
+    expect(await readExecutionState({ analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" })).toBe("stalled");
+    expect(state.geminiCalls).toBe(1);
   });
 });

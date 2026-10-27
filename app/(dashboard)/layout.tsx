@@ -10,6 +10,7 @@ import {
   SIGN_OUT,
 } from "@/components/navigation/dashboard-navigation";
 import MobileDashboardNavigation from "@/components/navigation/MobileDashboardNavigation";
+import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +43,9 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   const roleBadgeLabel = role === "admin" ? "Admin" : role === "coach" ? tierLabel[tier] : tierLabel[tier];
   const displayName = profile?.display_name ?? profile?.full_name ?? user.email;
-  const showUpgradeCallout = shouldShowUpgradeCallout(role, isActive);
+  // ENT-1D: no "Upgrade Plan" call to action while new memberships are paused;
+  // Plan & Billing stays, and the plans page explains the pause.
+  const showUpgradeCallout = CHECKOUT_AVAILABLE && shouldShowUpgradeCallout(role, isActive);
   const sections = getSectionsForRole(role);
 
   return (
@@ -51,7 +54,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
       <aside className="hidden lg:flex w-64 bg-golf-header border-r border-white/5 flex-col fixed h-full overflow-y-auto">
         {/* Logo */}
         <div className="px-6 py-7 border-b border-white/5">
-          <Link href="/" className="flex items-center gap-3">
+          <Link href="/" className="flex items-center gap-3 min-h-11">
             <div className="w-9 h-9 bg-golf-green/5 border border-golf-green/20 rounded-xl overflow-hidden shrink-0">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src="/swingproai_logo.png" alt="SwingProAI" className="w-full h-full object-contain" />
@@ -86,7 +89,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         {showUpgradeCallout && (
           <div className="px-4 pt-3">
             <Link href={UPGRADE_CALLOUT.href}
-              className="flex items-center gap-3 px-3 py-2.5 rounded-2xl text-golf-green font-black uppercase tracking-widest text-[10px] bg-golf-green/10 border border-golf-green/20 hover:bg-golf-green/15 transition-colors">
+              className="flex items-center gap-3 px-3 py-2.5 min-h-11 rounded-2xl text-golf-green font-black uppercase tracking-widest text-[10px] bg-golf-green/10 border border-golf-green/20 hover:bg-golf-green/15 transition-colors">
               <CreditCard size={14} />{UPGRADE_CALLOUT.label}
             </Link>
           </div>
@@ -101,7 +104,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         <div className="p-4 border-t border-white/5">
           <form action={SIGN_OUT.href} method="POST">
             <button type="submit"
-              className="flex items-center gap-3 px-3 py-2.5 w-full rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
+              className="flex items-center gap-3 px-3 py-2.5 w-full min-h-11 rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
               <LogOut size={14} />{SIGN_OUT.label}
             </button>
           </form>
@@ -133,7 +136,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 function NavLink({ href, icon, label }: { href: string; icon: React.ReactNode; label: string }) {
   return (
     <Link href={href}
-      className="flex items-center gap-3 px-3 py-2.5 rounded-2xl text-gray-500 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
+      className="flex items-center gap-3 px-3 py-2.5 min-h-11 rounded-2xl text-gray-500 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
       <span className="text-golf-green">{icon}</span>
       {label}
     </Link>

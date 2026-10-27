@@ -100,7 +100,7 @@ const requestBodySource = (() => {
 
 const FIVE_HUNDRED_COPY = "Analysis failed. Please try again.";
 const FOUR_OH_THREE_COPY =
-  "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.";
+  "Putting analysis isn't included with your current plan.";
 
 // ─── The helper is reused, never re-implemented ───────────────────────────────
 
@@ -382,9 +382,10 @@ describe("nothing putting-specific happens before the gate", () => {
     for (const sideEffect of [
       "isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)",
       '"[analyze-swing] putting cache hit"',
-      '.update({ status: "processing" })',
-      ".createSignedUrl(storagePath, 3600)",
-      "await fetchVideoBytes(",
+      // ENT-1D: the processing transition is now the atomic execution claim.
+      "claimAnalysisExecution(",
+      // ENT-1D: the owner-bound Storage load (sign + verified download).
+      "await loadOwnedSwingVideo(supabase, puttingVideo?.storage_path, authenticatedUserId, MAX_ANALYSIS_VIDEO_BYTES)",
       "puttingModel.generateContent({",
       // EQ5F-E builds the envelope into a local before deriving the score from
       // it, so the inline form is gone. The property this line stands for is
@@ -392,7 +393,8 @@ describe("nothing putting-specific happens before the gate", () => {
       // completed result, both remain side effects of the guarded helper.
       "buildPersistedPuttingAnalysis(puttingValidated.response)",
       "putting_score: puttingScore,",
-      '.update({ status: "failed" })',
+      // ENT-1D R1: the failure write is the claim module's shared release.
+      "await releaseAnalysisClaimAsFailed({ analysisId, userId: authenticatedUserId, claimId: puttingClaimId });",
     ]) {
       expect(
         puttingHelperSource,

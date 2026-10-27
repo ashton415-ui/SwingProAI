@@ -1,6 +1,7 @@
 "use server";
 
 import { createClient } from "@/utils/supabase/server";
+import { canonicalUploadFileName } from "@/lib/swing-video-source";
 
 const BUCKET = "swing-videos";
 
@@ -19,7 +20,7 @@ export async function getSignedUploadUrl(
 
   if (authError || !user) return { error: "Not authenticated." };
 
-  const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const safeFilename = canonicalUploadFileName(filename);
   const path = `${user.id}/${Date.now()}_${safeFilename}`;
 
   const { data, error } = await supabase.storage
@@ -43,7 +44,7 @@ export async function recordPendingAnalysis(
   originalFilename: string,
   fileSize: number,
   mimeType: string
-): Promise<{ analysisId?: string; videoUrl?: string; error?: string }> {
+): Promise<{ analysisId?: string; error?: string }> {
   const supabase = await createClient();
 
   const { data: { user }, error: authError } = await supabase.auth.getUser();
@@ -52,11 +53,6 @@ export async function recordPendingAnalysis(
 
   if (authError || !user) return { error: "Not authenticated." };
 
-  // Build the public URL for this storage object
-  const { data: { publicUrl } } = supabase.storage
-    .from(BUCKET)
-    .getPublicUrl(storagePath);
-
   console.log("[recordPendingAnalysis] inserting swing_videos for user_id:", user.id);
 
   // 1 — swing_videos row (FK parent for swing_analysis)
@@ -64,7 +60,9 @@ export async function recordPendingAnalysis(
     .from("swing_videos")
     .insert({
       user_id: user.id,
-      video_url: publicUrl,
+      // ENT-1D: video_url is metadata equal to the canonical key, never a
+      // fetchable URL (migration 20261027120100 enforces it).
+      video_url: storagePath,
       storage_path: storagePath,
       original_filename: originalFilename,
       file_size: fileSize,
@@ -97,5 +95,5 @@ export async function recordPendingAnalysis(
     return { error: analysisErr?.message ?? "Failed to create analysis record." };
   }
 
-  return { analysisId: analysisRow.id, videoUrl: publicUrl };
+  return { analysisId: analysisRow.id };
 }

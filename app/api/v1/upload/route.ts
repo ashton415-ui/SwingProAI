@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
+import { canonicalUploadFileName } from "@/lib/swing-video-source";
 
 const ALLOWED_MIME_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
@@ -60,7 +61,8 @@ export async function POST(req: NextRequest) {
 
   // 5. Generate swing_video ID first so we can use it in the storage path
   const swingVideoId = crypto.randomUUID();
-  const originalFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  // ENT-1D: a file name the canonical-key rule accepts, fixed before upload.
+  const originalFilename = canonicalUploadFileName(file.name);
   const storagePath = `${user.id}/${swingVideoId}/${originalFilename}`;
 
   // 6. Upload to Supabase Storage using admin client (service role — never sent to browser)

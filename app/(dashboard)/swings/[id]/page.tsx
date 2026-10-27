@@ -12,7 +12,17 @@ import { SwingHighlightsPanel } from "@/components/swing/SwingHighlightsPanel";
 import { MechanicalDeficienciesPanel } from "@/components/swing/MechanicalDeficienciesPanel";
 import { EquipmentRecommendations } from "@/components/swing/EquipmentRecommendations";
 import { canUsePuttingAnalysis } from "@/lib/entitlements";
-import { authorizeOwnedAnalysisRow } from "@/lib/analysis-result-read-authority";
+import {
+  authorizeOwnedAnalysisRow,
+  readOwnedAnalysisPayloads,
+} from "@/lib/analysis-result-read-authority";
+import { readExecutionState } from "@/lib/analysis-execution-claim";
+import {
+  classifyFailedAnalysisVideo,
+  signOwnedSwingVideoPlayback,
+  VIDEO_UNUSABLE_COPY,
+  VIDEO_UNUSABLE_STATUS,
+} from "@/lib/swing-video-source";
 import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
@@ -26,11 +36,7 @@ interface SwingVideoJoin {
   title?: string | null;
   original_filename?: string | null;
   storage_path?: string | null;
-  video_url?: string | null;
 }
-
-/** The private bucket every swing video is uploaded to. Never made public. */
-const VIDEO_BUCKET = "swing-videos";
 
 export default async function SwingDetailPage({
   params,
@@ -56,7 +62,7 @@ export default async function SwingDetailPage({
   // by the unified result-read authority, so no raw row reaches anything below.
   const { data: ownedRow } = await supabase
     .from("swing_analysis")
-    .select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")
+    .select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path)")
     .eq("id", params.id)
     .eq("user_id", user.id)
     .single();
@@ -86,31 +92,28 @@ export default async function SwingDetailPage({
   // private and the browser receives only a time-limited signed URL — never a
   // credential, and never the storage path itself.
   //
-  // storage_path leads because it names the durable private object this
-  // analysis actually read. video_url stays beneath it as the compatibility
-  // fallback for rows recorded before signed playback existed; promoting it
-  // would prefer a stale URL over the object of record.
+  // storage_path is the only source: the golfer's own canonical object in the
+  // private bucket, re-validated before signing (lib/swing-video-source.ts).
+  // Browser-written video_url is never played back, and a row whose key is not
+  // canonical has no replay.
   //
   // A signing failure is not an analysis failure. It resolves to null, the
   // replay simply does not render, and the result below is untouched.
   const joinedVideo = swing.swing_video as
-    | { storage_path?: string | null; video_url?: string | null }
-    | { storage_path?: string | null; video_url?: string | null }[]
+    | { storage_path?: string | null }
+    | { storage_path?: string | null }[]
     | null;
   const videoRow = Array.isArray(joinedVideo) ? (joinedVideo[0] ?? null) : joinedVideo;
 
-  let playbackUrl: string | null = null;
+  const playbackUrl = await signOwnedSwingVideoPlayback(supabase, videoRow?.storage_path, user.id);
 
-  if (typeof videoRow?.storage_path === "string" && videoRow.storage_path.trim().length > 0) {
-    const { data: signed } = await supabase.storage
-      .from(VIDEO_BUCKET)
-      .createSignedUrl(videoRow.storage_path, 3600);
-    playbackUrl = signed?.signedUrl ?? null;
-  }
-
-  if (playbackUrl === null && typeof videoRow?.video_url === "string" && videoRow.video_url.trim().length > 0) {
-    playbackUrl = videoRow.video_url;
-  }
+  // ENT-1D. A failed analysis says why when the reason is its video: decided
+  // from the stored object (no stored reason, no provider call). Any other
+  // failure gets the family-neutral banner below.
+  const failedReason =
+    swing.status === "failed"
+      ? await classifyFailedAnalysisVideo(supabase, videoRow?.storage_path, user.id)
+      : null;
 
   // Extract individual metrics from the authorized core metrics
   const metrics = swing.metrics as Record<string, unknown> | null;
@@ -153,6 +156,18 @@ export default async function SwingDetailPage({
   const isPutt = swing.analysis_family === "putting";
 
   const isAwaitingResult = swing.status === "processing" || swing.status === "pending";
+
+  // ENT-1D. A processing row whose holder reached the AI and then stopped
+  // reporting (or that was taken by pre-lease code) will not finish and is not
+  // re-run automatically. It is told apart from live work on the server; no
+  // claim detail reaches the page.
+  const isStalled =
+    swing.status === "processing" &&
+    (await readExecutionState({
+      analysisId: swing.id,
+      userId: user.id,
+      family: isPutt ? "putting" : "full_swing",
+    })) === "stalled";
 
   // ── EQ5C-A putting result state — decided here, on the server ───────────────
   //
@@ -215,6 +230,12 @@ export default async function SwingDetailPage({
           userId: user.id,
           tier,
           sourceAnalysisId: swing.id,
+          // ENT-1D: the envelope is read on the server, bounded by the owned
+          // id and this golfer, never through the session.
+          readEnvelope: async (analysisId, ownerId) => {
+            const payloads = await readOwnedAnalysisPayloads([analysisId], ownerId);
+            return payloads?.get(analysisId)?.putting_analysis;
+          },
         })
       : null;
 
@@ -439,12 +460,55 @@ export default async function SwingDetailPage({
       )}
 
       {/* SHARED STATUS REGION — family-neutral, and identical for both. */}
-      {swing.status === "processing" && (
+      {swing.status === "processing" && !isStalled && (
         <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-yellow-400 shrink-0" />
           <p className="text-yellow-300 text-xs font-bold uppercase tracking-wide">
             AI analysis in progress — full results incoming shortly.
           </p>
+        </div>
+      )}
+
+      {isStalled && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-4xl p-6 mb-6">
+          <AlertTriangle size={18} className="text-amber-400 shrink-0" />
+          <p className="text-amber-200 text-xs font-bold leading-relaxed">
+            This analysis was interrupted and won&apos;t finish. Record the swing again for a new analysis.
+          </p>
+          <Link
+            href="/analyze"
+            className="sm:ml-auto inline-flex items-center justify-center min-h-[44px] px-4 rounded-2xl border border-white/10 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/5"
+          >
+            Record again
+          </Link>
+        </div>
+      )}
+
+      {swing.status === "failed" && failedReason === VIDEO_UNUSABLE_STATUS && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-red-500/10 border border-red-500/20 rounded-4xl p-6 mb-6">
+          <AlertTriangle size={18} className="text-red-400 shrink-0" />
+          <p className="text-red-200 text-xs font-bold leading-relaxed">{VIDEO_UNUSABLE_COPY}</p>
+          <Link
+            href="/analyze"
+            className="sm:ml-auto inline-flex items-center justify-center min-h-[44px] px-4 rounded-2xl border border-white/10 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/5"
+          >
+            Upload a new video
+          </Link>
+        </div>
+      )}
+
+      {swing.status === "failed" && failedReason !== VIDEO_UNUSABLE_STATUS && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-red-500/10 border border-red-500/20 rounded-4xl p-6 mb-6">
+          <AlertTriangle size={18} className="text-red-400 shrink-0" />
+          <p className="text-red-200 text-xs font-bold leading-relaxed">
+            This analysis didn&apos;t finish. Recording the swing again starts a new analysis.
+          </p>
+          <Link
+            href="/analyze"
+            className="sm:ml-auto inline-flex items-center justify-center min-h-[44px] px-4 rounded-2xl border border-white/10 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/5"
+          >
+            Record again
+          </Link>
         </div>
       )}
 

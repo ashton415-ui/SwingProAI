@@ -1,14 +1,21 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Upload, Target, CheckCircle2, AlertCircle, Loader2,
-  Play, Info, Maximize2, X, Activity, Zap, Trophy,
+  Play, Info, Maximize2, X, Activity, Zap,
   Lock, BarChart2, FileUp, Camera, Square,
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
+import {
+  canonicalUploadFileName,
+  MAX_ANALYSIS_VIDEO_BYTES,
+  MIN_VIDEO_BYTES,
+  VIDEO_UNUSABLE_STATUS,
+} from "@/lib/swing-video-source";
 import {
   canUseLaunchMonitor,
   canUsePuttingAnalysis,
@@ -37,6 +44,15 @@ import {
   selectCameraRecorderMimeType,
 } from "@/lib/analyze-camera-capture";
 import type { DeficiencyItem, HighlightItem } from "@/types/database";
+
+/** Browsers open a file input on Space but not on Enter, which is what a
+ *  keyboard user presses on a button-like control. Enter opens it too. */
+function openFileChooserOnEnter(e: KeyboardEvent<HTMLInputElement>) {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    e.currentTarget.click();
+  }
+}
 
 /** Read the tier injected by the server layout */
 function getUserTier(): SubscriptionTier {
@@ -87,7 +103,20 @@ const ANALYSIS_CREATE_FAILED_MESSAGE =
 // identical to that server refusal so the two boundaries never appear to
 // disagree about why.
 const PUTTING_ANALYSIS_LOCKED_MESSAGE =
-  "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.";
+  "Putting analysis isn't included with your current plan.";
+
+// ENT-1D. Upload and video-file failures reach the golfer as fixed copy that
+// says what to do; the browser's own network text ("Failed to fetch") and raw
+// Storage errors never do. These checks only spare a pointless upload: the
+// analysis route reads the stored bytes and refuses an unusable video itself.
+const NOT_A_VIDEO_MESSAGE = "That file isn't a video. Choose an MP4, MOV or WebM video of your swing.";
+const EMPTY_VIDEO_MESSAGE = "That video file is empty. Choose or record the swing again.";
+const CLIP_TOO_LARGE_MESSAGE =
+  "This clip is too large to analyse. Trim it to just the swing — a few seconds — and try again.";
+const UPLOAD_FAILED_MESSAGE =
+  "We couldn't upload your video. Check your connection, then tap Run Analyzer again — your video is still selected.";
+const ANALYSIS_CONNECTION_LOST_MESSAGE =
+  "We lost the connection while your swing was being analysed. Check History in a moment; if it isn't there, run it again.";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
@@ -180,10 +209,7 @@ export default function AnalyzePage() {
   const [isTrimming, setIsTrimming] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isAdvanced, setIsAdvanced] = useState(false);
-  const [showProUpgrade, setShowProUpgrade] = useState(false);
   const [activeDrillVideo, setActiveDrillVideo] = useState<string | null>(null);
-  const [activeOverlay, setActiveOverlay] = useState<string | null>(null);
   const [lmFile, setLmFile] = useState<File | null>(null);
   const [userTier, setUserTier] = useState<SubscriptionTier>("par");
 
@@ -303,6 +329,20 @@ export default function AnalyzePage() {
   }, [previewUrl]);
 
   const handleFile = useCallback((f: File) => {
+    // Some platforms report no type for a video; its extension then decides.
+    // A refused file also clears any earlier selection, so Run Analyzer can
+    // never send a different video from the one the golfer just chose.
+    const refuse = (message: string) => {
+      setFile(null); setPreviewUrl(null); setResult(null); setError(message);
+    };
+    if (!(f.type.startsWith("video/") || (f.type === "" && /\.(mp4|m4v|mov|webm|3gp)$/i.test(f.name)))) {
+      refuse(NOT_A_VIDEO_MESSAGE);
+      return;
+    }
+    if (f.size < MIN_VIDEO_BYTES) {
+      refuse(EMPTY_VIDEO_MESSAGE);
+      return;
+    }
     if (f.size > MAX_FILE_MB * 1024 * 1024) {
       setError(`Video too large (max ${MAX_FILE_MB}MB).`);
       return;
@@ -320,7 +360,7 @@ export default function AnalyzePage() {
     // Skip transcode if already small and no trim needed. This fast path is
     // deliberate — it must never be gated on MediaRecorder/captureStream.
     const preprocessingRequired = !(
-      trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size < 18 * 1024 * 1024
+      trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size <= MAX_ANALYSIS_VIDEO_BYTES
     );
     if (!preprocessingRequired) {
       return file;
@@ -517,8 +557,14 @@ export default function AnalyzePage() {
     }
     setIsAnalyzing(true); setError(null);
 
+    // Which step a network failure interrupted decides what the golfer is told.
+    let analysisStarted = false;
     try {
       const blob = await getTrimmedBlob();
+      // The route sends at most MAX_ANALYSIS_VIDEO_BYTES to the AI and refuses
+      // anything larger, so a clip that is still too large is not uploaded.
+      if (blob.size < MIN_VIDEO_BYTES) throw new Error(EMPTY_VIDEO_MESSAGE);
+      if (blob.size > MAX_ANALYSIS_VIDEO_BYTES) throw new Error(CLIP_TOO_LARGE_MESSAGE);
 
       // Auth is required upfront — we need to upload the video before calling the
       // API. Resolve the CURRENT session from the managed browser client here,
@@ -553,11 +599,15 @@ export default function AnalyzePage() {
       }
 
       // 1. Upload video to Supabase Storage
-      const safeFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      // ENT-1D: a file name the canonical-key rule accepts, fixed before upload.
+      const safeFilename = canonicalUploadFileName(file.name);
       const storagePath = `${userId}/${crypto.randomUUID()}/${safeFilename}`;
       const { error: uploadErr } = await supabase.storage
         .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
-      if (uploadErr) throw new Error(`Video upload failed: ${uploadErr.message}`);
+      if (uploadErr) {
+        console.error("Video upload failed");
+        throw new Error(UPLOAD_FAILED_MESSAGE);
+      }
 
       // 2. Create the swing_videos record
       const { data: videoRow, error: videoErr } = await supabase
@@ -572,7 +622,10 @@ export default function AnalyzePage() {
           trim_end:          trimEnd,
           status:            "uploaded",
         }).select().single();
-      if (videoErr || !videoRow) throw new Error(`Failed to register video: ${videoErr?.message}`);
+      if (videoErr || !videoRow) {
+        console.error("Failed to register video");
+        throw new Error(UPLOAD_FAILED_MESSAGE);
+      }
 
       // 3. Ask the server to create the pending analysis request. The browser
       // holds no INSERT privilege on swing_analysis: the owner, readiness, club
@@ -599,6 +652,7 @@ export default function AnalyzePage() {
       }
 
       // 4. Call the direct Gemini pipeline — it fetches the video from Storage itself
+      analysisStarted = true;
       const analysisRes = await fetch("/api/analyze-swing", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
@@ -607,6 +661,20 @@ export default function AnalyzePage() {
 
       if (!analysisRes.ok) {
         const err = await analysisRes.json().catch(() => ({}));
+        // ENT-1D. Already running for this swing: hand over to its report page,
+        // which shows the in-progress state and can check again. A stalled
+        // analysis falls through to the error banner below, which offers no
+        // retry, with the server's explanation.
+        if (analysisRes.status === 409 && err.status === "processing") {
+          router.push(`/analyze/${analysisRow.id}`);
+          return;
+        }
+        // ENT-1D D1. The stored video could not be read and nothing was
+        // analysed. Uploading the same file again cannot help, so the
+        // selection is cleared and the golfer chooses or records again.
+        if (err.status === VIDEO_UNUSABLE_STATUS) {
+          setFile(null); setPreviewUrl(null);
+        }
         throw new Error(err.error ?? `Analysis failed (${analysisRes.status})`);
       }
 
@@ -629,7 +697,13 @@ export default function AnalyzePage() {
       setResult(dbRowToResult(updatedRow));
 
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Analysis failed.");
+      // fetch() rejects with a TypeError when the request never completed; its
+      // text differs between browser engines.
+      if (err instanceof TypeError && /Failed to fetch|NetworkError|Load failed/.test(err.message)) {
+        setError(analysisStarted ? ANALYSIS_CONNECTION_LOST_MESSAGE : UPLOAD_FAILED_MESSAGE);
+      } else {
+        setError(err instanceof Error ? err.message : "Analysis failed.");
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -974,6 +1048,16 @@ export default function AnalyzePage() {
         {!previewUrl ? (
         <div className="flex-1 flex flex-col">
 
+          {/* ENT-1D. A file refused before any preview exists (not a video,
+              empty) is explained here; the page banner below renders only
+              inside the preview. */}
+          {error && (
+            <div role="alert" className="m-4 mb-0 bg-red-500/10 border border-red-500/40 p-3 rounded-xl flex items-start gap-2">
+              <AlertCircle size={16} className="text-red-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-white">{error}</p>
+            </div>
+          )}
+
           {/* ── EQ4-S2 Mobile camera capture ── */}
           {/* Hidden by default; shown only where the primary pointer is coarse
               and cannot hover. That is an input-capability test, not a width
@@ -1049,8 +1133,9 @@ export default function AnalyzePage() {
                   </button>
                   {/* Import stays reachable throughout. Choosing a file first
                       abandons the camera, so no stream survives the handoff. */}
-                  <label className="w-full min-h-11 bg-white/5 text-gray-300 border border-white/10 rounded-2xl font-black uppercase tracking-widest text-[11px] flex items-center justify-center gap-2 cursor-pointer">
-                    <input type="file" accept="video/*" className="hidden"
+                  <label className="w-full min-h-11 bg-white/5 text-gray-300 border border-white/10 rounded-2xl font-black uppercase tracking-widest text-[11px] flex items-center justify-center gap-2 cursor-pointer focus-within:ring-2 focus-within:ring-golf-green">
+                    {/* sr-only, not hidden: a display:none input is unreachable by keyboard. */}
+                    <input type="file" accept="video/*" className="sr-only" onKeyDown={openFileChooserOnEnter}
                       onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileReleasingCamera(f); }} />
                     <Upload size={14} />Choose Video Instead
                   </label>
@@ -1060,8 +1145,9 @@ export default function AnalyzePage() {
           </div>
 
           {cameraPhase === "idle" && (
-          <label className="flex-1 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors group p-8 text-center">
-            <input type="file" accept="video/*" className="hidden"
+          <label className="flex-1 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 transition-colors group p-8 text-center focus-within:ring-2 focus-within:ring-inset focus-within:ring-golf-green">
+            {/* sr-only, not hidden: a display:none input is unreachable by keyboard. */}
+            <input type="file" accept="video/*" className="sr-only" onKeyDown={openFileChooserOnEnter}
               onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
             <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-golf-green/10 transition-colors">
               <Upload className="w-10 h-10 text-gray-500 group-hover:text-golf-green transition-colors" />
@@ -1086,18 +1172,6 @@ export default function AnalyzePage() {
             <div className="relative max-h-[75%] max-w-full flex items-center justify-center"
               style={{ aspectRatio: videoAspect ?? "auto" }}>
               <video ref={videoRef} src={previewUrl} className="max-h-full max-w-full object-contain" playsInline />
-
-              {/* Biomechanics overlay */}
-              {result && activeOverlay && (result.metrics as Record<string, OverlayMetric | number>)[activeOverlay] && (() => {
-                const m = (result.metrics as unknown as Record<string, OverlayMetric>)[activeOverlay];
-                if (!m?.overlay) return null;
-                return (
-                  <svg className="absolute inset-0 w-full h-full pointer-events-none z-10" viewBox="0 0 100 100" preserveAspectRatio="none">
-                    <line x1={m.overlay.x1} y1={m.overlay.y1} x2={m.overlay.x2} y2={m.overlay.y2}
-                      stroke="#fbbf24" strokeWidth="0.8" strokeDasharray="2,1" opacity="0.9" />
-                  </svg>
-                );
-              })()}
             </div>
 
             {/* HUD telemetry overlay */}
@@ -1124,24 +1198,14 @@ export default function AnalyzePage() {
               );
             })()}
 
-            {/* Pro toggle */}
-            <div className="absolute top-4 right-4 z-40">
-              <button onClick={() => isAdvanced ? setIsAdvanced(false) : setShowProUpgrade(true)}
-                className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${
-                  isAdvanced ? "bg-amber-400 text-black" : "bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10"
-                }`}>
-                <Zap size={12} />
-                {isAdvanced ? "PRO ACTIVE" : "GET PRO"}
-              </button>
-            </div>
-
             {/* Error banner */}
             {error && (
               <div className="absolute top-16 left-4 right-4 z-50">
                 <div className="bg-red-500/10 border border-red-500/40 backdrop-blur-xl p-4 rounded-xl flex items-start gap-3">
                   <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
                   <p className="text-sm text-white">{error}</p>
-                  <button onClick={() => setError(null)} className="ml-auto text-gray-500 hover:text-white">
+                  <button onClick={() => setError(null)} aria-label="Dismiss message"
+                    className="ml-auto -my-3 -mr-3 shrink-0 flex items-center justify-center min-w-11 min-h-11 text-gray-500 hover:text-white">
                     <X size={16} />
                   </button>
                 </div>
@@ -1170,10 +1234,18 @@ export default function AnalyzePage() {
                        path, no navigation. Putting analysis exists — this golfer's
                        plan does not include it, and the server would refuse the
                        same request for the same reason. */
-                    <button type="button" disabled
-                      className="w-full py-4 bg-white/5 text-gray-500 border border-white/10 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 cursor-not-allowed">
-                      <Lock size={18} />UPGRADE TO UNLOCK PUTTING
-                    </button>
+                    /* ENT-1D: labelled as a state, not an action — while new
+                       memberships are paused there is no upgrade to offer. */
+                    <div className="w-full">
+                      <button type="button" disabled
+                        className="w-full py-4 bg-white/5 text-gray-500 border border-white/10 rounded-2xl font-black uppercase tracking-widest flex items-center justify-center gap-3 cursor-not-allowed">
+                        <Lock size={18} />PUTTING NOT IN YOUR PLAN
+                      </button>
+                      <p className="mt-2 text-center text-[11px] text-gray-300 bg-black/70 rounded-xl px-3 py-2">
+                        Putting analysis is included with Birdie and Eagle.
+                        {!CHECKOUT_AVAILABLE && " New memberships are temporarily paused."}
+                      </p>
+                    </div>
                   ) : (
                     /* One executable action for an entitled putt and for a full
                        swing alike: the same submission, the same server, the same
@@ -1302,12 +1374,12 @@ export default function AnalyzePage() {
                   </span>
                 </div>
               ) : (
-                <label className="flex items-center gap-2 border border-dashed border-white/10 rounded-xl px-4 py-3 cursor-pointer hover:border-blue-500/30 transition-colors">
+                <label className="flex items-center gap-2 border border-dashed border-white/10 rounded-xl px-4 py-3 cursor-pointer hover:border-blue-500/30 transition-colors focus-within:ring-2 focus-within:ring-golf-green">
                   <Upload size={14} className="text-gray-600" />
                   <span className="text-[10px] text-gray-600 font-bold uppercase tracking-widest">
                     Attach launch data (optional)
                   </span>
-                  <input type="file" accept=".csv,.json" className="hidden"
+                  <input type="file" accept=".csv,.json" className="sr-only" onKeyDown={openFileChooserOnEnter}
                     onChange={(e) => { const f = e.target.files?.[0]; if (f) setLmFile(f); }} />
                 </label>
               )}
@@ -1339,9 +1411,9 @@ export default function AnalyzePage() {
                   ))}
                 </div>
                 <Link href="/upgrade"
-                  className="flex items-center justify-center gap-2 w-full py-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest text-blue-400 hover:bg-blue-500/20 transition-colors">
+                  className="flex items-center justify-center gap-2 w-full min-h-11 py-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest text-blue-400 hover:bg-blue-500/20 transition-colors">
                   <Zap size={12} />
-                  Upgrade to Birdie to Unlock
+                  {CHECKOUT_AVAILABLE ? "Upgrade to Birdie to Unlock" : "Included with Birdie · See plans"}
                 </Link>
               </div>
             </div>
@@ -1366,15 +1438,10 @@ export default function AnalyzePage() {
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em]">Live Mechanics Report</p>
               <div className="flex items-center gap-2">
-                {result._mode && (
-                  <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${
-                    result._mode === "ultra" ? "text-amber-400 bg-amber-400/10 border-amber-400/20" :
-                    result._mode === "advanced" ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
-                    "text-gray-500 bg-white/5 border-white/10"
-                  }`}>
-                    {result._mode === "ultra" ? "Eagle Deep" : result._mode === "advanced" ? "Birdie AI" : "Par Basic"}
-                  </span>
-                )}
+                {/* ENT-1D: no plan badge. The page knows only the stored tier,
+                    not whether the membership is current, and every plan gets
+                    the same full-swing analysis, so a badge could only
+                    mislabel (a free account was labelled with a paid plan). */}
               </div>
             </div>
 
@@ -1384,9 +1451,12 @@ export default function AnalyzePage() {
                 <div>
                   <p className="text-[10px] font-black uppercase tracking-widest text-golf-green mb-1">Membership Plans</p>
                   <p className="text-xs text-gray-500">AI putting analysis is included with Birdie and Eagle.</p>
+                  {!CHECKOUT_AVAILABLE && (
+                    <p className="text-xs text-gray-500 mt-1">New memberships are temporarily paused.</p>
+                  )}
                 </div>
                 <Link href="/upgrade"
-                  className="shrink-0 px-4 py-2 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all whitespace-nowrap">
+                  className="shrink-0 inline-flex items-center min-h-11 px-4 py-2 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all whitespace-nowrap">
                   View Plans
                 </Link>
               </div>
@@ -1453,37 +1523,6 @@ export default function AnalyzePage() {
               )}
             </div>
 
-            {/* Pro advanced metrics */}
-            {isAdvanced && (
-              <div>
-                <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] mb-3">Pro Biomechanics</p>
-                <div className="space-y-2">
-                  {(["wristHinge", "hipRotation", "shoulderRotation", "headStability"] as const).map((key) => {
-                    const m = result.metrics[key];
-                    if (!m) return null;
-                    return (
-                      <button key={key} onClick={() => setActiveOverlay(activeOverlay === key ? null : key)}
-                        className={`w-full p-4 rounded-xl border flex items-center justify-between text-left transition-all ${
-                          activeOverlay === key ? "border-amber-400/50 bg-amber-400/5" : "border-white/5 bg-golf-surface hover:border-white/10"
-                        }`}>
-                        <div>
-                          <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-1 group-hover:text-amber-400">
-                            {key.replace(/([A-Z])/g, " $1")}
-                          </p>
-                          <p className="text-xs text-gray-300 line-clamp-1">{m.feedback}</p>
-                        </div>
-                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center ml-3 shrink-0 ${
-                          activeOverlay === key ? "bg-amber-400 text-black" : "bg-white/5 text-gray-500"
-                        }`}>
-                          <Zap size={12} />
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
             {/* Drills */}
             <div>
               <p className="text-[10px] font-black text-gray-600 uppercase tracking-[0.2em] mb-3">Prescribed Corrective Drills</p>
@@ -1533,26 +1572,6 @@ export default function AnalyzePage() {
         </div>
       )}
 
-      {/* Pro upgrade modal */}
-      {showProUpgrade && (
-        <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-golf-surface border border-amber-400/30 rounded-[2.5rem] p-10 text-center">
-            <div className="w-16 h-16 bg-amber-400/10 rounded-3xl flex items-center justify-center mx-auto mb-6">
-              <Trophy size={32} className="text-amber-400" />
-            </div>
-            <h3 className="text-3xl font-black italic tracking-tighter text-white uppercase mb-3">Unlock Pro Metrics</h3>
-            <p className="text-gray-400 text-sm mb-8">Forensic posture vectors, hinge separation, and hip rotation overlays.</p>
-            <button onClick={() => { setIsAdvanced(true); setShowProUpgrade(false); }}
-              className="w-full py-4 bg-amber-400 text-black rounded-2xl font-black uppercase tracking-widest mb-3 hover:bg-amber-300 transition-colors">
-              Activate Pro Mode
-            </button>
-            <button onClick={() => setShowProUpgrade(false)}
-              className="w-full py-3 text-[10px] text-gray-500 font-black uppercase tracking-widest">
-              Continue with Basic
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

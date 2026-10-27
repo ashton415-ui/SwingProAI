@@ -74,12 +74,14 @@ export default function MobileDashboardNavigation({
         className="fixed top-0 inset-x-0 z-40 flex items-center justify-between gap-3 bg-golf-header border-b border-white/5 px-4 h-14"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
-        <Link href="/" className="flex items-center gap-2 min-w-0">
+        <Link href="/" className="flex items-center gap-2 min-w-0 min-h-11">
           <div className="w-8 h-8 bg-golf-green/5 border border-golf-green/20 rounded-lg overflow-hidden shrink-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/swingproai_logo.png" alt="SwingProAI" className="w-full h-full object-contain" />
           </div>
-          <span className="text-white font-black italic tracking-tighter uppercase text-sm leading-none truncate">
+          {/* pr-1: the italic wordmark leans past its box, and truncate's
+              overflow clipping otherwise cuts the final letter. */}
+          <span className="text-white font-black italic tracking-tighter uppercase text-sm leading-none truncate pr-1">
             Swing<span className="text-golf-green">Pro</span>AI
           </span>
         </Link>
@@ -109,8 +111,10 @@ export default function MobileDashboardNavigation({
       {/* ── Phone bottom-tab bar — hidden at tablet width and above ── */}
       <nav
         aria-label="Primary"
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-golf-header border-t border-white/5 flex items-stretch h-16"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-golf-header border-t border-white/5 flex items-stretch"
+        // The home-indicator inset is added to the bar, never taken out of the
+        // 64px the tabs need (with a fixed h-16 the tabs shrank to ~30px).
+        style={{ height: "calc(4rem + env(safe-area-inset-bottom))", paddingBottom: "env(safe-area-inset-bottom)" }}
       >
         {bottomTabItems.map((item) => {
           const Icon = item.icon;
@@ -119,12 +123,13 @@ export default function MobileDashboardNavigation({
             <Link
               key={item.href}
               href={item.href}
+              aria-label={item.label}
               className={`flex-1 flex flex-col items-center justify-center gap-1 min-w-[44px] text-[8px] font-black uppercase tracking-widest transition-colors ${
                 active ? "text-golf-green" : "text-gray-500 hover:text-white"
               }`}
             >
               <Icon size={18} />
-              <span className="truncate max-w-full px-1">{item.label}</span>
+              <span className="truncate max-w-full px-1">{item.tabLabel ?? item.label}</span>
             </Link>
           );
         })}

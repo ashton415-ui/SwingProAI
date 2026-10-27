@@ -30,6 +30,12 @@ export interface NavItem {
    * overflow drawer via `getEffectiveNavItems`.
    */
   bottomTab: boolean;
+  /**
+   * A shorter name for the phone bottom-tab bar, where five tabs share as
+   * little as 320px. The full label stays the tab's accessible name and is
+   * used everywhere else.
+   */
+  tabLabel?: string;
 }
 
 export interface NavSection {
@@ -42,11 +48,11 @@ export const GOLFER_SECTION: NavSection = {
   id: "golfer",
   title: "Golfer",
   items: [
-    { href: "/dashboard", label: "Progress Hub", icon: LayoutDashboard, bottomTab: true },
+    { href: "/dashboard", label: "Progress Hub", icon: LayoutDashboard, bottomTab: true, tabLabel: "Progress" },
     { href: "/telemetry", label: "Telemetry Logs", icon: TrendingUp, bottomTab: false },
-    { href: "/analyze", label: "Analyze Swing", icon: Target, bottomTab: true },
-    { href: "/bag", label: "My Bag", icon: Briefcase, bottomTab: true },
-    { href: "/goals", label: "My Goals", icon: Flag, bottomTab: true },
+    { href: "/analyze", label: "Analyze Swing", icon: Target, bottomTab: true, tabLabel: "Analyze" },
+    { href: "/bag", label: "My Bag", icon: Briefcase, bottomTab: true, tabLabel: "Bag" },
+    { href: "/goals", label: "My Goals", icon: Flag, bottomTab: true, tabLabel: "Goals" },
     { href: "/range", label: "Practice Range", icon: Crosshair, bottomTab: false },
     { href: "/drills", label: "Drill Hub", icon: ClipboardCheck, bottomTab: false },
     { href: "/lessons", label: "My Lessons", icon: BookOpen, bottomTab: false },
@@ -57,10 +63,10 @@ export const COACH_SECTION: NavSection = {
   id: "coach",
   title: "Coach",
   items: [
-    { href: "/coach", label: "Coach Hub", icon: UserCheck, bottomTab: true },
-    { href: "/coach/golfers", label: "My Golfers", icon: Users, bottomTab: true },
-    { href: "/coach/reviews", label: "Swing Reviews", icon: Video, bottomTab: true },
-    { href: "/coach/lesson-plans", label: "Lesson Plans", icon: BookOpen, bottomTab: true },
+    { href: "/coach", label: "Coach Hub", icon: UserCheck, bottomTab: true, tabLabel: "Hub" },
+    { href: "/coach/golfers", label: "My Golfers", icon: Users, bottomTab: true, tabLabel: "Golfers" },
+    { href: "/coach/reviews", label: "Swing Reviews", icon: Video, bottomTab: true, tabLabel: "Reviews" },
+    { href: "/coach/lesson-plans", label: "Lesson Plans", icon: BookOpen, bottomTab: true, tabLabel: "Plans" },
   ],
 };
 
@@ -68,10 +74,10 @@ export const ADMIN_SECTION: NavSection = {
   id: "admin",
   title: "Admin",
   items: [
-    { href: "/admin", label: "Command Center", icon: Shield, bottomTab: true },
-    { href: "/admin/users", label: "All Users", icon: Users, bottomTab: true },
+    { href: "/admin", label: "Command Center", icon: Shield, bottomTab: true, tabLabel: "Command" },
+    { href: "/admin/users", label: "All Users", icon: Users, bottomTab: true, tabLabel: "Users" },
     { href: "/admin/coaches", label: "Coaches", icon: UserCheck, bottomTab: true },
-    { href: "/admin/swings", label: "All Swings", icon: Video, bottomTab: true },
+    { href: "/admin/swings", label: "All Swings", icon: Video, bottomTab: true, tabLabel: "Swings" },
   ],
 };
 

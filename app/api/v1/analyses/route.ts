@@ -19,13 +19,13 @@ import {
   PUTTER_CLUB_TYPE,
   VIDEO_READINESS_COLUMNS,
   VIDEO_READY_STATUS,
-  isOwnerStoragePath,
   isSameClub,
   parseAnalysisCreateRequest,
   toAnalysisRequestDto,
   toSubscriptionTier,
   type AnalysisRequestRow,
 } from "@/lib/api/v1-analysis-dto";
+import { parseOwnedSwingVideoPath } from "@/lib/swing-video-source";
 
 /**
  * POST /api/v1/analyses
@@ -131,8 +131,10 @@ export async function POST(request: Request): Promise<Response> {
     // 4. Readiness. `status` and `storage_path` cannot change after the row is
     // created, but `status` is still stated by whoever created it, so the
     // object's existence is proved as well rather than taken on its word.
-    const storagePath: unknown = video.data.storage_path;
-    if (video.data.status !== VIDEO_READY_STATUS || !isOwnerStoragePath(storagePath, auth.userId)) {
+    // ENT-1D: the canonical owner-bound key rule (lib/swing-video-source.ts),
+    // the same one every analysis signing and download re-applies.
+    const storagePath = parseOwnedSwingVideoPath(video.data.storage_path, auth.userId);
+    if (video.data.status !== VIDEO_READY_STATUS || storagePath === null) {
       return v1Error("SWING_VIDEO_NOT_READY", VIDEO_NOT_READY_MESSAGE, requestId, 409);
     }
 

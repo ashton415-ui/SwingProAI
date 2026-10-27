@@ -911,7 +911,7 @@ describe("AnalyzePage — small/untrimmed direct-file fast path is preserved", (
     for (const condition of [
       "trimStart === 0",
       "Math.abs(trimEnd - duration) < 0.1",
-      "file.size < 18 * 1024 * 1024",
+      "file.size <= MAX_ANALYSIS_VIDEO_BYTES",
     ]) {
       expect(block, `${ANALYZE_PAGE_FILE}: fast-path condition "${condition}" was removed or altered`).toContain(condition);
     }
@@ -1100,11 +1100,15 @@ describe("AnalyzePage — submission ordering is unchanged", () => {
     expect(block, `${ANALYZE_PAGE_FILE}: MediaPipe metrics must not be wired into the active path in this slice`).not.toContain("mediapipeMetrics");
   });
 
-  it("adds no >20 MB final-blob guard in this slice", () => {
+  it("guards the final blob only with the analysis route's own limit, never a local copy of it", () => {
+    // ENT-1D D1 made the deferred guard necessary: the route now refuses a
+    // video over its limit instead of analysing without it, so the page stops
+    // such a clip before upload, using the one shared constant.
     const source = readSource(ANALYZE_PAGE_FILE);
     for (const forbidden of ["20 * 1024 * 1024", "20 * 1_048_576", "MAX_INLINE_VIDEO_BYTES"]) {
-      expect(source, `${ANALYZE_PAGE_FILE}: the >20 MB final-blob guard is deferred to a later slice ("${forbidden}")`).not.toContain(forbidden);
+      expect(source, `${ANALYZE_PAGE_FILE}: no local copy of the analysis limit ("${forbidden}")`).not.toContain(forbidden);
     }
+    expect(source).toContain("if (blob.size > MAX_ANALYSIS_VIDEO_BYTES) throw new Error(CLIP_TOO_LARGE_MESSAGE);");
   });
 
   it("does not change the upload architecture to XHR progress in this slice", () => {

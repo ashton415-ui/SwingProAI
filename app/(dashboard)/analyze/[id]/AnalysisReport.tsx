@@ -6,6 +6,10 @@ import {
   ChevronDown, ChevronUp, RotateCcw, Play, Pause,
   TrendingUp, AlertCircle, Lightbulb, Dumbbell,
 } from "lucide-react";
+import { VIDEO_UNUSABLE_COPY, VIDEO_UNUSABLE_STATUS } from "@/lib/swing-video-source";
+
+const NETWORK_FAILURE_COPY = "We couldn't reach SwingProAI. Check your connection, then tap Retry.";
+const SERVICE_FAILURE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -49,7 +53,6 @@ export interface AnalysisData {
   metrics: Metrics | null;
   swing_video: {
     id: string;
-    video_url: string;
     storage_path: string | null;
     original_filename: string | null;
     club: string | null;
@@ -67,6 +70,11 @@ interface Props {
    * client component re-deriving it would be a second opinion.
    */
   clubDisplayName: string | null;
+  /**
+   * ENT-1D. Set by the server for a failed analysis whose stored video cannot
+   * be analysed (classifyFailedAnalysisVideo); null for any other failure.
+   */
+  failedReason?: typeof VIDEO_UNUSABLE_STATUS | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -134,12 +142,30 @@ function PillarCard({ title, pillar, openDefault }: { title: string; pillar: Pil
 
 // ── Processing state ──────────────────────────────────────────────────────────
 
-function ProcessingState({ analysisId, onComplete }: { analysisId: string; onComplete: (data: AnalysisData) => void }) {
+function ProcessingState({
+  analysisId,
+  onComplete,
+  onStalled,
+  onFailed,
+}: {
+  analysisId: string;
+  onComplete: (data: AnalysisData) => void;
+  onStalled?: () => void;
+  // Set while the failure panel is shown, cleared on Retry, so the status pill
+  // agrees with the body (it otherwise still showed the initial "pending").
+  onFailed?: (failed: boolean) => void;
+}) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // ENT-1C. A 409 "already in progress" is not a failure: another request holds
   // this analysis, and the server will not start a second model call for it.
   const [inProgressNotice, setInProgressNotice] = useState<string | null>(null);
+  // ENT-1D. The analysis reached the AI and then stopped reporting; it is not
+  // re-run automatically, so retrying here cannot help.
+  const [stalledNotice, setStalledNotice] = useState<string | null>(null);
+  // ENT-1D D1. The stored video could not be read, so nothing was analysed and
+  // retrying the same video cannot help: the way forward is a new upload.
+  const [videoUnusable, setVideoUnusable] = useState(false);
   // Each Retry / Check again bumps the attempt, which is what re-runs the effect.
   const [attempt, setAttempt] = useState(0);
   const triggeredFor = useRef<number | null>(null);
@@ -176,13 +202,23 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ analysisId, ...(mediapipeMetrics ? { mediapipeMetrics } : {}) }),
     })
-      .then(async (r) => ({ httpStatus: r.status, res: await r.json() }))
+      // A response that is not JSON (a gateway error page) is the service's
+      // failure, not the golfer's connection.
+      .then(async (r) => ({
+        httpStatus: r.status,
+        res: await r.json().catch(() => ({ error: SERVICE_FAILURE_COPY })),
+      }))
       .then(({ httpStatus, res }) => {
         clearInterval(interval);
         if (httpStatus === 409 && res.status === "processing") {
           setInProgressNotice(res.error ?? "This analysis is already in progress.");
+        } else if (httpStatus === 409 && res.status === "stalled") {
+          setStalledNotice(res.error ?? "This analysis was interrupted and can't be finished.");
+          onStalled?.();
         } else if (res.error) {
+          setVideoUnusable(res.status === VIDEO_UNUSABLE_STATUS);
           setError(res.error);
+          onFailed?.(true);
         } else {
           // Clean up sessionStorage entry now that the API has consumed it
           try { sessionStorage.removeItem(`mediapipe_${analysisId}`); } catch { /* ignore */ }
@@ -191,11 +227,32 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
       })
       .catch((e) => {
         clearInterval(interval);
-        setError(e.message ?? "Analysis failed.");
+        // A network failure surfaces as the browser's own text ("Failed to
+        // fetch"), which tells a golfer nothing; the copy says what to do.
+        setError(NETWORK_FAILURE_COPY);
+        onFailed?.(true);
       });
 
     return () => clearInterval(interval);
-  }, [analysisId, onComplete, attempt]);
+  }, [analysisId, onComplete, onStalled, onFailed, attempt]);
+
+  if (stalledNotice) {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-amber-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Analysis Interrupted</p>
+        <p className="text-sm text-gray-400 mb-6">{stalledNotice}</p>
+        <a
+          href="/analyze"
+          className="inline-flex items-center justify-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+        >
+          Record a new swing
+        </a>
+      </div>
+    );
+  }
 
   if (inProgressNotice) {
     return (
@@ -223,12 +280,21 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
         </div>
         <p className="text-white font-bold mb-2">Analysis Failed</p>
         <p className="text-sm text-red-400 mb-6">{error}</p>
+        {videoUnusable ? (
+          <a
+            href="/analyze"
+            className="inline-flex items-center justify-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+          >
+            Upload a new video
+          </a>
+        ) : (
         <button
-          onClick={() => { setError(null); setStep(0); setAttempt((a) => a + 1); }}
-          className="flex items-center gap-2 mx-auto px-5 py-2.5 rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+          onClick={() => { setError(null); onFailed?.(false); setStep(0); setAttempt((a) => a + 1); }}
+          className="flex items-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
         >
           <RotateCcw className="w-3.5 h-3.5" /> Retry
         </button>
+        )}
       </div>
     );
   }
@@ -502,7 +568,7 @@ function VideoPlayer({ signedUrl, filename }: { signedUrl: string | null; filena
 
 // ── Root component ────────────────────────────────────────────────────────────
 
-export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl, clubDisplayName }: Props) {
+export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl, clubDisplayName, failedReason = null }: Props) {
   const [analysis, setAnalysis] = useState<AnalysisData>(initialAnalysis);
   // When true, force the ProcessingState even if the DB row is already "complete"
   const [forceReanalyze, setForceReanalyze] = useState(false);
@@ -511,6 +577,11 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
   const isProcessing = analysis.status === "processing";
   const isComplete   = analysis.status === "complete";
   const isFailed     = analysis.status === "failed";
+  // ENT-1D. Set when the server reports the analysis stalled, so the status
+  // pill agrees with the body.
+  const [isStalled, setIsStalled] = useState(false);
+  // Set while this page's own request is showing a failure.
+  const [failedNow, setFailedNow] = useState(false);
 
   const showProcessing = isPending || isProcessing || forceReanalyze;
 
@@ -535,10 +606,10 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
             <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-0.5">Status</p>
             <span className={`text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border ${
               isComplete ? "bg-golf-green/10 border-golf-green/25 text-golf-green" :
-              isFailed   ? "bg-red-500/10 border-red-500/25 text-red-400"         :
+              isFailed || (failedNow && !isStalled) ? "bg-red-500/10 border-red-500/25 text-red-400" :
                            "bg-amber-500/10 border-amber-500/25 text-amber-400"
             }`}>
-              {analysis.status}
+              {isStalled ? "interrupted" : failedNow ? "failed" : analysis.status}
             </span>
           </div>
         </div>
@@ -553,20 +624,38 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
           <ProcessingState
             key={forceReanalyze ? "reanalyze" : "initial"}
             analysisId={analysis.id}
-            onComplete={(data) => { setForceReanalyze(false); setAnalysis(data); }}
+            onComplete={(data) => { setForceReanalyze(false); setFailedNow(false); setAnalysis(data); }}
+            onStalled={() => setIsStalled(true)}
+            onFailed={setFailedNow}
           />
         )}
 
-        {isFailed && !showProcessing && (
+        {isFailed && !showProcessing && failedReason === VIDEO_UNUSABLE_STATUS && (
           <div className="text-center py-16 max-w-sm mx-auto">
             <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
               <AlertCircle className="w-7 h-7 text-red-400" />
             </div>
             <p className="text-white font-bold mb-2">Analysis Failed</p>
-            <p className="text-sm text-gray-500">There was an error processing your swing. Please try uploading again.</p>
+            <p className="text-sm text-red-400 mb-6">{VIDEO_UNUSABLE_COPY}</p>
+            <a
+              href="/analyze"
+              className="inline-flex items-center justify-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+            >
+              Upload a new video
+            </a>
+          </div>
+        )}
+
+        {isFailed && !showProcessing && failedReason !== VIDEO_UNUSABLE_STATUS && (
+          <div className="text-center py-16 max-w-sm mx-auto">
+            <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+              <AlertCircle className="w-7 h-7 text-red-400" />
+            </div>
+            <p className="text-white font-bold mb-2">Analysis Failed</p>
+            <p className="text-sm text-gray-500">There was an error processing your swing. Tap Retry to try again.</p>
             <button
               onClick={() => setForceReanalyze(true)}
-              className="mt-4 flex items-center gap-2 mx-auto px-5 py-2.5 rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+              className="mt-4 flex items-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
             >
               <RotateCcw className="w-3.5 h-3.5" /> Retry
             </button>

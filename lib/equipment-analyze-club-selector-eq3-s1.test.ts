@@ -652,7 +652,7 @@ describe("EQ3-S2 Analyze — putting capture presentation is derived, never rout
     );
     expect(branchIdx, "expected the locked-Putter action branch").toBeGreaterThanOrEqual(0);
     const branch = analyzeSource.slice(branchIdx, analyzeSource.indexOf(") : (", branchIdx));
-    expect(branch).toContain("UPGRADE TO UNLOCK PUTTING");
+    expect(branch).toContain("PUTTING NOT IN YOUR PLAN");
     expect(branch).toContain("disabled");
     expect(branch).not.toContain("onClick");
     expect(branch).not.toContain("startAnalysis");
@@ -729,7 +729,7 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
     // only honest reason to refuse is the plan. The wording matches the server
     // 403 exactly so the two boundaries never appear to disagree about why.
     expect(analyzeSource).toContain(
-      "Putting analysis isn't included with your current plan. Upgrade to unlock putting analysis.",
+      "Putting analysis isn't included with your current plan.",
     );
     expect(analyzeSource).not.toContain("PUTTING_ANALYSIS_UNAVAILABLE_MESSAGE");
   });
@@ -826,7 +826,8 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
   const mobileMarker = "EQ4-S1 Mobile Club Context Panel";
   const desktopMarker = "{/* ── Club Context Panel ── */}";
   const launchMonitorMarker = "Launch Monitor Panel";
-  const importAnchor = '<input type="file" accept="video/*" className="hidden"';
+  // sr-only (not hidden) since ENT-1D local acceptance: keyboard-reachable import.
+  const importAnchor = '<input type="file" accept="video/*" className="sr-only"';
 
   function mobileBlock(): string {
     const leftIdx = analyzeSource.indexOf(leftClass);
@@ -931,7 +932,7 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
     expect(analyzeSource).toContain(
       "Use the trim handles in the timeline to isolate one complete putting stroke.",
     );
-    expect(analyzeSource).toContain("UPGRADE TO UNLOCK PUTTING");
+    expect(analyzeSource).toContain("PUTTING NOT IN YOUR PLAN");
 
     const puttingBranchIdx = analyzeSource.indexOf(
       "isPuttingCapture && !canUsePuttingAnalysis(userTier) ? (",
