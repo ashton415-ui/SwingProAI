@@ -24,7 +24,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 //     evaluated atomically against the current row, as Postgres re-checks a
 //     WHERE clause once it holds the row lock, and whose reads are recorded
 //     with their filters;
-//   - Gemini, by a counter. Every test states how many model calls it allows.
+//   - Gemini, by a counter in place of the single-attempt transport's call
+//     (lib/gemini-transport.ts generateContentOnce); its error classes and
+//     response-text rules are the real ones. Every test states how many model
+//     calls it allows.
 //
 // Stored rows carry sentinel text in every withheld column and in an
 // unrecognised metrics key, so a leak through any response, prop or rendered
@@ -65,7 +68,11 @@ const state = vi.hoisted(() => ({
   dispatchPersistsThenErrors: false,
   failedWriteErrors: false,
   beforeFailedWrite: null as null | (() => void),
-  geminiTextThrows: null as null | (() => unknown),
+  // A fully received response whose first candidate was blocked.
+  geminiBlocked: null as null | "SAFETY" | "RECITATION" | "LANGUAGE",
+  // When set, the real transport runs against this loopback HTTP port instead
+  // of the counter's canned answer (the call is still counted).
+  realTransportPort: null as null | number,
   outcomeUnknownWriteErrors: false,
 }));
 
@@ -98,33 +105,38 @@ vi.mock("next/headers", () => ({
   headers: async () => ({ get: () => null }),
 }));
 
-vi.mock("@google/generative-ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@google/generative-ai")>();
-  class GoogleGenerativeAI {
-    getGenerativeModel(config: Record<string, any>) {
-      state.modelConfigs.push(config);
+vi.mock("@/lib/gemini-transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/gemini-transport")>();
+  return {
+    ...actual,
+    generateContentOnce: async (_apiKey: string, request: import("@/lib/gemini-transport").GeminiGenerateRequest) => {
+      state.geminiCalls += 1;
+      state.providerRequests.push(request as unknown as Record<string, any>);
+      state.modelConfigs.push({ model: actual.GEMINI_MODEL, systemInstruction: request.systemInstruction });
+      state.prompts.push(
+        request.contents
+          .flatMap((c) => c.parts.map((p) => ("text" in p ? p.text : undefined) ?? ""))
+          .join(String.fromCharCode(10)),
+      );
+      if (state.realTransportPort !== null) {
+        const port = state.realTransportPort;
+        const http = await import("node:http");
+        return actual.generateContentOnce(_apiKey, request, {
+          requestFn: (options, onResponse) => http.request({ ...options, host: "127.0.0.1", port }, onResponse),
+        });
+      }
+      const text = state.geminiImpl ? await state.geminiImpl() : JSON.stringify(validReport());
       return {
-        generateContent: async (request: { contents: { parts: { text?: string }[] }[] }) => {
-          state.geminiCalls += 1;
-          state.providerRequests.push(request as Record<string, any>);
-          state.prompts.push(
-            request.contents.flatMap((c) => c.parts.map((p) => p.text ?? "")).join(String.fromCharCode(10)),
-          );
-          const text = state.geminiImpl ? await state.geminiImpl() : JSON.stringify(validReport());
-          const textThrows = state.geminiTextThrows;
-          return {
-            response: {
-              text: () => {
-                if (textThrows) throw textThrows();
-                return text;
-              },
-            },
-          };
-        },
+        candidates: [
+          {
+            index: 0,
+            content: { role: "model", parts: [{ text }] },
+            finishReason: state.geminiBlocked ?? "STOP",
+          },
+        ],
       };
-    }
-  }
-  return { ...actual, GoogleGenerativeAI };
+    },
+  };
 });
 
 vi.mock("@/lib/biometrics", () => ({
@@ -662,7 +674,8 @@ beforeEach(() => {
   state.dispatchPersistsThenErrors = false;
   state.failedWriteErrors = false;
   state.beforeFailedWrite = null;
-  state.geminiTextThrows = null;
+  state.geminiBlocked = null;
+  state.realTransportPort = null;
   state.outcomeUnknownWriteErrors = false;
   setMember("none", "none");
   vi.stubEnv("GEMINI_API_KEY", "synthetic-key");
@@ -1067,7 +1080,7 @@ describe("E. failures are safe and never call Gemini without a claim", () => {
 
   it("a definite provider rejection marks the claimed row failed, not complete", async () => {
     state.geminiImpl = async () => {
-      throw new GoogleGenerativeAIFetchError("permission denied", 403);
+      throw new GeminiHttpError(403);
     };
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
     expect(storedRow().status).toBe("failed");
@@ -1868,7 +1881,7 @@ describe("R. execution lease: recovery without duplicate provider calls", () => 
   it("a model error after a takeover cannot fail the new holder's row", async () => {
     state.geminiImpl = async () => {
       storedRow().processing_claim_id = OTHER_CLAIM;
-      throw new GoogleGenerativeAIFetchError("permission denied", 403);
+      throw new GeminiHttpError(403);
     };
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
     expect(storedRow().status).toBe("processing");
@@ -2316,11 +2329,10 @@ describe("U2. repository-wide: no session read of swing_analysis can outgrow the
 
 import { releaseUndispatchedClaimAsFailed } from "@/lib/analysis-execution-claim";
 import {
-  GoogleGenerativeAIAbortError,
-  GoogleGenerativeAIError,
-  GoogleGenerativeAIFetchError,
-  GoogleGenerativeAIResponseError,
-} from "@google/generative-ai";
+  GeminiHttpError,
+  GeminiOutcomeUnknownError,
+  GeminiResponseBlockedError,
+} from "@/lib/gemini-transport";
 import { markClaimOutcomeUnknown } from "@/lib/analysis-execution-claim";
 
 describe("V. a dispatch mark that was not confirmed never leads to a provider call or a re-runnable row", () => {
@@ -2507,7 +2519,7 @@ describe("W. a provider call that ends without a definite answer is stalled, nev
   it("putting: a definite provider rejection is released as failed and may be retried", async () => {
     puttWithVideo();
     state.geminiImpl = async () => {
-      throw new GoogleGenerativeAIFetchError("permission denied", 403);
+      throw new GeminiHttpError(403);
     };
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
     expect(storedRow().status).toBe("failed");
@@ -2516,11 +2528,12 @@ describe("W. a provider call that ends without a definite answer is stalled, nev
     expect(state.geminiCalls).toBe(2);
   });
 
-  it("an SDK network or abort error carries no status and is an unknown outcome; a plain object with a status is not trusted", async () => {
+  it("a transport failure, the deadline or a redirect carries no status and is an unknown outcome; a plain object with a status is not trusted", async () => {
     for (const thrown of [
-      new GoogleGenerativeAIError("[GoogleGenerativeAI Error]: Error fetching from https://example.invalid: fetch failed"),
-      new GoogleGenerativeAIAbortError("Request aborted"),
-      Object.assign(new Error("not an SDK error"), { status: 503 }),
+      new GeminiOutcomeUnknownError("transport"),
+      new GeminiOutcomeUnknownError("deadline"),
+      new GeminiOutcomeUnknownError("redirect"),
+      Object.assign(new Error("not a transport error"), { status: 401 }),
     ]) {
       state.analyses = [pendingRow()];
       state.geminiImpl = async () => {
@@ -2529,7 +2542,7 @@ describe("W. a provider call that ends without a definite answer is stalled, nev
       const response = await post({ analysisId: ANALYSIS_ID });
       expect(response.status).toBe(409);
       expect((await json(response)).status).toBe("stalled");
-      expect(JSON.stringify(await (await post({ analysisId: ANALYSIS_ID })).json())).not.toMatch(/example\.invalid|fetch failed|aborted|SDK/);
+      expect(JSON.stringify(await (await post({ analysisId: ANALYSIS_ID })).json())).not.toMatch(/outcome unknown|transport|deadline|redirect/);
     }
   });
 
@@ -2543,24 +2556,27 @@ describe("W. a provider call that ends without a definite answer is stalled, nev
 // ─── X. Provider uncertainty: explicit allow-list for definite rejection ──────
 
 const UNKNOWN_PROVIDER_ERRORS: [string, () => unknown][] = [
-  ["HTTP 408", () => new GoogleGenerativeAIFetchError("request timeout", 408)],
-  ["HTTP 499", () => new GoogleGenerativeAIFetchError("cancelled", 499)],
-  ["HTTP 500", () => new GoogleGenerativeAIFetchError("internal", 500)],
-  ["HTTP 502", () => new GoogleGenerativeAIFetchError("bad gateway", 502)],
-  ["HTTP 503", () => new GoogleGenerativeAIFetchError("unavailable", 503)],
-  ["HTTP 504", () => new GoogleGenerativeAIFetchError("deadline exceeded", 504)],
-  ["HTTP 400", () => new GoogleGenerativeAIFetchError("invalid argument", 400)],
-  ["HTTP 429", () => new GoogleGenerativeAIFetchError("resource exhausted", 429)],
-  ["missing status", () => new GoogleGenerativeAIFetchError("no status")],
-  ["unlisted 4xx (409)", () => new GoogleGenerativeAIFetchError("conflict", 409)],
-  ["SDK network error", () => new GoogleGenerativeAIError("Error fetching from https://example.invalid: fetch failed")],
-  ["SDK abort", () => new GoogleGenerativeAIAbortError("Request aborted")],
+  ["HTTP 408", () => new GeminiHttpError(408)],
+  ["HTTP 499", () => new GeminiHttpError(499)],
+  ["HTTP 500", () => new GeminiHttpError(500)],
+  ["HTTP 502", () => new GeminiHttpError(502)],
+  ["HTTP 503", () => new GeminiHttpError(503)],
+  ["HTTP 504", () => new GeminiHttpError(504)],
+  ["HTTP 400", () => new GeminiHttpError(400)],
+  ["HTTP 429", () => new GeminiHttpError(429)],
+  ["unlisted 4xx (409)", () => new GeminiHttpError(409)],
+  // ENT-1D S6: the transport never follows a redirect; it is an unknown outcome.
+  ["redirect (3xx)", () => new GeminiOutcomeUnknownError("redirect")],
+  ["transport deadline", () => new GeminiOutcomeUnknownError("deadline")],
+  ["transport failure", () => new GeminiOutcomeUnknownError("transport")],
+  ["unreadable 2xx body", () => new GeminiOutcomeUnknownError("unreadable_response")],
+  ["oversized 2xx body (over 2 MiB)", () => new GeminiOutcomeUnknownError("oversized_response")],
 ];
 
 const DEFINITE_PROVIDER_ERRORS: [string, () => unknown][] = [
-  ["HTTP 401", () => new GoogleGenerativeAIFetchError("unauthenticated", 401)],
-  ["HTTP 403", () => new GoogleGenerativeAIFetchError("permission denied", 403)],
-  ["HTTP 404", () => new GoogleGenerativeAIFetchError("not found", 404)],
+  ["HTTP 401", () => new GeminiHttpError(401)],
+  ["HTTP 403", () => new GeminiHttpError(403)],
+  ["HTTP 404", () => new GeminiHttpError(404)],
 ];
 
 describe("X. full swing: provider uncertainty is stalled; only allow-listed rejections are retryable", () => {
@@ -2605,9 +2621,9 @@ describe("X. full swing: provider uncertainty is stalled; only allow-listed reje
 
   it("a fully received but blocked response is a known failure, not an uncertain one", async () => {
     state.geminiImpl = async () => {
-      throw new GoogleGenerativeAIResponseError("Candidate was blocked due to SAFETY");
+      throw new GeminiResponseBlockedError("Candidate was blocked due to SAFETY");
     };
-    // The stand-in raises it from generateContent, i.e. inside the classified
+    // The stand-in raises it from the transport call, i.e. inside the classified
     // call: it is not on the allow-list, so it is treated conservatively.
     const response = await post({ analysisId: ANALYSIS_ID });
     expect(response.status).toBe(409);
@@ -2656,21 +2672,21 @@ describe("X2. putting: the same allow-list", () => {
 // ─── Y. Fully received but unusable responses; a failed unknown-outcome mark ──
 
 describe("Y. a response that arrived in full but is unusable is a known failure", () => {
-  it("full swing: response.text() raising a blocked-candidate error after a resolved call → failed, retryable", async () => {
-    state.geminiTextThrows = () => new GoogleGenerativeAIResponseError("Candidate was blocked due to SAFETY");
+  it("full swing: a resolved call whose candidate was blocked → failed, retryable", async () => {
+    state.geminiBlocked = "SAFETY";
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
     expect(storedRow().status).toBe("failed");
-    state.geminiTextThrows = null;
+    state.geminiBlocked = null;
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
     expect(state.geminiCalls).toBe(2);
   });
 
-  it("putting: response.text() raising after a resolved call → failed, retryable", async () => {
+  it("putting: a resolved call whose candidate was blocked → failed, retryable", async () => {
     puttWithVideo();
-    state.geminiTextThrows = () => new GoogleGenerativeAIResponseError("Candidate was blocked due to SAFETY");
+    state.geminiBlocked = "RECITATION";
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
     expect(storedRow().status).toBe("failed");
-    state.geminiTextThrows = null;
+    state.geminiBlocked = null;
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
     expect(state.geminiCalls).toBe(2);
   });
@@ -2686,7 +2702,7 @@ describe("Y. a response that arrived in full but is unusable is a known failure"
   it("an unknown outcome whose stall mark cannot be written is still never claimable, and stalls after the lease", async () => {
     state.outcomeUnknownWriteErrors = true;
     state.geminiImpl = async () => {
-      throw new GoogleGenerativeAIFetchError("unavailable", 503);
+      throw new GeminiHttpError(503);
     };
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
     expect(storedRow().status).toBe("processing");
@@ -2701,4 +2717,109 @@ describe("Y. a response that arrived in full but is unusable is a known failure"
     expect(await readExecutionState({ analysisId: ANALYSIS_ID, userId: OWNER, family: "full_swing" })).toBe("stalled");
     expect(state.geminiCalls).toBe(1);
   });
+});
+
+// ─── Z. ENT-1D S6: the route's provider request equals what the SDK sent ──────
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GEMINI_MODEL, buildGenerateContentBody, type GeminiGenerateRequest } from "@/lib/gemini-transport";
+
+/** The body @google/generative-ai 0.24.1 sends for the same call, from a stubbed fetch. */
+async function sdkBodyFor(request: GeminiGenerateRequest): Promise<{ url: string; body: string }> {
+  let captured: { url: string; body: string } | null = null;
+  vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+    captured = { url: String(url), body: String(init.body) };
+    return new Response(JSON.stringify({ candidates: [] }), { status: 200 });
+  });
+  try {
+    await new GoogleGenerativeAI("synthetic-key")
+      .getGenerativeModel({ model: GEMINI_MODEL, systemInstruction: request.systemInstruction })
+      .generateContent({ contents: request.contents, generationConfig: request.generationConfig });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  if (!captured) throw new Error("the SDK made no request");
+  return captured;
+}
+
+describe("Z. the provider request the route builds is the one the SDK sent", () => {
+  it("full swing, with client estimates: same endpoint model, byte-identical body", async () => {
+    const MEASURED = { spineAngle: 31.5, hipRotation: 40, shoulderRotation: 88, tempoRatio: "3.1:1", setupSpineAngle: 38, impactSpineAngle: 30 };
+    expect((await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED })).status).toBe(200);
+    expect(state.providerRequests).toHaveLength(1);
+    const request = state.providerRequests[0] as unknown as GeminiGenerateRequest;
+    const sdk = await sdkBodyFor(request);
+    expect(sdk.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
+    expect(buildGenerateContentBody(request)).toBe(sdk.body);
+    expect(request.generationConfig).toMatchObject({ responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 8192 });
+  });
+
+  it("putting: byte-identical body", async () => {
+    puttWithVideo();
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.providerRequests).toHaveLength(1);
+    const request = state.providerRequests[0] as unknown as GeminiGenerateRequest;
+    expect(buildGenerateContentBody(request)).toBe((await sdkBodyFor(request)).body);
+    expect(request.generationConfig).toMatchObject({ responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 4096 });
+  });
+});
+
+// ─── Z2. ENT-1D S6: an oversized successful response, through the real transport ─
+
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import type { AddressInfo as HttpAddressInfo } from "node:net";
+
+/** A loopback provider that answers 200 with a chunked 3 MiB body, counting requests. */
+async function oversizedProvider(): Promise<{ server: HttpServer; port: number; hits: () => number }> {
+  let hits = 0;
+  const server = createHttpServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      hits += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"pad":"');
+      const MiB = Buffer.alloc(1024 * 1024, 0x78);
+      let chunks = 0;
+      const next = () => {
+        if (res.destroyed || res.writableEnded) return;
+        if (chunks === 3) return void res.end('"}');
+        chunks += 1;
+        res.write(MiB);
+        setTimeout(next, 20);
+      };
+      next();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, port: (server.address() as HttpAddressInfo).port, hits: () => hits };
+}
+
+describe("Z2. an oversized successful response leaves the analysis stalled and is never re-dispatched", () => {
+  for (const family of ["full swing", "putting"] as const) {
+    it(`${family}: real transport, 3 MiB 200 body → 409 stalled, dispatch kept; repeats make no provider call`, async () => {
+      if (family === "putting") puttWithVideo();
+      const provider = await oversizedProvider();
+      try {
+        state.realTransportPort = provider.port;
+        const response = await post({ analysisId: ANALYSIS_ID });
+        expect(response.status).toBe(409);
+        expect((await json(response)).status).toBe("stalled");
+        expect(storedRow().status).toBe("processing");
+        expect(storedRow().provider_dispatched_at).not.toBeNull();
+        const held = storedRow().processing_claim_id;
+        // The golfer retries, now and after the lease: no claim, no provider call.
+        const again = await post({ analysisId: ANALYSIS_ID });
+        expect(again.status).toBe(409);
+        expect((await json(again)).status).toBe("stalled");
+        storedRow().processing_heartbeat_at = new Date(Date.now() - STALE * 1000).toISOString();
+        expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+        expect(storedRow().processing_claim_id).toBe(held);
+        expect(state.geminiCalls).toBe(1);
+        expect(provider.hits()).toBe(1);
+      } finally {
+        provider.server.closeAllConnections();
+        await new Promise<void>((resolve) => provider.server.close(() => resolve()));
+      }
+    });
+  }
 });

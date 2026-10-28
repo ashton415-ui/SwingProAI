@@ -386,7 +386,8 @@ describe("nothing putting-specific happens before the gate", () => {
       "claimAnalysisExecution(",
       // ENT-1D: the owner-bound Storage load (sign + verified download).
       "await loadOwnedSwingVideo(supabase, puttingVideo?.storage_path, authenticatedUserId, MAX_ANALYSIS_VIDEO_BYTES)",
-      "puttingModel.generateContent({",
+      // ENT-1D S6: the provider call is the single-attempt transport.
+      "puttingResult = await generateContentOnce(puttingApiKey, {",
       // EQ5F-E builds the envelope into a local before deriving the score from
       // it, so the inline form is gone. The property this line stands for is
       // unchanged: constructing the persisted analysis, and persisting the
@@ -446,7 +447,7 @@ describe("only putting pays for putting", () => {
       'console.log("[analyze-swing] row status:", analysisRow.status)',
       "const geminiKey = resolveGeminiKey()",
       "extractSwingMetrics(",
-      "generateContent(",
+      "generateContentOnce(",
     ]) {
       expect(otherFamiliesSource, `full swing lost ${anchorText}`).toContain(anchorText);
     }

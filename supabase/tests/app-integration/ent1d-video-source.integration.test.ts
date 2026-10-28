@@ -13,7 +13,7 @@
 // other URL, private service or external host is contacted; the setup adapter
 // additionally blocks every non-loopback fetch.
 //
-// Replaced, as in the route suite: GoogleGenerativeAI (deterministic answer),
+// Replaced, as in the route suite: the provider transport call (deterministic answer),
 // next/headers (request scope), server-only.
 
 import { createServer, type Server } from "node:http";
@@ -30,20 +30,20 @@ vi.mock("next/headers", () => ({
   }),
   headers: () => new Headers(),
 }));
-vi.mock("@google/generative-ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@google/generative-ai")>();
-  class GoogleGenerativeAI {
-    getGenerativeModel() {
+vi.mock("@/lib/gemini-transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/gemini-transport")>();
+  return {
+    ...actual,
+    generateContentOnce: async (_apiKey: string, req: unknown) => {
+      provider.calls += 1;
+      provider.requests.push(req);
       return {
-        generateContent: async (req: unknown) => {
-          provider.calls += 1;
-          provider.requests.push(req);
-          return { response: { text: () => JSON.stringify(PROVIDER_ANSWER) } };
-        },
+        candidates: [
+          { index: 0, content: { role: "model", parts: [{ text: JSON.stringify(PROVIDER_ANSWER) }] }, finishReason: "STOP" },
+        ],
       };
-    }
-  }
-  return { ...actual, GoogleGenerativeAI };
+    },
+  };
 });
 
 import { createClient } from "@supabase/supabase-js";

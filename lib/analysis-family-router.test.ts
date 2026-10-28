@@ -275,7 +275,8 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
       "extractSwingMetrics(",
       // ENT-1D: the owner-bound Storage load replaced the inline sign + fetch.
       "loadOwnedSwingVideo(",
-      "generateContent(",
+      // ENT-1D S6: the provider call is the single-attempt transport.
+      "generateContentOnce(",
     ]) {
       const at = anchor(site);
       expect(putting, `putting refusal must precede ${site}`).toBeLessThan(at);
@@ -333,7 +334,9 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
       expect(copy).not.toContain("full_swing");
       expect(copy).not.toContain("putting_pipeline");
     }
-    expect(apiSource).toContain('model: "gemini-2.5-flash"');
+    // ENT-1D S6: the model is fixed in the transport the route calls.
+    expect(apiSource).toContain('from "@/lib/gemini-transport"');
+    expect(readSource("lib/gemini-transport.ts")).toContain('export const GEMINI_MODEL = "gemini-2.5-flash";');
     expect(apiSource).toContain("SYSTEM_INSTRUCTION");
     expect(apiSource).toContain("RESPONSE_SCHEMA");
     expect(apiSource).toContain("temperature: 0.0");
@@ -365,7 +368,7 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
   it("checks the semantically valid cache before any mutation or model call", () => {
     const cache = puttingAnchor("isPersistedPuttingAnalysisV1(analysisRow.putting_analysis)");
     expect(cache).toBeLessThan(puttingAnchor("claimAnalysisExecution("));
-    expect(cache).toBeLessThan(puttingAnchor("generateContent("));
+    expect(cache).toBeLessThan(puttingAnchor("generateContentOnce("));
     expect(puttingHelperSource.slice(cache, cache + 400)).toContain(
       "data: serializeAnalysisResult(analysisRow, PUTTING_RESULT_ACCESS)",
     );
@@ -375,7 +378,7 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
     const unavailable = puttingAnchor('if (puttingClaim.outcome === "unavailable") {');
     const notClaimed = puttingAnchor('if (puttingClaim.outcome === "not_claimed") {');
     const dispatch = puttingAnchor("await markProviderDispatched(");
-    const model = puttingAnchor("generateContent(");
+    const model = puttingAnchor("generateContentOnce(");
     expect(unavailable).toBeLessThan(model);
     expect(notClaimed).toBeLessThan(model);
     expect(dispatch).toBeLessThan(model);
@@ -387,9 +390,9 @@ describe("EQ5B-S1 putting pipeline — Analyze API source contract", () => {
 
   it("requires usable video bytes before the model is called", () => {
     // ENT-1D: the owner-bound Storage load (lib/swing-video-source.ts).
-    expect(puttingAnchor("await loadOwnedSwingVideo(")).toBeLessThan(puttingAnchor("generateContent("));
+    expect(puttingAnchor("await loadOwnedSwingVideo(")).toBeLessThan(puttingAnchor("generateContentOnce("));
     const noVideo = puttingAnchor("if (!inlineVideo) {");
-    expect(noVideo).toBeLessThan(puttingAnchor("generateContent("));
+    expect(noVideo).toBeLessThan(puttingAnchor("generateContentOnce("));
     expect(puttingHelperSource.slice(noVideo, noVideo + 500)).toContain(
       '"[analyze-swing] putting requires video"',
     );

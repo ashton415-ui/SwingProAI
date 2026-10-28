@@ -10,11 +10,11 @@
 // database write the route makes.
 //
 // Replaced boundaries, and nothing else:
-//   - `@google/generative-ai`: GoogleGenerativeAI only. The real
-//     GoogleGenerativeAIFetchError, SchemaType and the rest of the SDK are
-//     kept, so the route's own error classifier sees the real class. Each
-//     test sets a deterministic provider behaviour; no request leaves the
-//     process (the setup adapter also blocks any non-loopback fetch).
+//   - `@/lib/gemini-transport`: generateContentOnce only (ENT-1D S6). The
+//     real GeminiHttpError, GeminiOutcomeUnknownError and responseText() are
+//     kept, so the route's own error classifier and text extraction see the
+//     real code. Each test sets a deterministic provider behaviour; no request
+//     leaves the process (the setup adapter also blocks any non-loopback fetch).
 //   - `next/headers`: request-scope adapter. cookies() carries the golfer's
 //     real access token in the auth-cookie envelope the app reads, headers()
 //     carries an optional Authorization header. Vitest has no Next.js request
@@ -41,24 +41,20 @@ vi.mock("next/headers", () => ({
   }),
   headers: () => new Headers(request.authorization ? { authorization: request.authorization } : {}),
 }));
-vi.mock("@google/generative-ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@google/generative-ai")>();
-  class GoogleGenerativeAI {
-    getGenerativeModel() {
-      return {
-        generateContent: async (req: unknown) => {
-          provider.calls += 1;
-          provider.requests.push(req);
-          return provider.behave(req);
-        },
-      };
-    }
-  }
-  return { ...actual, GoogleGenerativeAI };
+vi.mock("@/lib/gemini-transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/gemini-transport")>();
+  return {
+    ...actual,
+    generateContentOnce: async (_apiKey: string, req: unknown) => {
+      provider.calls += 1;
+      provider.requests.push(req);
+      return provider.behave(req);
+    },
+  };
 });
 
 import { NextRequest } from "next/server";
-import { GoogleGenerativeAIFetchError } from "@google/generative-ai";
+import { GeminiHttpError, GeminiOutcomeUnknownError } from "@/lib/gemini-transport";
 import { POST } from "@/app/api/analyze-swing/route";
 import { GET as getResultV1 } from "@/app/api/v1/analyses/[id]/route";
 import { ANALYSIS_LEASE_SECONDS, claimAnalysisExecution } from "@/lib/analysis-execution-claim";
@@ -108,7 +104,11 @@ const PUTTING_REPORT = {
   practice_focus: "Work on maintaining a quieter lower body throughout the stroke.",
 };
 
-const answer = (body: unknown) => async () => ({ response: { text: () => JSON.stringify(body) } });
+/** A received 2xx generateContent response whose only text is `text`. */
+const received = (text: string) => ({
+  candidates: [{ index: 0, content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
+});
+const answer = (body: unknown) => async () => received(JSON.stringify(body));
 
 // ── Request helpers ──────────────────────────────────────────────────────────
 
@@ -264,7 +264,7 @@ describe("analyze-swing route, full swing", () => {
   it("definite provider rejection (401) releases as failed; a later request retries and completes", async () => {
     const id = await createAnalysis(owner, "full_swing", { upload: true });
     provider.behave = async () => {
-      throw new GoogleGenerativeAIFetchError("synthetic", 401, "Unauthorized");
+      throw new GeminiHttpError(401);
     };
     const res = await analyze(owner, id);
     expect(res.status).toBe(500);
@@ -283,15 +283,18 @@ describe("analyze-swing route, full swing", () => {
 
   it("an unusable provider response (not JSON) is a definite failure", async () => {
     const id = await createAnalysis(owner, "full_swing", { upload: true });
-    provider.behave = async () => ({ response: { text: () => "not json" } });
+    provider.behave = async () => received("not json");
     expect((await analyze(owner, id)).status).toBe(500);
     expect((await row(id)).status).toBe("failed");
   });
 
   it.each([
-    ["HTTP 503", () => new GoogleGenerativeAIFetchError("synthetic", 503, "Unavailable")],
-    ["HTTP 429", () => new GoogleGenerativeAIFetchError("synthetic", 429, "Too Many Requests")],
-    ["transport error", () => new TypeError("fetch failed")],
+    ["HTTP 503", () => new GeminiHttpError(503)],
+    ["HTTP 429", () => new GeminiHttpError(429)],
+    ["transport error", () => new GeminiOutcomeUnknownError("transport")],
+    // ENT-1D S6: a redirect is never followed, and the deadline is not a retry.
+    ["redirect", () => new GeminiOutcomeUnknownError("redirect")],
+    ["transport deadline", () => new GeminiOutcomeUnknownError("deadline")],
   ])("uncertain outcome (%s) stalls the analysis and is never re-run", async (_label, makeError) => {
     const id = await createAnalysis(owner, "full_swing", { upload: true });
     provider.behave = async () => {
@@ -389,7 +392,7 @@ describe("analyze-swing route, putting", () => {
     try {
       const stalledId = await createAnalysis(owner, "putting", { upload: true });
       provider.behave = async () => {
-        throw new GoogleGenerativeAIFetchError("synthetic", 500, "Internal");
+        throw new GeminiHttpError(500);
       };
       const s = await analyze(owner, stalledId);
       expect(s.status).toBe(409);
@@ -401,7 +404,7 @@ describe("analyze-swing route, putting", () => {
 
       const failedId = await createAnalysis(owner, "putting", { upload: true });
       provider.behave = async () => {
-        throw new GoogleGenerativeAIFetchError("synthetic", 403, "Forbidden");
+        throw new GeminiHttpError(403);
       };
       expect((await analyze(owner, failedId)).status).toBe(500);
       expect((await row(failedId)).status).toBe("failed");

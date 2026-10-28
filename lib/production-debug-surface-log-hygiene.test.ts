@@ -247,8 +247,9 @@ describe("analyze-swing Gemini credential contract", () => {
     );
   });
 
-  it("still constructs the Gemini client from the configured credential", () => {
-    expect(apiSource).toContain("new GoogleGenerativeAI(geminiKey)");
+  it("still calls the provider with the configured credential", () => {
+    // ENT-1D S6: the single-attempt transport takes the credential directly.
+    expect(apiSource).toContain("await generateContentOnce(geminiKey, {");
   });
 
   it("never derives a substring or length from the credential", () => {
@@ -437,7 +438,9 @@ describe("analyze-swing functional anchors", () => {
   });
 
   it("keeps the Gemini request configuration", () => {
-    expect(apiSource).toContain('model: "gemini-2.5-flash"');
+    // ENT-1D S6: the model is fixed in the transport the route calls.
+    expect(apiSource).toContain('from "@/lib/gemini-transport"');
+    expect(readSource("lib/gemini-transport.ts")).toContain('export const GEMINI_MODEL = "gemini-2.5-flash";');
     expect(apiSource).toContain("SYSTEM_INSTRUCTION");
     expect(apiSource).toContain("RESPONSE_SCHEMA");
     expect(apiSource).toContain("temperature: 0.0");

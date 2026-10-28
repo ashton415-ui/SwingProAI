@@ -12,7 +12,7 @@
 // write shapes (git HEAD 168bd88, app/api/analyze-swing/route.ts), issued with
 // the same service-role writer the old route used. An old worker "still
 // executing" is a barrier: its claim has been written and its completion has
-// not. Only `server-only`, `next/headers` and the GoogleGenerativeAI class are
+// not. Only `server-only`, `next/headers` and the provider transport call are
 // replaced (see ent1d-analyze-route.integration.test.ts); no provider call
 // leaves the process.
 //
@@ -33,19 +33,15 @@ vi.mock("next/headers", () => ({
   }),
   headers: () => new Headers(),
 }));
-vi.mock("@google/generative-ai", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@google/generative-ai")>();
-  class GoogleGenerativeAI {
-    getGenerativeModel() {
-      return {
-        generateContent: async () => {
-          provider.calls += 1;
-          throw new Error("ENT1D: the provider must not be called in the mixed-version suite");
-        },
-      };
-    }
-  }
-  return { ...actual, GoogleGenerativeAI };
+vi.mock("@/lib/gemini-transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/gemini-transport")>();
+  return {
+    ...actual,
+    generateContentOnce: async () => {
+      provider.calls += 1;
+      throw new Error("ENT1D: the provider must not be called in the mixed-version suite");
+    },
+  };
 });
 
 import { NextRequest } from "next/server";

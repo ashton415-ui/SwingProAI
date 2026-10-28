@@ -25,12 +25,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import {
-  GoogleGenerativeAI,
-  GoogleGenerativeAIFetchError,
-  SchemaType,
-  type Schema,
-} from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { GeminiHttpError, generateContentOnce, responseText } from "@/lib/gemini-transport";
 import { createClient } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { extractSwingMetrics } from "@/lib/biometrics";
@@ -607,14 +603,13 @@ async function runPuttingAnalysis(
 
   let puttingParsed: unknown;
   try {
-    const puttingModel = new GoogleGenerativeAI(puttingApiKey).getGenerativeModel({
-      model: "gemini-2.5-flash",
-      systemInstruction: PUTTING_SYSTEM_INSTRUCTION,
-    });
     const equipmentContext = buildTrustedEquipmentContext(analysisRow.equipment_snapshot);
     let puttingResult;
     try {
-      puttingResult = await puttingModel.generateContent({
+      // ENT-1D S6: at most one HTTPS request, never redirected or retried, and
+      // bounded by one deadline (lib/gemini-transport.ts).
+      puttingResult = await generateContentOnce(puttingApiKey, {
+      systemInstruction: PUTTING_SYSTEM_INSTRUCTION,
       contents: [
         {
           role: "user",
@@ -638,7 +633,7 @@ async function runPuttingAnalysis(
       throw providerError;
     }
     // Deliberately not named rawText, and never logged.
-    const puttingRawText = puttingResult.response.text();
+    const puttingRawText = responseText(puttingResult);
     puttingParsed = JSON.parse(puttingRawText);
   } catch {
     await markFailed();
@@ -1024,13 +1019,7 @@ export async function POST(req: NextRequest) {
   ].join("\n");
 
   try {
-    const genAI = new GoogleGenerativeAI(geminiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-    });
-
-    // Build explicit content parts so the SDK never misinterprets a bare string
+    // Explicit content parts: the inline video, then the prompt text.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const contentParts: any[] = [videoPayload, { text: userPrompt }];
 
@@ -1045,7 +1034,10 @@ export async function POST(req: NextRequest) {
 
     let result;
     try {
-      result = await model.generateContent({
+      // ENT-1D S6: at most one HTTPS request, never redirected or retried, and
+      // bounded by one deadline (lib/gemini-transport.ts).
+      result = await generateContentOnce(geminiKey, {
+        systemInstruction: SYSTEM_INSTRUCTION,
         contents: [{ role: "user", parts: contentParts }],
         generationConfig: {
           responseMimeType: "application/json",  // required alongside responseSchema
@@ -1064,7 +1056,7 @@ export async function POST(req: NextRequest) {
       }
       throw providerError;
     }
-    const rawText = result.response.text();
+    const rawText = responseText(result);
 
     // responseSchema guarantees clean JSON — log length so we can verify in Vercel
     console.log("[analyze-swing] Gemini response length (chars):", rawText.length);
@@ -1294,26 +1286,27 @@ const STALLED_COPY =
  * limit such as output tokens may be enforced after admission): the
  * repository holds no provider evidence that either means "no work done".
  * Also unknown: 408 and 499 (deadline / cancellation), every 5xx, any other
- * or missing status, and every non-HTTP error (transport failure, abort,
- * timeout, body read failure). Widening this list needs provider evidence.
+ * status, a redirect (never followed), and every non-HTTP error (transport
+ * failure, the transport deadline, an unreadable 2xx body). Widening this list
+ * needs provider evidence.
  */
 const DEFINITE_REJECTION_STATUSES: readonly number[] = [401, 403, 404];
 
 /**
- * True only for a non-OK HTTP response the SDK actually received
- * (GoogleGenerativeAIFetchError carries its status) whose status is on the
- * allow-list above. Matched by class, not by name: the SDK does not set error
- * names.
+ * True only for a non-OK HTTP response the transport actually received
+ * (GeminiHttpError carries its status) whose status is on the allow-list
+ * above. Matched by class, not by name. A redirect or any failure without a
+ * provider answer is a GeminiOutcomeUnknownError and is never on the list.
  *
  * A response that arrived in full but is unusable (blocked, bad finish reason,
- * not JSON) is a different, known outcome: the SDK raises it from
- * response.text(), and JSON.parse from the body, after this call returns, so
- * it never reaches this classifier and is released as a definite failure.
+ * not JSON) is a different, known outcome: responseText() raises it, and
+ * JSON.parse rejects the text, after this call returns, so it never reaches
+ * this classifier and is released as a definite failure.
  * Nothing here claims exactly-once provider execution.
  */
 function isDefiniteProviderRejection(error: unknown): boolean {
   return (
-    error instanceof GoogleGenerativeAIFetchError &&
+    error instanceof GeminiHttpError &&
     typeof error.status === "number" &&
     DEFINITE_REJECTION_STATUSES.includes(error.status)
   );
