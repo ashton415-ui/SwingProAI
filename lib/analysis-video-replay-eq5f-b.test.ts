@@ -113,8 +113,9 @@ const fullSwingRegion = (source: string = pageSource): string =>
 
 // ENT-1C: the owned-row read names its columns instead of `*`; the result
 // payload is read by the unified result-read authority, not this query.
+// S6-R1A: the canonical metric columns the authority resolves are selected too.
 const VIDEO_SELECT =
-  '.select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path)")';
+  '.select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, spine_angle, hip_rotation, shoulder_rotation, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path)")';
 const OWNER_FILTER_ID = '.eq("id", params.id)';
 const OWNER_FILTER_USER = '.eq("user_id", user.id)';
 const OWNED_ROW_BOUNDARY = "if (!swing) notFound();";
@@ -340,7 +341,8 @@ describe("EQ5F-B changes no existing authority", () => {
   it("mounts each result panel exactly once", () => {
     expect(countOccurrences(pageSource, "<PuttingAnalysisPanel")).toBe(1);
     expect(countOccurrences(pageSource, "<PuttingRecommendationsPanel")).toBe(1);
-    expect(countOccurrences(pageSource, "metricCards.map(")).toBe(1);
+    // S6-R1: the full-swing cards render from estimates.map (was metricCards.map).
+    expect(countOccurrences(pageSource, "estimates.map(")).toBe(1);
   });
 });
 

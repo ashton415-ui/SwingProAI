@@ -2,9 +2,11 @@
 
 /**
  * components/swing/EquipmentRecommendations.tsx
- * AI Equipment Recommendations panel.
+ * Equipment fitting panel.
  * - Par / none tier  → locked premium preview banner
- * - Birdie / Eagle / Coach tiers → full custom club & shaft suggestions
+ * - Birdie / Eagle / Coach tiers → a real fitting when one exists; otherwise
+ *   an explicit "awaiting trustworthy data" state (S6-R1). No fitting has a
+ *   producer yet, and nothing here derives advice from video estimates.
  */
 
 import type { SubscriptionTier } from "@/types/database";
@@ -45,10 +47,12 @@ export function EquipmentRecommendations({ fitting, tier }: Props) {
         <TierBadge tier={tier} />
       </div>
 
-      {fitting && !isLocked ? (
+      {isLocked ? (
+        <PlaceholderCards />
+      ) : fitting ? (
         <FittingContent fitting={fitting} />
       ) : (
-        <PlaceholderCards />
+        <AwaitingTrustworthyData />
       )}
     </section>
   );
@@ -70,6 +74,25 @@ function FittingContent({ fitting }: { fitting: EquipmentFitting }) {
           <p className="text-sm leading-relaxed text-gray-400">{card.detail}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * S6-R1. An entitled golfer with no fitting is told why, instead of seeing
+ * blurred cards that look like hidden results. Fitting needs trustworthy
+ * measured data AND a fitting built on it; neither exists yet, and supplying
+ * data alone does not switch it on.
+ */
+export const AWAITING_FITTING_TITLE = "Equipment fitting isn't available yet";
+export const AWAITING_FITTING_COPY =
+  "Shaft, club and ball recommendations need trustworthy measured swing data, such as launch-monitor speed and launch, and a fitting model built and validated on that data. SwingProAI doesn't have either yet, so no equipment advice is given from video estimates.";
+
+function AwaitingTrustworthyData() {
+  return (
+    <div className="rounded-4xl border border-violet-700/20 bg-violet-900/10 p-5">
+      <p className="text-[9px] font-black uppercase tracking-widest text-violet-500 mb-2">{AWAITING_FITTING_TITLE}</p>
+      <p className="text-sm leading-relaxed text-gray-400">{AWAITING_FITTING_COPY}</p>
     </div>
   );
 }
@@ -98,8 +121,8 @@ function LockedOverlay() {
           Birdie &amp; Eagle Feature
         </h3>
         <p className="mb-5 text-xs leading-relaxed text-gray-400">
-          Upgrade to unlock AI-generated shaft flex, club spec, and ball compression
-          recommendations matched to your swing speed and mechanics.
+          Equipment fitting is planned for Birdie &amp; Eagle. It is not available
+          yet: it awaits trustworthy measured swing data and a fitting built on it.
         </p>
         <a
           href="/upgrade"

@@ -160,6 +160,8 @@ const TEMPO_CELL = 'swing.analysis_family === "putting" ? "—" :';
 const HISTORY_LINK = "/swings/${swing.id}";
 const LEGACY_LINK = "/analyze/${swing.id}";
 
+/** S6-R1: the swing half of the Telemetry timeline, built from the filtered swingLogs. */
+const SWING_TIMELINE = '...swingLogs.map((d) => ({ kind: "swing" as const';
 const SCOPE_SENTENCE =
   "Full-swing telemetry only. Putting analyses remain available in Progress Hub.";
 
@@ -426,23 +428,21 @@ const GUARDS: Guard[] = [
     holds: (s) => telemetryAverage(s.telemetry).includes("swingLogs.flatMap("),
   },
   {
-    // Textual position proves nothing on its own: SwingLogCard is declared above
-    // the page component but only ever runs on data the page hands it. What keeps
-    // the optimizer unreachable for a putt is the data path, so that is what is
-    // asserted — one call site inside the card, one card rendered from a timeline
-    // item, and the timeline built from the already-filtered collection.
-    id: "31. computeEquipmentInsight remains reachable only through a filtered SwingLog",
+    // S6-R1 removed the equipment optimizer: estimates from video cannot support
+    // shaft, driver or ball advice. The guard now asserts that no such advice is
+    // derived anywhere on Telemetry, and that the full-swing estimates reach a
+    // card only through the already-filtered SwingLog path (one card, rendered
+    // from a timeline item built from swingLogs), so a putt never reaches them.
+    id: "31. Telemetry derives no equipment advice; estimates reach only a filtered SwingLog",
     holds: (s) => {
       const code = stripComments(s.telemetry);
-      const cardStart = code.indexOf("function SwingLogCard({ log }: { log: SwingLog }) {");
-      const call = code.indexOf("computeEquipmentInsight(log.bio, log.score)");
       return (
-        cardStart >= 0 &&
-        call > cardStart &&
-        countOccurrences(code, /computeEquipmentInsight\(/g) === 2 &&
+        countOccurrences(code, /computeEquipmentInsight\(/g) === 0 &&
+        !/EquipmentOptimizer|hipSpeedIndex|X-Stiff|attackAngleBias/.test(code) &&
+        code.includes("estimates:    presentFullSwingMetrics(r.full_swing_metrics)") &&
         countOccurrences(code, /<SwingLogCard/g) === 1 &&
         code.includes("log={item.data as SwingLog}") &&
-        code.includes('...swingLogs.map((d) => ({ kind: "swing" as const')
+        code.includes(SWING_TIMELINE)
       );
     },
   },
@@ -890,7 +890,7 @@ const REGRESSIONS: Regression[] = [
     breaks: ["30. the Telemetry average remains derived from the filtered swingLogs"],
   },
   {
-    name: "a second equipment-optimizer call escapes the SwingLog path",
+    name: "equipment advice is derived again on Telemetry",
     apply: (s) => ({
       ...s,
       telemetry: s.telemetry.replace(
@@ -898,7 +898,7 @@ const REGRESSIONS: Regression[] = [
         "  const strayInsight = computeEquipmentInsight({}, null);\n  const swingLogs: SwingLog[] = fullSwingRows.map((r) => {",
       ),
     }),
-    breaks: ["31. computeEquipmentInsight remains reachable only through a filtered SwingLog"],
+    breaks: ["31. Telemetry derives no equipment advice; estimates reach only a filtered SwingLog"],
   },
   {
     name: "the Telemetry scope sentence is removed",

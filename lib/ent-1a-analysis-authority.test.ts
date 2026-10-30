@@ -70,6 +70,10 @@ const state = vi.hoisted(() => ({
   beforeFailedWrite: null as null | (() => void),
   // A fully received response whose first candidate was blocked.
   geminiBlocked: null as null | "SAFETY" | "RECITATION" | "LANGUAGE",
+  // ENT-1D S6 diagnostics: the first candidate's finishReason (undefined omits
+  // it) and the response's usageMetadata (undefined omits it), as supplied.
+  geminiFinishReason: "STOP" as unknown,
+  geminiUsage: undefined as unknown,
   // When set, the real transport runs against this loopback HTTP port instead
   // of the counter's canned answer (the call is still counted).
   realTransportPort: null as null | number,
@@ -126,14 +130,16 @@ vi.mock("@/lib/gemini-transport", async (importOriginal) => {
         });
       }
       const text = state.geminiImpl ? await state.geminiImpl() : JSON.stringify(validReport());
+      const finishReason = state.geminiBlocked ?? state.geminiFinishReason;
       return {
         candidates: [
           {
             index: 0,
             content: { role: "model", parts: [{ text }] },
-            finishReason: state.geminiBlocked ?? "STOP",
+            ...(finishReason === undefined ? {} : { finishReason }),
           },
         ],
+        ...(state.geminiUsage === undefined ? {} : { usageMetadata: state.geminiUsage }),
       };
     },
   };
@@ -470,6 +476,11 @@ const DEFICIENCY = {
   severity: "minor",
   corrective_drill_title: "",
 };
+// S6-R1A: how the authority serves rows in that legacy-producer shape. The
+// producer's constant checkpoint ("impact"), joint ("general", x/y 0.5) and
+// severity ("minor") were never assessments, so they are served as null.
+const HIGHLIGHT_VIEW = { ...HIGHLIGHT, checkpoint: null };
+const DEFICIENCY_VIEW = { ...DEFICIENCY, checkpoint: null, joint_coordinate: null, severity: null };
 const DRILL = { name: "Chair drill", the_why: "why", the_how: "how", the_feel: "feel" };
 
 function validReport(): Record<string, unknown> {
@@ -477,6 +488,10 @@ function validReport(): Record<string, unknown> {
     scoring_breakdown: "Base 70, +5 tempo, -3 extension",
     score: 72,
     executive_summary: "Solid tempo with some early extension.",
+    // S6-R1: required by the full-swing contract.
+    evidence_limits: "Face-on view only; club path at the top is out of frame.",
+    // S6-R1A: explicit coverage; a scored report needs all three positions.
+    evidence_coverage: { address: true, top_of_backswing: true, impact: true },
     fault_tags: ["early_extension"],
     spine_angle: 31,
     hip_rotation: 44,
@@ -675,6 +690,8 @@ beforeEach(() => {
   state.failedWriteErrors = false;
   state.beforeFailedWrite = null;
   state.geminiBlocked = null;
+  state.geminiFinishReason = "STOP";
+  state.geminiUsage = undefined;
   state.realTransportPort = null;
   state.outcomeUnknownWriteErrors = false;
   setMember("none", "none");
@@ -784,7 +801,7 @@ describe("A2. serializeAnalysisResult", () => {
       [
         "id", "swing_video_id", "user_id", "club_id", "status", "analysis_family", "equipment_snapshot",
         "analysis_mode", "created_at", "score", "feedback", "tempo_ratio", "swing_speed_mph", "spine_angle",
-        "hip_rotation", "shoulder_rotation", "metrics", "swing_highlights", "mechanical_deficiencies",
+        "hip_rotation", "shoulder_rotation", "full_swing_metrics", "metrics", "swing_highlights", "mechanical_deficiencies",
         "putting_analysis", "putting_score",
       ].sort(),
     );
@@ -793,8 +810,8 @@ describe("A2. serializeAnalysisResult", () => {
 
   it("keeps core feedback for a caller with no premium access", () => {
     const view = serializeAnalysisResult(completeRow(), NO_PREMIUM_ACCESS);
-    expect(view.swing_highlights).toEqual([HIGHLIGHT]);
-    expect(view.mechanical_deficiencies).toEqual([DEFICIENCY]);
+    expect(view.swing_highlights).toEqual([HIGHLIGHT_VIEW]);
+    expect(view.mechanical_deficiencies).toEqual([DEFICIENCY_VIEW]);
     expect(view.metrics?.drills).toEqual([DRILL]);
     expect(view.metrics?.pro_cue).toBe("Stay in the chair");
     expect(view.metrics?.practice_focus).toBe("Hip depth");
@@ -829,8 +846,8 @@ describe("A2. serializeAnalysisResult", () => {
       }),
       NO_PREMIUM_ACCESS,
     );
-    expect(view.swing_highlights).toEqual([HIGHLIGHT]);
-    expect(view.mechanical_deficiencies).toEqual([{ ...DEFICIENCY, severity: "minor" }]);
+    expect(view.swing_highlights).toEqual([HIGHLIGHT_VIEW]);
+    expect(view.mechanical_deficiencies).toEqual([DEFICIENCY_VIEW]);
     expectNoSentinels(JSON.stringify(view));
   });
 
@@ -971,7 +988,7 @@ describe("D. duplicate Gemini execution is prevented", () => {
     const response = await post({ analysisId: ANALYSIS_ID });
     expect(response.status).toBe(200);
     const body = await json(response);
-    expect(body.data.swing_highlights).toEqual([HIGHLIGHT]);
+    expect(body.data.swing_highlights).toEqual([HIGHLIGHT_VIEW]);
     expect(body.data.swing_video).toBeUndefined();
     expectNoSentinels(JSON.stringify(body));
     expect(state.geminiCalls).toBe(0);
@@ -1020,7 +1037,7 @@ describe("D. duplicate Gemini execution is prevented", () => {
     };
     const response = await post({ analysisId: ANALYSIS_ID });
     expect(response.status).toBe(200);
-    expect((await json(response)).data.swing_highlights).toEqual([HIGHLIGHT]);
+    expect((await json(response)).data.swing_highlights).toEqual([HIGHLIGHT_VIEW]);
     expect(state.geminiCalls).toBe(0);
   });
 
@@ -1209,8 +1226,8 @@ describe("I. server pages serve core history through the authority", () => {
     state.analyses = [completeRow()];
     const page = await AnalysisPage({ params: { id: ANALYSIS_ID } });
     const analysis = (findElements(page, AnalysisReport)[0].props as { analysis: Row }).analysis;
-    expect(analysis.swing_highlights).toEqual([HIGHLIGHT]);
-    expect(analysis.mechanical_deficiencies).toEqual([DEFICIENCY]);
+    expect(analysis.swing_highlights).toEqual([HIGHLIGHT_VIEW]);
+    expect(analysis.mechanical_deficiencies).toEqual([DEFICIENCY_VIEW]);
     expect((analysis.metrics as Row).drills).toEqual([DRILL]);
     expectNoSentinels(JSON.stringify(analysis));
     expect(state.sessionPayloadReads).toEqual([]);
@@ -1221,7 +1238,7 @@ describe("I. server pages serve core history through the authority", () => {
     state.analyses = [completeRow()];
     const page = await AnalysisPage({ params: { id: ANALYSIS_ID } });
     const analysis = (findElements(page, AnalysisReport)[0].props as { analysis: Row }).analysis;
-    expect(analysis.swing_highlights).toEqual([HIGHLIGHT]);
+    expect(analysis.swing_highlights).toEqual([HIGHLIGHT_VIEW]);
   });
 
   it("/analyze/[id] fails closed when the payload cannot be read", async () => {
@@ -1252,8 +1269,8 @@ describe("I. server pages serve core history through the authority", () => {
     const dp = findElements(page, MechanicalDeficienciesPanel)[0].props as Row;
     const ep = findElements(page, EquipmentRecommendations)[0].props as Row;
     expect(hp.locked).toBeUndefined();
-    expect(hp.highlights).toEqual([HIGHLIGHT]);
-    expect(dp.deficiencies).toEqual([DEFICIENCY]);
+    expect(hp.highlights).toEqual([HIGHLIGHT_VIEW]);
+    expect(dp.deficiencies).toEqual([DEFICIENCY_VIEW]);
     expect(ep.tier).toBe(fittingTier);
     expect(ep.fitting).toBeNull();
     expectNoSentinels(renderToStaticMarkup(page as React.ReactElement));
@@ -1287,8 +1304,8 @@ describe("I. server pages serve core history through the authority", () => {
 describe("J. client-supplied metrics are validated before the prompt", () => {
   it("well-formed client measurements reach the prompt", async () => {
     await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: { spineAngle: 31.5, tempoRatio: "3.1:1" } });
-    expect(state.prompts[0]).toContain("Spine Angle (address):    31.5°");
-    expect(state.prompts[0]).toContain("Tempo Ratio:              3.1:1");
+    expect(state.prompts[0]).toContain("Spine angle at address: 31.5°");
+    expect(state.prompts[0]).toContain("Tempo ratio (backswing:downswing): 3.1:1");
   });
 
   it("free text, oversized and non-finite values are dropped", async () => {
@@ -1340,17 +1357,20 @@ describe("J3. client-supplied values are presented to the provider as unverified
     const parts = state.providerRequests[0].contents[0].parts as { inlineData?: { mimeType: string } }[];
     expect(parts[0].inlineData?.mimeType).toBe("video/mp4");
     const prompt = userText();
-    expect(prompt).toContain("CLIENT-REPORTED ESTIMATES (computed on the golfer's device; not independently verified — check each against the video):");
+    expect(prompt).toContain("CLIENT-SUPPLIED ESTIMATES (sent with the request; unverified — the server cannot verify where they came from, and they may be wrong):");
     for (const line of [
-      "Spine Angle (address):    31.5°",
-      "Hip Rotation (impact):    40°",
-      "Shoulder Rotation (top):  88°",
-      "Tempo Ratio:              3.1:1",
-      "Spine angle change (setup→impact): 38° → 30° (8.0° drop)",
+      "Spine angle at address: 31.5°",
+      "Hip rotation at impact: 40°",
+      "Shoulder rotation at the top: 88°",
+      "Tempo ratio (backswing:downswing): 3.1:1",
+      "Spine angle at setup / at impact: 38° / 30°",
     ]) expect(prompt).toContain(line);
-    expect(prompt).toContain("=== CLIENT-REPORTED ESTIMATES: what each value would indicate (not independently verified) ===");
-    expect(prompt).toContain("Early extension indicated by the estimates: spine angle drops 8.0° from setup (38°) to impact (30°). If the video confirms it,");
-    expect(prompt).toContain("Where the video and an estimate disagree, or an estimate cannot be judged from the video, say so and state your uncertainty — do not force agreement and do not invent a more precise number.");
+    expect(prompt).toContain("Do not copy any of them into the JSON estimate fields.");
+    // S6-R1 (P1): values are listed, never interpreted — no ranges, ratings,
+    // diagnoses or ball-flight consequences are attached to them.
+    for (const interpretation of ["indicated by the estimates", "Early extension", "drop)", "CRITICAL", "Ideal", "Tour", "X-Factor", "blocks", "slice"]) {
+      expect(prompt, interpretation).not.toContain(interpretation);
+    }
   });
 
   it("no part of the request presents the values as verified or forbids questioning them", async () => {
@@ -1362,34 +1382,58 @@ describe("J3. client-supplied values are presented to the provider as unverified
   it("the system instruction requires uncertainty, not agreement, when the video and an estimate differ", async () => {
     await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
     const sys = systemText();
-    expect(sys).toContain("MEASUREMENT PROVENANCE — READ BEFORE USING ANY NUMBER");
-    expect(sys).toContain("They are estimates, NOT independently\nverified instrument measurements, and they may be wrong.");
-    expect(sys).toContain("Never invent agreement, and never invent a more precise number.");
-    expect(sys).toContain("Do not apply a scoring adjustment or diagnostic rule on the strength of an estimate the\n  video contradicts or cannot support");
+    expect(sys).toContain("CLIENT-SUPPLIED ESTIMATES\n─────────────────────────");
+    expect(sys).toContain("The server cannot verify where they came from or how they were produced; they are unverified and may be wrong.");
+    expect(sys).toContain("say plainly where the video disagrees or cannot show it");
+    expect(sys).toContain("never apply a diagnosis or scoring adjustment on a client-supplied estimate alone");
+    expect(sys).toContain("Do not give more precision than the video supports.");
   });
 
-  it("the numeric output fields ask for the estimate as given, with disagreement in the prose", async () => {
+  it("the numeric output fields ask for the model's own estimate or null, never a copied client value", async () => {
     await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
-    const props = state.providerRequests[0].generationConfig.responseSchema.properties as Record<string, { description: string }>;
+    const props = state.providerRequests[0].generationConfig.responseSchema.properties as Record<string, { description: string; nullable?: boolean }>;
     for (const field of ["spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio"]) {
-      expect(props[field].description, field).toContain("The client-reported estimate when one is supplied, repeated as given");
-      expect(props[field].description, field).toContain("put any disagreement with the video in the prose");
+      expect(props[field].nullable, field).toBe(true);
+      expect(props[field].description, field).toContain("Your own approximate");
+      expect(props[field].description, field).toContain("or null when the video");
+      expect(props[field].description.toLowerCase(), field).toContain("do not copy a client-supplied estimate");
+      expect(props[field].description, field).not.toContain("repeated as given");
     }
   });
 
   it("without client values the prompt says none were supplied and draws no conclusion from them", async () => {
     await post({ analysisId: ANALYSIS_ID });
     const prompt = userText();
-    expect(prompt).toContain("Spine Angle (address):    NOT SUPPLIED — estimate from video");
-    expect(prompt).toContain("Tempo Ratio:              NOT SUPPLIED — estimate from video");
+    expect(prompt).toContain("CLIENT-SUPPLIED ESTIMATES: none were supplied. Use only what the video shows.");
+    expect(prompt).not.toContain("NOT SUPPLIED");
     expect(prompt).not.toContain("indicated by the estimates");
   });
 
-  it("valid client values are preserved in the stored row; the model's differing numbers do not replace them", async () => {
-    // The (mocked) model answers 31 / 44 / 92 / "3:1"; the client sent other values.
+  it("the stored values are the AI's own estimates; client values are recorded beside them as unverified", async () => {
+    // S6-R1 (D1). The (mocked) model answers 31 / 44 / 92 / "3:1"; the client sent other values.
     await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED });
     const row = storedRow();
-    expect([row.spine_angle, row.hip_rotation, row.shoulder_rotation, row.tempo_ratio]).toEqual([31.5, 40, 88, 3.1]);
+    expect([row.spine_angle, row.hip_rotation, row.shoulder_rotation, row.tempo_ratio]).toEqual([31, 44, 92, 3]);
+    expect((row.metrics as Record<string, unknown>).metric_evidence).toEqual({
+      schema_version: 1,
+      spine_angle: { ai_video_estimate: 31, client_unverified_estimate: 31.5 },
+      hip_rotation: { ai_video_estimate: 44, client_unverified_estimate: 40 },
+      shoulder_rotation: { ai_video_estimate: 92, client_unverified_estimate: 88 },
+      tempo_ratio: { ai_video_estimate: "3:1", client_unverified_estimate: "3.1:1" },
+    });
+  });
+
+  it("a value the video did not show stays unavailable even when the client sent one", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), hip_rotation: null, tempo_ratio: null });
+    expect((await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED })).status).toBe(200);
+    const row = storedRow();
+    expect(row.hip_rotation).toBeNull();
+    expect(row.tempo_ratio).toBeNull();
+    const evidence = (row.metrics as Record<string, any>).metric_evidence;
+    expect(evidence.hip_rotation).toEqual({ ai_video_estimate: null, client_unverified_estimate: 40 });
+    expect(evidence.tempo_ratio).toEqual({ ai_video_estimate: null, client_unverified_estimate: "3.1:1" });
+    const view = (await json(await getResult(ANALYSIS_ID))).data;
+    expect(view.estimates.hipRotation).toEqual({ value: null, source: "ai_video_estimate", clientUnverifiedEstimate: 40 });
   });
 });
 
@@ -1574,16 +1618,18 @@ describe("L. GET /api/v1/analyses/{id}", () => {
     expect(data.analysisFamily).toBe("full_swing");
     expect(data.score).toBe(72);
     expect(data.clubDisplayName).not.toBeUndefined();
+    // S6-R1A: the producer's constant checkpoint, joint and severity are not
+    // assessments, so the native contract serves them as null.
     expect(data.coaching.strengths).toEqual([
-      { checkpoint: "impact", movement: "Quiet head through impact", benefit: "Centred strike" },
+      { checkpoint: null, movement: "Quiet head through impact", benefit: "Centred strike" },
     ]);
     expect(data.coaching.improvementAreas[0]).toEqual({
-      checkpoint: "impact",
-      joint: "general",
+      checkpoint: null,
+      joint: null,
       description: "Early extension",
       detailTitle: "",
       detail: "Hips move toward the ball through impact.",
-      severity: "minor",
+      severity: null,
     });
     expect(data.coaching.drills).toEqual([{ name: "Chair drill", why: "why", how: "how", feel: "feel" }]);
     expect(data.putting).toBeNull();
@@ -1781,7 +1827,9 @@ describe("Q. native/web consistency and failure states", () => {
     expect(JSON.stringify(data)).not.toContain(PUTT_SUMMARY);
   });
 
-  it("native measurements use the web's legacy fallbacks, and legacy tips survive", async () => {
+  it("native estimates read the canonical fields with their source; legacy *_deg is not read; legacy tips survive", async () => {
+    // S6-R1. A row written before sources were recorded: the same-named metrics
+    // key is still a canonical value ("unrecorded"); the legacy *_deg key is not.
     state.analyses = [
       completeRow({
         spine_angle: null,
@@ -1789,8 +1837,9 @@ describe("Q. native/web consistency and failure states", () => {
       }),
     ];
     const { data } = await json(await getResult(ANALYSIS_ID));
-    expect(data.measurements.spineAngle).toBe(30);
-    expect(data.measurements.hipRotation).toBe(47);
+    expect(data.estimates.spineAngle).toEqual({ value: 30, source: "unrecorded", clientUnverifiedEstimate: null });
+    expect(data.estimates.hipRotation).toEqual({ value: null, source: "unrecorded", clientUnverifiedEstimate: null });
+    expect(data.measurements).toEqual({ tempoRatio: null, swingSpeedMph: null, spineAngle: null, hipRotation: null, shoulderRotation: null });
     expect(data.coaching.suggestions).toEqual(["Keep the head still"]);
   });
 
@@ -2822,4 +2871,829 @@ describe("Z2. an oversized successful response leaves the analysis stalled and i
       }
     });
   }
+});
+
+// ─── AA. ENT-1D S6: provider response diagnostics ─────────────────────────────
+//
+// lib/gemini-response-diagnostics.ts records, for one provider answer, the
+// allowlisted metadata only (finish-reason code, supplied token counts, text
+// length, a fixed outcome code). These tests drive the real route and check
+// that the line says where the answer stopped, that nothing else reaches any
+// console output, and that the analysis outcome — HTTP answer, row state, one
+// provider call, the generation settings — is decided by the route, never by
+// the line. S6-R1: completion itself is decided by
+// lib/gemini-completion-policy.ts (explicit STOP only), before any text is read.
+
+const DIAG = "[analyze-swing] provider response diagnostics";
+const TEXT_SENTINEL = "RESPONSE-TEXT-SENTINEL";
+const DIAG_USAGE = { promptTokenCount: 2140, candidatesTokenCount: 1987, thoughtsTokenCount: 6205, totalTokenCount: 10332 };
+const DIAG_COUNTS = "prompt_tokens=2140 candidate_tokens=1987 thinking_tokens=6205 total_tokens=10332";
+const NO_COUNTS =
+  "prompt_tokens=unavailable candidate_tokens=unavailable thinking_tokens=unavailable total_tokens=unavailable";
+
+/** Every console line the request produced, each argument stringified. */
+function consoleLines(): { method: "log" | "warn" | "error"; line: string }[] {
+  return (["log", "warn", "error"] as const).flatMap((method) =>
+    vi.mocked(console[method]).mock.calls.map((args) => ({ method, line: args.map((a) => String(a)).join(" ") })),
+  );
+}
+
+function diagnosticLines() {
+  return consoleLines().filter((entry) => entry.line.startsWith(DIAG));
+}
+
+function expectNoTextInLogs(...fragments: string[]): void {
+  for (const { line } of consoleLines()) {
+    for (const fragment of [TEXT_SENTINEL, ...fragments]) expect(line).not.toContain(fragment);
+  }
+}
+
+/** A truncated full-swing report, as a MAX_TOKENS answer would end. */
+const truncatedReport = () => JSON.stringify({ ...validReport(), executive_summary: TEXT_SENTINEL }).slice(0, 120);
+
+/** The failure state every refused provider answer must leave (claim and dispatch kept). */
+async function expectRefusedAnswer(response: Response): Promise<void> {
+  expect(response.status).toBe(500);
+  expect(await json(response)).toEqual({ error: "Analysis failed. Please try again." });
+  const row = storedRow();
+  expect(row.status).toBe("failed");
+  expect(row.processing_claim_id).not.toBeNull();
+  expect(row.provider_dispatched_at).not.toBeNull();
+  expect(row.score ?? null).toBeNull();
+  expect(row.metrics ?? null).toBeNull();
+  expect(state.geminiCalls).toBe(1);
+}
+
+describe("AA. provider response diagnostics (full swing)", () => {
+  it("a valid STOP answer completes and logs one completed line", async () => {
+    state.geminiUsage = DIAG_USAGE;
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    expect((await json(response)).message).toBe("Analysis complete");
+    expect(storedRow().status).toBe("complete");
+    expect(state.geminiCalls).toBe(1);
+    expect(diagnosticLines()).toEqual([
+      {
+        method: "log",
+        line: `${DIAG} family=full_swing outcome=completed finish_reason=stop ${DIAG_COUNTS} text_chars=${JSON.stringify(validReport()).length}`,
+      },
+    ]);
+  });
+
+  it("MAX_TOKENS is refused before any text is read → incomplete_generation with its counts", async () => {
+    state.geminiFinishReason = "MAX_TOKENS";
+    state.geminiUsage = { ...DIAG_USAGE, candidatesTokenCount: 1795, thoughtsTokenCount: 6397 };
+    state.geminiImpl = async () => truncatedReport();
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines()).toEqual([
+      {
+        method: "error",
+        line: `${DIAG} family=full_swing outcome=incomplete_generation finish_reason=max_tokens prompt_tokens=2140 candidate_tokens=1795 thinking_tokens=6397 total_tokens=10332 text_chars=unavailable`,
+      },
+    ]);
+    const lines = consoleLines().map((entry) => entry.line);
+    expect(lines).toContain("[analyze-swing] analysis pipeline failed");
+    // Classified before extraction: no text was read, so no length and no parse attempt.
+    expect(lines.some((l) => l.startsWith("[analyze-swing] Gemini response length"))).toBe(false);
+    expect(lines).not.toContain("[analyze-swing] JSON parse failure");
+    expectNoTextInLogs(truncatedReport());
+  });
+
+  it("malformed JSON from an explicit STOP → json_parse_failed; missing usage stays unavailable", async () => {
+    const malformed = `{"score": 72,, "${TEXT_SENTINEL}"}`;
+    state.geminiImpl = async () => malformed;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines().map((entry) => entry.line)).toEqual([
+      `${DIAG} family=full_swing outcome=json_parse_failed finish_reason=stop ${NO_COUNTS} text_chars=${malformed.length}`,
+    ]);
+    expect(consoleLines().map((entry) => entry.line)).toContain("[analyze-swing] JSON parse failure");
+    expectNoTextInLogs();
+  });
+
+  it("valid JSON that breaks the content contract → validation_rejected, nothing stored", async () => {
+    state.geminiUsage = DIAG_USAGE;
+    state.geminiImpl = async () => {
+      const report = validReport();
+      delete report.pro_cue;
+      report.executive_summary = TEXT_SENTINEL;
+      return JSON.stringify(report);
+    };
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines()).toHaveLength(1);
+    expect(diagnosticLines()[0].line).toContain("outcome=validation_rejected finish_reason=stop");
+    expect(consoleLines().map((entry) => entry.line)).toContain("[analyze-swing] full-swing response rejected");
+    expectNoTextInLogs();
+  });
+
+  it("malformed counts are unavailable, never 0, and do not change a STOP success", async () => {
+    state.geminiUsage = { promptTokenCount: "2140", candidatesTokenCount: -1, thoughtsTokenCount: 1.5, totalTokenCount: Number.NaN };
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    expect(storedRow().status).toBe("complete");
+    const [entry] = diagnosticLines();
+    expect(entry.line).toBe(
+      `${DIAG} family=full_swing outcome=completed finish_reason=stop ${NO_COUNTS} text_chars=${JSON.stringify(validReport()).length}`,
+    );
+    expect(entry.line).not.toMatch(/=0(\s|$)/);
+  });
+
+  it("an unrecognized finish reason is refused and classified, never echoed", async () => {
+    state.geminiFinishReason = `NEW_REASON_${TEXT_SENTINEL}`;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines()[0].line).toContain("outcome=incomplete_generation finish_reason=unrecognized");
+    expectNoTextInLogs();
+  });
+
+  it("a blocked candidate → response_blocked with no text length; 500 and failed as before", async () => {
+    state.geminiBlocked = "SAFETY";
+    state.geminiUsage = DIAG_USAGE;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines().map((entry) => entry.line)).toEqual([
+      `${DIAG} family=full_swing outcome=response_blocked finish_reason=safety ${DIAG_COUNTS} text_chars=unavailable`,
+    ]);
+  });
+
+  it("a completion write that fails → completion_write_failed; the 400 answer is unchanged", async () => {
+    state.completionError = true;
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(400);
+    expect(await json(response)).toEqual({ error: "We couldn't save your analysis. Please try again." });
+    expect(diagnosticLines()).toHaveLength(1);
+    expect(diagnosticLines()[0].line).toContain("outcome=completion_write_failed");
+  });
+
+  it("without a provider answer there is no diagnostics line, and the answers are unchanged", async () => {
+    state.geminiImpl = async () => {
+      throw new GeminiHttpError(403);
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    state.analyses = [pendingRow()];
+    state.geminiImpl = async () => {
+      throw new GeminiHttpError(503);
+    };
+    const stalled = await post({ analysisId: ANALYSIS_ID });
+    expect(stalled.status).toBe(409);
+    expect((await json(stalled)).status).toBe("stalled");
+    expect(diagnosticLines()).toEqual([]);
+    expect(state.geminiCalls).toBe(2);
+  });
+
+  it("the provider request and generation settings are unchanged, and nothing from the prompt is logged", async () => {
+    state.geminiFinishReason = "MAX_TOKENS";
+    state.geminiImpl = async () => truncatedReport();
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: { spineAngle: 61, hipRotation: 171, tempoRatio: "9.9:1" } });
+    expect(state.geminiCalls).toBe(1);
+    expect(state.modelConfigs[0].model).toBe("gemini-2.5-flash");
+    const config = state.providerRequests[0].generationConfig;
+    expect(config.temperature).toBe(0.0);
+    expect(config.maxOutputTokens).toBe(8192);
+    expect(config.responseMimeType).toBe("application/json");
+    expect(config.responseSchema).toBeDefined();
+    expect(Object.keys(config).sort()).toEqual(["maxOutputTokens", "responseMimeType", "responseSchema", "temperature"]);
+    expectNoTextInLogs("GOLFER-SPECIFIC DATA", "171°", "9.9:1", "synthetic-key", "storage.invalid");
+  });
+});
+
+describe("AA2. provider response diagnostics (putting)", () => {
+  it("a valid STOP putt completes and logs one completed line", async () => {
+    puttWithVideo();
+    state.geminiUsage = DIAG_USAGE;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(1);
+    expect(diagnosticLines()).toEqual([
+      {
+        method: "log",
+        line: `${DIAG} family=putting outcome=completed finish_reason=stop ${DIAG_COUNTS} text_chars=${puttingModelResponse().length}`,
+      },
+    ]);
+    expect(state.providerRequests[0].generationConfig.maxOutputTokens).toBe(4096);
+  });
+
+  it("a MAX_TOKENS putt is refused before any text is read → incomplete_generation", async () => {
+    puttWithVideo();
+    state.geminiFinishReason = "MAX_TOKENS";
+    state.geminiImpl = async () => puttingModelResponse().slice(0, 80);
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(500);
+    expect(await json(response)).toEqual({ error: "Analysis failed. Please try again." });
+    expect(storedRow().status).toBe("failed");
+    expect(storedRow().putting_score ?? null).toBeNull();
+    expect(state.geminiCalls).toBe(1);
+    expect(diagnosticLines().map((entry) => entry.line)).toEqual([
+      `${DIAG} family=putting outcome=incomplete_generation finish_reason=max_tokens ${NO_COUNTS} text_chars=unavailable`,
+    ]);
+    expectNoTextInLogs(puttingModelResponse().slice(0, 60));
+  });
+
+  it("schema-valid JSON the putting validator refuses → validation_rejected", async () => {
+    puttWithVideo();
+    state.geminiImpl = async () => JSON.stringify({ summary: TEXT_SENTINEL });
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    expect(diagnosticLines()).toHaveLength(1);
+    expect(diagnosticLines()[0].line).toContain("family=putting outcome=validation_rejected finish_reason=stop");
+    expectNoTextInLogs();
+  });
+
+  it("a blocked putt → response_blocked; no answer → no line", async () => {
+    puttWithVideo();
+    state.geminiBlocked = "RECITATION";
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(500);
+    expect(diagnosticLines().map((entry) => entry.line)).toEqual([
+      `${DIAG} family=putting outcome=response_blocked finish_reason=recitation ${NO_COUNTS} text_chars=unavailable`,
+    ]);
+    puttWithVideo();
+    state.geminiBlocked = null;
+    state.geminiImpl = async () => {
+      throw new GeminiHttpError(503);
+    };
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(409);
+    expect(diagnosticLines()).toHaveLength(1);
+  });
+});
+
+// ─── AB. S6-R1: explicit STOP, honest values, unscorable results, surfaces ─────
+//
+// Offline only: the provider is the counting mock, so these prove what the
+// route accepts, stores and presents — not the quality of generated coaching.
+
+const NON_STOP_REASONS: [string, unknown][] = [
+  ["missing (no finishReason)", undefined],
+  ["null", null],
+  ["MAX_TOKENS", "MAX_TOKENS"],
+  ["OTHER", "OTHER"],
+  ["FINISH_REASON_UNSPECIFIED", "FINISH_REASON_UNSPECIFIED"],
+  ["MALFORMED_FUNCTION_CALL", "MALFORMED_FUNCTION_CALL"],
+  ["BLOCKLIST", "BLOCKLIST"],
+  ["PROHIBITED_CONTENT", "PROHIBITED_CONTENT"],
+  ["SPII", "SPII"],
+  ["lower-case stop", "stop"],
+  ["unknown future reason", "SOMETHING_NEW"],
+  ["a number", 1],
+];
+
+describe("AB1. only an explicit STOP may complete, even with valid JSON", () => {
+  it.each(NON_STOP_REASONS)("full swing, finishReason %s → refused, one call, retryable", async (_label, reason) => {
+    state.geminiFinishReason = reason;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    // A refused answer is a definite failure: the golfer's retry runs once more.
+    state.geminiFinishReason = "STOP";
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(state.geminiCalls).toBe(2);
+  });
+
+  it.each(NON_STOP_REASONS)("putting, finishReason %s → refused, no score written", async (_label, reason) => {
+    puttWithVideo();
+    state.geminiFinishReason = reason;
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(500);
+    expect(storedRow().status).toBe("failed");
+    expect(storedRow().putting_score ?? null).toBeNull();
+    expect(storedRow().putting_analysis ?? null).toBeNull();
+    expect(state.geminiCalls).toBe(1);
+  });
+});
+
+describe("AB2. unavailable values and unscorable results", () => {
+  it("nullable estimates are stored as null — never 0 — and zero stays a value", async () => {
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...validReport(), spine_angle: null, hip_rotation: 0, shoulder_rotation: null, tempo_ratio: null });
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    const row = storedRow();
+    expect([row.spine_angle, row.hip_rotation, row.shoulder_rotation, row.tempo_ratio]).toEqual([null, 0, null, null]);
+    expect((row.metrics as Record<string, any>).metric_evidence.hip_rotation).toEqual({
+      ai_video_estimate: 0,
+      client_unverified_estimate: null,
+    });
+  });
+
+  it("an unscorable analysis completes with score null and empty findings; nothing defaults", async () => {
+    state.geminiImpl = async () =>
+      JSON.stringify({
+        ...validReport(),
+        score: null,
+        scoring_breakdown: "Not scored: the downswing is out of frame.",
+        fault_tags: [],
+        highlights: [],
+        deficiencies: [],
+        drills: [],
+        spine_angle: null,
+        hip_rotation: null,
+        shoulder_rotation: null,
+        tempo_ratio: null,
+        evidence_coverage: { address: false, top_of_backswing: false, impact: false },
+        posture: { rating: "insufficient_evidence", observation: "Only the finish is visible.", correction: "" },
+        swing_plane: { rating: "insufficient_evidence", observation: "The top is out of frame.", correction: "" },
+        impact: { rating: "insufficient_evidence", observation: "Impact is out of frame.", correction: "" },
+        practice_focus: null,
+        pro_cue: null,
+      });
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    const body = await json(response);
+    expect(body.data.score).toBeNull();
+    const row = storedRow();
+    expect(row.status).toBe("complete");
+    expect(row.score).toBeNull();
+    expect(row.swing_highlights).toEqual([]);
+    expect(row.mechanical_deficiencies).toEqual([]);
+    const metrics = row.metrics as Record<string, any>;
+    expect(metrics.drills).toEqual([]);
+    expect(metrics.posture.rating).toBe("insufficient_evidence");
+    expect(metrics.practice_focus).toBeNull();
+    expect(metrics.scoring_breakdown).toBe("Not scored: the downswing is out of frame.");
+    // The native contract carries the same: no score, no measurement, estimates unavailable.
+    const { data } = await json(await getResult(ANALYSIS_ID));
+    expect(data.score).toBeNull();
+    expect(data.estimates.spineAngle).toEqual({ value: null, source: "ai_video_estimate", clientUnverifiedEstimate: null });
+    expect(data.coaching.evidenceLimits).toBe("Face-on view only; club path at the top is out of frame.");
+  });
+
+  it.each([
+    ["a drill without a deficiency", { deficiencies: [], drills: [DRILL] }],
+    ["a fractional score", { score: 72.5 }],
+    ["a score out of range", { score: 140 }],
+    ["a string score", { score: "72" }],
+    ["an angle out of range", { hip_rotation: 900 }],
+    ["a malformed tempo", { tempo_ratio: "fast" }],
+    ["a missing evidence statement", { evidence_limits: "" }],
+    ["an unknown pillar rating", { impact: { rating: "elite", observation: "o", correction: "c" } }],
+    ["five findings", { highlights: Array.from({ length: 5 }, () => ({ title: "t", description: "d" })) }],
+  ])("%s is refused as a whole — nothing repaired or partly stored", async (_label, patch) => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), ...patch });
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+  });
+
+  it("contradictory client estimates are kept unverified beside the AI's values and never stored as the analysis", async () => {
+    const CONTRADICTORY = { spineAngle: 60, hipRotation: 170, shoulderRotation: 5, tempoRatio: "9.9:1", setupSpineAngle: 60, impactSpineAngle: 5 };
+    expect((await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: CONTRADICTORY })).status).toBe(200);
+    const row = storedRow();
+    expect([row.spine_angle, row.hip_rotation, row.shoulder_rotation, row.tempo_ratio]).toEqual([31, 44, 92, 3]);
+    const evidence = (row.metrics as Record<string, any>).metric_evidence;
+    expect(evidence.hip_rotation).toEqual({ ai_video_estimate: 44, client_unverified_estimate: 170 });
+    expect(evidence.tempo_ratio).toEqual({ ai_video_estimate: "3:1", client_unverified_estimate: "9.9:1" });
+    // Listed to the model unverified and uninterpreted.
+    const prompt = state.prompts[0];
+    expect(prompt).toContain("Hip rotation at impact: 170°");
+    for (const banned of ["Excessive", "Tour-level", "X-Factor", "Early extension", "CRITICAL"]) expect(prompt).not.toContain(banned);
+  });
+});
+
+describe("AB3. the read authority serves value and source together, narrowly", () => {
+  it("legacy rows without recorded evidence are unrecorded; the *_deg keys are never read", () => {
+    const view = serializeAnalysisResult(
+      completeRow({ spine_angle: 33, hip_rotation: null, metrics: { hip_rotation_deg: 47, tempo_ratio: "2.9:1" } }),
+      NO_PREMIUM_ACCESS,
+    );
+    expect(view.full_swing_metrics).toEqual({
+      spine_angle: { value: 33, source: "unrecorded", client_unverified_estimate: null },
+      hip_rotation: { value: null, source: "unrecorded", client_unverified_estimate: null },
+      shoulder_rotation: { value: null, source: "unrecorded", client_unverified_estimate: null },
+      tempo_ratio: { value: "2.9:1", source: "unrecorded", client_unverified_estimate: null },
+    });
+  });
+
+  it("malformed or forged evidence falls back to unrecorded and leaks nothing", () => {
+    for (const forged of [
+      { schema_version: 2, spine_angle: { ai_video_estimate: 1, client_unverified_estimate: null } },
+      { schema_version: 1, spine_angle: { ai_video_estimate: "UNCLASSIFIED-SECRET", client_unverified_estimate: null } },
+      { schema_version: 1 },
+      "UNCLASSIFIED-SECRET",
+    ]) {
+      const view = serializeAnalysisResult(completeRow({ metrics: { metric_evidence: forged } }), NO_PREMIUM_ACCESS);
+      expect(view.full_swing_metrics?.spine_angle.source).toBe("unrecorded");
+      expect(JSON.stringify(view)).not.toContain("UNCLASSIFIED-SECRET");
+      expect(JSON.stringify(view.metrics)).not.toContain("metric_evidence");
+    }
+  });
+
+  it("a putt has no full-swing estimates", () => {
+    const view = serializeAnalysisResult(completeRow({ analysis_family: "putting" }), NO_PREMIUM_ACCESS);
+    expect(view.full_swing_metrics).toBeNull();
+  });
+});
+
+describe("AB4. surfaces show uncertainty, basis and absence; no unsupported equipment advice", () => {
+  /** A completed full-swing row recorded under S6-R1, with the given estimates and score. */
+  function recordedRow(overrides: Row = {}, values: Partial<Record<"spine_angle" | "hip_rotation" | "shoulder_rotation", number | null>> & { tempo_ratio?: string | null } = {}): Row {
+    const v = { spine_angle: 9.6, hip_rotation: 50.4, shoulder_rotation: 85.2, tempo_ratio: "2.0:1" as string | null, ...values };
+    return completeRow({
+      score: 67,
+      spine_angle: v.spine_angle,
+      hip_rotation: v.hip_rotation,
+      shoulder_rotation: v.shoulder_rotation,
+      tempo_ratio: 2,
+      metrics: {
+        scoring_breakdown: "75 + 5 - 5 - 5 - 3 = 67",
+        evidence_limits: "Face-on view; club at the top is out of frame.",
+        metric_evidence: {
+          schema_version: 1,
+          spine_angle: { ai_video_estimate: v.spine_angle, client_unverified_estimate: null },
+          hip_rotation: { ai_video_estimate: v.hip_rotation, client_unverified_estimate: 170 },
+          shoulder_rotation: { ai_video_estimate: v.shoulder_rotation, client_unverified_estimate: null },
+          tempo_ratio: { ai_video_estimate: v.tempo_ratio, client_unverified_estimate: null },
+        },
+      },
+      ...overrides,
+    });
+  }
+
+  const BANNED_ON_SURFACES = [
+    "Gemini 1.5 Pro", "Tour ideal", "Tour:", "Tour avg", "Off Range", "Ideal:", "Elite", "Building", "Needs Work</p>",
+    "HSI", "X-Stiff", "Hip Speed Index", "measured rotation", "elite clubhead speed", "Equipment Optimizer",
+    "50.4", "85.2", "9.6", "10.0", "matched to your swing speed",
+  ];
+
+  it.each([
+    ["none", "none"],
+    ["birdie", "active"],
+  ] as const)("/telemetry (%s / %s): approximate estimates with their source, the score basis, no equipment advice", async (tier, status) => {
+    setMember(tier, status);
+    state.analyses = [recordedRow()];
+    const html = renderToStaticMarkup(await TelemetryPage());
+    for (const shown of ["≈50°", "≈85°", "≈10°", "≈2:1", "AI estimate from video", "Client-supplied estimate — unverified: ≈170°",
+      "Swing estimates", "Not instrument measurements", "client-supplied values cannot be verified", "AI coaching assessment", "AI rubric score", "67 / 100"]) {
+      expect(html, shown).toContain(shown);
+    }
+    for (const banned of BANNED_ON_SURFACES) expect(html, banned).not.toContain(banned);
+    expectNoSentinels(html);
+  });
+
+  it("/telemetry: an unavailable value says so, and an unscored analysis says Not scored (never 0)", async () => {
+    state.analyses = [recordedRow({ score: null }, { hip_rotation: null })];
+    const html = renderToStaticMarkup(await TelemetryPage());
+    expect(html).toContain("Not available");
+    expect(html).toContain("The video didn&#x27;t show this clearly enough to estimate.");
+    expect(html).toContain("Not scored");
+    expect(html).not.toContain("0 / 100");
+  });
+
+  it("/telemetry: a legacy row is labelled source not recorded", async () => {
+    state.analyses = [completeRow({ spine_angle: 31, hip_rotation: 44, shoulder_rotation: 92 })];
+    const html = renderToStaticMarkup(await TelemetryPage());
+    expect(html).toContain("≈30°");
+    expect(html).toContain("Estimate · source not recorded");
+  });
+
+  it.each([
+    ["none", "none"],
+    ["birdie", "active"],
+  ] as const)("/swings/[id] (%s / %s): estimates with source, score basis, swing speed not measured, evidence limits", async (tier, status) => {
+    setMember(tier, status);
+    state.analyses = [recordedRow()];
+    const html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    for (const shown of ["≈50°", "≈85°", "≈10°", "≈2:1", "AI estimate from video", "67 pts", "AI rubric score",
+      "Not measured", "does not measure swing speed from video", "What this video couldn&#x27;t show", "AI coaching assessment"]) {
+      expect(html, shown).toContain(shown);
+    }
+    for (const banned of [...BANNED_ON_SURFACES, "80–100", "28–35", "90–110"]) expect(html, banned).not.toContain(banned);
+    expectNoSentinels(html);
+  });
+
+  it("/swings/[id]: an unscored analysis says Not scored with the reason, never 0", async () => {
+    state.analyses = [recordedRow({ score: null })];
+    const html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    expect(html).toContain("Not scored");
+    expect(html).toContain("didn&#x27;t show enough of the swing to apply the scoring rubric");
+    expect(html).not.toContain(">0 pts<");
+  });
+
+  it("equipment: entitled tiers see an explicit awaiting-trustworthy-data state; locked tiers see no promise of matching", () => {
+    const entitled = renderToStaticMarkup(React.createElement(EquipmentRecommendations, { fitting: null, tier: "birdie" }));
+    expect(entitled).toContain("Equipment fitting isn&#x27;t available yet");
+    expect(entitled).toContain("trustworthy measured swing data");
+    expect(entitled).toContain("no equipment advice is given from video estimates");
+    const locked = renderToStaticMarkup(React.createElement(EquipmentRecommendations, { fitting: null, tier: "par" }));
+    expect(locked).toContain("awaits trustworthy measured swing data and a fitting built on it");
+    for (const html of [entitled, locked]) {
+      expect(html).not.toContain("matched to your swing speed");
+      expect(html).not.toContain("Upgrade to unlock AI-generated");
+    }
+  });
+
+  it("equipment: a real fitting still renders unchanged for an entitled tier", () => {
+    const fitting = {
+      recommended_shaft_flex: "Stiff",
+      shaft_reasoning: "Measured reasoning.",
+      suggested_club_specs: "Spec detail.",
+      compression_match_notes: "Compression detail.",
+    } as never;
+    const html = renderToStaticMarkup(React.createElement(EquipmentRecommendations, { fitting, tier: "eagle" }));
+    for (const shown of ["Recommended Shaft Flex", "Stiff", "Measured reasoning.", "Spec detail.", "Compression detail."]) {
+      expect(html).toContain(shown);
+    }
+    expect(html).not.toContain("isn&#x27;t available yet");
+  });
+
+  it("/analyze/[id] report: the score basis, Not scored for null, no ability label, insufficient-evidence pillar", () => {
+    const base = {
+      id: ANALYSIS_ID,
+      status: "complete",
+      feedback: "Feedback.",
+      swing_highlights: [],
+      mechanical_deficiencies: [],
+      swing_video: null,
+    };
+    const scored = renderToStaticMarkup(
+      React.createElement(AnalysisReport, {
+        analysis: { ...base, score: 67, metrics: { scoring_breakdown: "75 - 8 = 67", evidence_limits: "Face-on only." } },
+        videoSignedUrl: null,
+        clubDisplayName: null,
+      } as never),
+    );
+    for (const shown of [">67<", "AI rubric score", "AI coaching assessment", "75 - 8 = 67", "What this video couldn&#x27;t show"]) {
+      expect(scored, shown).toContain(shown);
+    }
+    for (const label of ["Elite", "Solid", "Building", "Needs Work"]) expect(scored, label).not.toContain(label);
+    const unscored = renderToStaticMarkup(
+      React.createElement(AnalysisReport, {
+        analysis: {
+          ...base,
+          score: null,
+          metrics: { posture: { rating: "insufficient_evidence", observation: "Only the finish is visible.", correction: "" } },
+        },
+        videoSignedUrl: null,
+        clubDisplayName: null,
+      } as never),
+    );
+    expect(unscored).toContain("Not scored");
+    expect(unscored).toContain("Not enough evidence");
+    expect(unscored).not.toMatch(/tabular-nums[^>]*>0</);
+  });
+
+  it("no full-swing surface source keeps a decimal biomechanics display, an uncited target or the equipment heuristic", () => {
+    const telemetry = read("app/(dashboard)/telemetry/page.tsx");
+    const detail = read("app/(dashboard)/swings/[id]/page.tsx");
+    const report = read("app/(dashboard)/analyze/[id]/AnalysisReport.tsx");
+    for (const source of [telemetry, detail, report]) {
+      expect(source).not.toContain("toFixed(1)");
+      expect(source).not.toContain("Gemini 1.5");
+      expect(source).not.toMatch(/Tour (ideal|avg|:)/);
+      expect(source).not.toContain("scoreLabel");
+    }
+    expect(telemetry).not.toContain("computeEquipmentInsight");
+    expect(telemetry).not.toContain("hipSpeedIndex");
+    expect(detail).not.toContain("_deg");
+  });
+});
+
+// ─── AC. S6-R1A: review remediation ───────────────────────────────────────────
+//
+// Offline only (counting mock, loopback fake provider, fixture rendering).
+
+/** The finding's counterexample: nothing assessable, an explicit "not scored", yet a number. */
+function contradictoryUnscorable(score: number, coverage: boolean): string {
+  return JSON.stringify({
+    ...validReport(),
+    score,
+    scoring_breakdown: "Not scored: the swing is out of frame from address to impact.",
+    evidence_coverage: { address: coverage, top_of_backswing: coverage, impact: coverage },
+    spine_angle: null,
+    hip_rotation: null,
+    shoulder_rotation: null,
+    tempo_ratio: null,
+    fault_tags: [],
+    highlights: [],
+    deficiencies: [],
+    drills: [],
+    posture: { rating: "insufficient_evidence", observation: "Address is out of frame.", correction: "" },
+    swing_plane: { rating: "insufficient_evidence", observation: "The top is out of frame.", correction: "" },
+    impact: { rating: "insufficient_evidence", observation: "Impact is out of frame.", correction: "" },
+    practice_focus: null,
+    pro_cue: null,
+  });
+}
+
+describe("AC1. scored and unscored must agree with explicit evidence coverage", () => {
+  it.each([
+    [0, false], [75, false], [99, false], [100, false],
+    [0, true], [75, true], [99, true], [100, true],
+  ])("the counterexample with score %i (coverage claimed: %s) is refused as a whole", async (score, coverage) => {
+    state.geminiImpl = async () => contradictoryUnscorable(score, coverage);
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines()[0].line).toContain("outcome=validation_rejected finish_reason=stop");
+  });
+
+  it("the same response with score null is a valid unscored analysis", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...JSON.parse(contradictoryUnscorable(75, false)), score: null });
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(storedRow().status).toBe("complete");
+    expect(storedRow().score).toBeNull();
+    expect((storedRow().metrics as Record<string, any>).evidence_coverage).toEqual({ address: false, top_of_backswing: false, impact: false });
+  });
+
+  it("an honest unscored result with full coverage completes (S6-R1B): covered, assessed, timing unavailable, explained", async () => {
+    const explanation = "Not scored: the frame rate is too low to judge the transition or tempo, so the rubric cannot be applied.";
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...validReport(), score: null, scoring_breakdown: explanation, tempo_ratio: null });
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    expect((await json(response)).data.score).toBeNull();
+    const row = storedRow();
+    expect(row.status).toBe("complete");
+    expect(row.score).toBeNull();
+    expect(row.tempo_ratio).toBeNull();
+    const metrics = row.metrics as Record<string, any>;
+    expect(metrics.evidence_coverage).toEqual({ address: true, top_of_backswing: true, impact: true });
+    expect(metrics.scoring_breakdown).toBe(explanation);
+    expect([metrics.posture.rating, metrics.swing_plane.rating, metrics.impact.rating]).toEqual(["good", "good", "needs_work"]);
+    expect(state.geminiCalls).toBe(1);
+    expect(diagnosticLines()[0].line).toContain("outcome=completed finish_reason=stop");
+  });
+
+  it("a pillar rated without its position covered is refused", async () => {
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...validReport(), score: null, evidence_coverage: { address: true, top_of_backswing: true, impact: false } });
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+  });
+
+  it("a scored analysis keeps a legitimate zero-valued estimate", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), hip_rotation: 0 });
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(storedRow().hip_rotation).toBe(0);
+    expect(storedRow().score).toBe(72);
+  });
+});
+
+describe("AC2. page projections carry every canonical metric column to the read authority", () => {
+  /** A legacy row: values only in the dedicated columns, nothing in metrics. */
+  const columnOnly = () =>
+    completeRow({ spine_angle: 33, hip_rotation: 41, shoulder_rotation: 88, tempo_ratio: 2.5, metrics: { pro_cue: "Stay in the chair" } });
+
+  it("/swings/[id] selects the canonical columns and shows column-only legacy values as unrecorded estimates", async () => {
+    state.analyses = [columnOnly()];
+    const html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    const select = state.sessionSelects.find((q) => q.table === "swing_analysis" && q.columns.includes("swing_video:"))!.columns;
+    for (const column of ["spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio"]) expect(select).toContain(column);
+    for (const shown of ["≈35°", "≈40°", "≈90°", "≈2.5:1", "Estimate · source not recorded"]) expect(html, shown).toContain(shown);
+    expect(html).not.toContain("Not available");
+  });
+
+  it("/telemetry selects the canonical columns and shows column-only legacy values as unrecorded estimates", async () => {
+    state.analyses = [columnOnly()];
+    const html = renderToStaticMarkup(await TelemetryPage());
+    const select = state.sessionSelects.find((q) => q.table === "swing_analysis")!.columns;
+    for (const column of ["spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio"]) expect(select).toContain(column);
+    for (const shown of ["≈35°", "≈40°", "≈90°", "≈2.5:1", "Estimate · source not recorded"]) expect(html, shown).toContain(shown);
+    expect(html).not.toContain("Not available");
+  });
+
+  it("projections keep the owner filter and the authority (another golfer's row is not found, no payload read)", async () => {
+    state.sessionUserId = OTHER;
+    setMember("eagle", "active", OTHER);
+    state.analyses = [columnOnly()];
+    await expect(SwingDetailPage({ params: { id: ANALYSIS_ID } })).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(state.adminReads).toEqual([]);
+    const html = renderToStaticMarkup(await TelemetryPage());
+    expect(html).not.toContain("≈35°");
+  });
+});
+
+describe("AC3. client values are 'client-supplied — unverified', never asserted to come from a device", () => {
+  it("prompt, instruction and schema make no device-origin claim and state the origin cannot be verified", async () => {
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: { spineAngle: 31.5, hipRotation: 40 } });
+    const request = JSON.stringify(state.providerRequests[0]);
+    const system = String(state.modelConfigs[0].systemInstruction);
+    for (const text of [request, system]) {
+      expect(text.toLowerCase()).not.toContain("device");
+      expect(text).not.toContain("CLIENT-REPORTED");
+    }
+    expect(state.prompts[0]).toContain("the server cannot verify where they came from");
+  });
+
+  it("route, contract, authority and presentation sources make no device-origin claim", () => {
+    for (const rel of [
+      "app/api/analyze-swing/route.ts",
+      "lib/full-swing-analysis-contract.ts",
+      "lib/analysis-result-read-authority.ts",
+      "lib/api/v1-analysis-result-dto.ts",
+      "lib/swing-metric-presentation.ts",
+    ]) {
+      const source = read(rel);
+      expect(source, rel).not.toMatch(/golfer's device|device estimate|client-reported|client-sent/i);
+    }
+  });
+});
+
+describe("AC4. the v1 measurements keys are kept, all null; estimates carry the values", () => {
+  it("a stored legacy swing speed is not returned as an instrument measurement", async () => {
+    state.analyses = [completeRow({ swing_speed_mph: 95, spine_angle: 31 })];
+    const { data } = await json(await getResult(ANALYSIS_ID));
+    expect(data.measurements).toEqual({ tempoRatio: null, swingSpeedMph: null, spineAngle: null, hipRotation: null, shoulderRotation: null });
+    expect(data.estimates.spineAngle).toEqual({ value: 31, source: "unrecorded", clientUnverifiedEstimate: null });
+    expect(JSON.stringify(data)).not.toContain("95");
+  });
+});
+
+describe("AC5. placeholder checkpoint, joint and severity are never presented as assessed", () => {
+  it("new rows store null classifications; the coaching text is kept", async () => {
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    const row = storedRow();
+    expect(row.swing_highlights).toEqual([{ checkpoint: null, positive_movement: "Quiet head through impact", mechanical_benefit: "Centred strike" }]);
+    expect(row.mechanical_deficiencies).toEqual([{
+      checkpoint: null,
+      joint_coordinate: null,
+      fault_description: "Early extension",
+      corrective_drill_detail: "Hips move toward the ball through impact.",
+      severity: null,
+      corrective_drill_title: "",
+    }]);
+  });
+
+  it("a first-producer row keeps its model-named area and severity; positions are never served", () => {
+    const view = serializeAnalysisResult(
+      completeRow({
+        mechanical_deficiencies: [{
+          checkpoint: "impact",
+          joint_coordinate: { joint: "lead hip", x: 0.5, y: 0.5 },
+          fault_description: "Hips stall",
+          severity: "major",
+          corrective_drill_title: "Step drill",
+          corrective_drill_detail: "d",
+        }],
+      }),
+      NO_PREMIUM_ACCESS,
+    );
+    expect(view.mechanical_deficiencies[0]).toEqual({
+      checkpoint: null,
+      joint_coordinate: { joint: "lead hip" },
+      fault_description: "Hips stall",
+      severity: "major",
+      corrective_drill_title: "Step drill",
+      corrective_drill_detail: "d",
+    });
+  });
+
+  it("the deficiencies panel and the report show no placeholder chip, checkpoint or joint, and keep the coaching", async () => {
+    state.analyses = [completeRow()];
+    const detail = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+    const panelHtml = renderToStaticMarkup(
+      React.createElement(MechanicalDeficienciesPanel, {
+        deficiencies: (findElements(await SwingDetailPage({ params: { id: ANALYSIS_ID } }), MechanicalDeficienciesPanel)[0].props as any).deficiencies,
+      }),
+    );
+    for (const html of [detail, panelHtml]) {
+      expect(html).toContain("Early extension");
+      expect(html).toContain("Hips move toward the ball through impact.");
+      expect(html).not.toMatch(/>Minor</);
+      expect(html).not.toContain("· general");
+      expect(html).not.toContain("severity grading");
+    }
+    const report = renderToStaticMarkup(
+      React.createElement(AnalysisReport, {
+        analysis: {
+          id: ANALYSIS_ID, status: "complete", score: 72, feedback: "f.",
+          swing_highlights: [], swing_video: null, metrics: {},
+          mechanical_deficiencies: [{ checkpoint: null, joint_coordinate: null, fault_description: "Early extension", severity: null, corrective_drill_title: "", corrective_drill_detail: "Detail." }],
+        },
+        videoSignedUrl: null,
+        clubDisplayName: null,
+      } as never),
+    );
+    expect(report).toContain("Early extension");
+    expect(report).not.toMatch(/>(Minor|Major)</);
+  });
+
+  it("an assessed severity still shows its badge", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(MechanicalDeficienciesPanel, {
+        deficiencies: [{ checkpoint: null, joint_coordinate: { joint: "lead hip" }, fault_description: "Hips stall", severity: "major", corrective_drill_title: "", corrective_drill_detail: "d" }],
+      }),
+    );
+    expect(html).toContain("lead hip");
+    expect(html).toMatch(/Major/);
+  });
+});
+
+describe("AC6. the nullable response schema is what the transport actually sends", () => {
+  it("real transport to a loopback fake provider: nullable fields and coverage serialized, byte-identical to the request built", async () => {
+    let captured = "";
+    const server = createHttpServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        captured = Buffer.concat(chunks).toString("utf8");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          candidates: [{ index: 0, content: { role: "model", parts: [{ text: JSON.stringify(validReport()) }] }, finishReason: "STOP" }],
+        }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      state.realTransportPort = (server.address() as HttpAddressInfo).port;
+      expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+      expect(captured).toBe(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest));
+      const schema = JSON.parse(captured).generationConfig.responseSchema;
+      for (const field of ["score", "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "practice_focus", "pro_cue"]) {
+        expect(schema.properties[field].nullable, field).toBe(true);
+      }
+      expect(schema.required).toContain("evidence_coverage");
+      expect(schema.properties.evidence_coverage.required).toEqual(["address", "top_of_backswing", "impact"]);
+      expect(state.geminiCalls).toBe(1);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });

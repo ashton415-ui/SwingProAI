@@ -7,6 +7,14 @@ import {
   TrendingUp, AlertCircle, Lightbulb, Dumbbell,
 } from "lucide-react";
 import { VIDEO_UNUSABLE_COPY, VIDEO_UNUSABLE_STATUS } from "@/lib/swing-video-source";
+import {
+  ASSESSMENT_LABEL,
+  EVIDENCE_LIMITS_LABEL,
+  SCORE_BASIS,
+  UNSCORED_COPY,
+  UNSCORED_LABEL,
+  presentScore,
+} from "@/lib/swing-metric-presentation";
 
 const NETWORK_FAILURE_COPY = "We couldn't reach SwingProAI. Check your connection, then tap Retry.";
 const SERVICE_FAILURE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
@@ -14,27 +22,36 @@ const SERVICE_FAILURE_COPY = "Analysis is temporarily unavailable. Please try ag
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Pillar {
-  rating: "excellent" | "good" | "needs_work" | "poor";
+  /** S6-R1 adds "insufficient_evidence"; an unknown stored value shows no rating. */
+  rating: string;
   observation: string;
   correction: string;
 }
 
 interface Highlight {
-  checkpoint: string;
+  /** S6-R1A: null when not assessed; this report does not display it. */
+  checkpoint: string | null;
   positive_movement: string;
   mechanical_benefit: string;
 }
 
+/**
+ * S6-R1A: checkpoint, joint and severity are null when not assessed (the read
+ * authority maps the producer's old constants to null). Only assessed values
+ * are shown; the coaching text and drill are always kept.
+ */
 interface Deficiency {
-  checkpoint: string;
-  joint_coordinate: { joint: string; x: number; y: number };
+  checkpoint: string | null;
+  joint_coordinate: { joint: string } | string | null;
   fault_description: string;
-  severity: "minor" | "major";
+  severity: "minor" | "major" | null;
   corrective_drill_title: string;
   corrective_drill_detail?: string | null;
 }
 
 interface Metrics {
+  scoring_breakdown?: string;
+  evidence_limits?: string;
   posture?: Pillar;
   swing_plane?: Pillar;
   impact?: Pillar;
@@ -84,27 +101,21 @@ const RATING_STYLE: Record<string, { label: string; bg: string; border: string; 
   good:      { label: "Good",        bg: "bg-golf-green/10",  border: "border-golf-green/25",  text: "text-golf-green"  },
   needs_work:{ label: "Needs Work",  bg: "bg-amber-500/10",   border: "border-amber-500/25",   text: "text-amber-400"   },
   poor:      { label: "Poor",        bg: "bg-red-500/10",     border: "border-red-500/25",      text: "text-red-400"    },
+  insufficient_evidence: { label: "Not enough evidence", bg: "bg-white/5", border: "border-white/10", text: "text-gray-400" },
 };
 
-function scoreColor(s: number) {
-  if (s >= 85) return "text-emerald-400";
-  if (s >= 70) return "text-golf-green";
-  if (s >= 55) return "text-amber-400";
-  return "text-red-400";
-}
-
-function scoreLabel(s: number) {
-  if (s >= 85) return "Elite";
-  if (s >= 70) return "Solid";
-  if (s >= 55) return "Building";
-  return "Needs Work";
+/** Where a fault was assessed (checkpoint · joint), or null when neither was. */
+function assessedLocation(d: Deficiency): string | null {
+  const joint = typeof d.joint_coordinate === "string" ? d.joint_coordinate : d.joint_coordinate?.joint ?? null;
+  return [d.checkpoint, joint].filter((part): part is string => Boolean(part)).join(" · ") || null;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function PillarCard({ title, pillar, openDefault }: { title: string; pillar: Pillar; openDefault?: boolean }) {
   const [open, setOpen] = useState(openDefault ?? false);
-  const style = RATING_STYLE[pillar.rating] ?? RATING_STYLE.good;
+  // An unrecognised rating shows no chip rather than borrowing a positive one.
+  const style = RATING_STYLE[pillar.rating] ?? null;
 
   return (
     <div className="bg-white/[0.03] border border-white/[0.07] rounded-2xl overflow-hidden">
@@ -114,9 +125,11 @@ function PillarCard({ title, pillar, openDefault }: { title: string; pillar: Pil
       >
         <div className="flex items-center gap-3">
           <p className="text-sm font-bold text-white">{title}</p>
-          <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${style.bg} ${style.border} ${style.text}`}>
-            {style.label}
-          </span>
+          {style && (
+            <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${style.bg} ${style.border} ${style.text}`}>
+              {style.label}
+            </span>
+          )}
         </div>
         {open ? <ChevronUp className="w-4 h-4 text-gray-600 shrink-0" /> : <ChevronDown className="w-4 h-4 text-gray-600 shrink-0" />}
       </button>
@@ -127,13 +140,15 @@ function PillarCard({ title, pillar, openDefault }: { title: string; pillar: Pil
             <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Observation</p>
             <p className="text-sm text-gray-300 leading-relaxed">{pillar.observation}</p>
           </div>
-          <div className="flex items-start gap-3 bg-golf-green/[0.05] border border-golf-green/20 rounded-xl px-4 py-3">
-            <Target className="w-4 h-4 text-golf-green shrink-0 mt-0.5" />
-            <div>
-              <p className="text-[9px] font-black uppercase tracking-widest text-golf-green mb-1">Correction</p>
-              <p className="text-xs text-gray-300 leading-relaxed">{pillar.correction}</p>
+          {pillar.correction && (
+            <div className="flex items-start gap-3 bg-golf-green/[0.05] border border-golf-green/20 rounded-xl px-4 py-3">
+              <Target className="w-4 h-4 text-golf-green shrink-0 mt-0.5" />
+              <div>
+                <p className="text-[9px] font-black uppercase tracking-widest text-golf-green mb-1">Correction</p>
+                <p className="text-xs text-gray-300 leading-relaxed">{pillar.correction}</p>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>
@@ -337,7 +352,9 @@ function ProcessingState({
 // ── Main report ───────────────────────────────────────────────────────────────
 
 function CoachingReport({ analysis }: { analysis: AnalysisData }) {
-  const score = analysis.score ?? 0;
+  // S6-R1: a missing score is "not scored", never 0, and no ability label is
+  // derived from a score that is an uncalibrated AI rubric estimate.
+  const score = presentScore(analysis.score);
   const metrics = analysis.metrics ?? {};
   const highlights = analysis.swing_highlights ?? [];
   const deficiencies = analysis.mechanical_deficiencies ?? [];
@@ -348,24 +365,40 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
       {/* Score + overall */}
       <div className="bg-golf-header border border-white/5 rounded-2xl p-6">
         <div className="flex items-start gap-5">
-          {/* Score ring */}
-          <div className="shrink-0 text-center">
-            <div className={`text-5xl font-black italic tabular-nums ${scoreColor(score)}`}>
-              {score}
-            </div>
-            <p className={`text-[9px] font-black uppercase tracking-widest mt-0.5 ${scoreColor(score)}`}>
-              {scoreLabel(score)}
-            </p>
+          {/* Score, with its basis */}
+          <div className="shrink-0 text-center max-w-[7rem]">
+            {score.scored ? (
+              <div className="text-5xl font-black italic tabular-nums text-white">{score.value}</div>
+            ) : (
+              <div className="text-lg font-black uppercase tracking-widest text-gray-400">{UNSCORED_LABEL}</div>
+            )}
           </div>
 
           <div className="flex-1 min-w-0 border-l border-white/[0.08] pl-5">
             <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">
-              AI Coach Assessment
+              {ASSESSMENT_LABEL}
             </p>
             <p className="text-sm text-gray-300 leading-relaxed">{analysis.feedback}</p>
           </div>
         </div>
+        <p className="text-[10px] text-gray-500 leading-relaxed mt-4">
+          {score.scored ? SCORE_BASIS : UNSCORED_COPY}
+        </p>
+        {metrics.scoring_breakdown && (
+          <p className="text-[10px] text-gray-500 leading-relaxed mt-1">
+            <span className="font-black uppercase tracking-widest text-gray-600">Scoring: </span>
+            {metrics.scoring_breakdown}
+          </p>
+        )}
       </div>
+
+      {/* What the video could not show (S6-R1) */}
+      {metrics.evidence_limits && (
+        <div className="bg-golf-header border border-white/5 rounded-2xl px-5 py-4">
+          <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1">{EVIDENCE_LIMITS_LABEL}</p>
+          <p className="text-sm text-gray-400 leading-relaxed">{metrics.evidence_limits}</p>
+        </div>
+      )}
 
       {/* Pro cue */}
       {metrics.pro_cue && (
@@ -443,11 +476,12 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
             {deficiencies.map((d, i) => {
               const isOpen = openDefIdx === i;
               const isMajor = d.severity === "major";
+              const location = assessedLocation(d);
               return (
                 <div
                   key={i}
                   className={`border rounded-2xl overflow-hidden ${
-                    isMajor ? "border-red-500/20" : "border-amber-500/15"
+                    isMajor ? "border-red-500/20" : d.severity === "minor" ? "border-amber-500/15" : "border-white/10"
                   }`}
                 >
                   <button
@@ -455,16 +489,18 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
                     className="w-full flex items-center justify-between px-5 py-4 text-left bg-white/[0.02] hover:bg-white/[0.04] transition-colors"
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <span className={`shrink-0 text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${
-                        isMajor
-                          ? "bg-red-500/10 border-red-500/25 text-red-400"
-                          : "bg-amber-500/10 border-amber-500/25 text-amber-400"
-                      }`}>
-                        {isMajor ? "Major" : "Minor"}
-                      </span>
+                      {d.severity !== null && (
+                        <span className={`shrink-0 text-[9px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full border ${
+                          isMajor
+                            ? "bg-red-500/10 border-red-500/25 text-red-400"
+                            : "bg-amber-500/10 border-amber-500/25 text-amber-400"
+                        }`}>
+                          {isMajor ? "Major" : "Minor"}
+                        </span>
+                      )}
                       <div className="min-w-0">
-                        <p className="text-sm font-bold text-white">{d.joint_coordinate?.joint || d.checkpoint}</p>
-                        <p className="text-[11px] text-gray-500 truncate">{d.fault_description}</p>
+                        <p className="text-sm font-bold text-white">{d.fault_description}</p>
+                        {location && <p className="text-[11px] text-gray-500 truncate">{location}</p>}
                       </div>
                     </div>
                     {isOpen

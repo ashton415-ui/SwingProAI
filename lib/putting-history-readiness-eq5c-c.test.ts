@@ -302,6 +302,9 @@ const PROGRESS_HUB_GUARDS: Guard[] = [
   },
 ];
 
+/** S6-R1: the swing half of the Telemetry timeline, built from the filtered swingLogs. */
+const SWING_TIMELINE = '...swingLogs.map((d) => ({ kind: "swing" as const';
+
 const TELEMETRY_GUARDS: Guard[] = [
   {
     id: "analysis_family is selected from swing_analysis",
@@ -346,24 +349,20 @@ const TELEMETRY_GUARDS: Guard[] = [
     },
   },
   {
-    // Textual position proves nothing here: SwingLogCard is declared above the
-    // page component but only ever runs on data the page hands it. What makes
-    // the optimizer unreachable for a putt is the data path, so that is what
-    // is asserted — the one call site lives inside SwingLogCard, the card is
-    // rendered once from a timeline item, and the timeline is built from the
-    // already-filtered swingLogs collection.
-    id: "the equipment optimizer is reachable only through a filtered SwingLog",
+    // S6-R1 removed the equipment optimizer: estimates from video cannot support
+    // shaft, driver or ball advice. The guard now asserts that no such advice is
+    // derived anywhere on Telemetry, and that the full-swing estimates reach a
+    // card only through the already-filtered SwingLog path, so a putt never does.
+    id: "Telemetry derives no equipment advice; estimates reach only a filtered SwingLog",
     holds: (s) => {
       const code = stripComments(s.telemetry);
-      const cardStart = code.indexOf("function SwingLogCard({ log }: { log: SwingLog }) {");
-      const call = code.indexOf("computeEquipmentInsight(log.bio, log.score)");
       return (
-        cardStart >= 0 &&
-        call > cardStart &&
-        countOccurrences(code, /computeEquipmentInsight\(/g) === 2 &&
+        countOccurrences(code, /computeEquipmentInsight\(/g) === 0 &&
+        !/EquipmentOptimizer|hipSpeedIndex|X-Stiff|attackAngleBias/.test(code) &&
+        code.includes("estimates:    presentFullSwingMetrics(r.full_swing_metrics)") &&
         countOccurrences(code, /<SwingLogCard/g) === 1 &&
         code.includes("log={item.data as SwingLog}") &&
-        code.includes("...swingLogs.map((d) => ({ kind: \"swing\" as const")
+        code.includes(SWING_TIMELINE)
       );
     },
   },
@@ -736,7 +735,7 @@ const REGRESSIONS: Regression[] = [
     ],
   },
   {
-    name: "a second equipment-optimizer call escapes the SwingLog path",
+    name: "equipment advice is derived again on Telemetry",
     apply: (s) => ({
       ...s,
       telemetry: s.telemetry.replace(
@@ -744,7 +743,7 @@ const REGRESSIONS: Regression[] = [
         "  const strayInsight = computeEquipmentInsight({}, null);\n  const swingLogs: SwingLog[] = fullSwingRows.map((r) => {",
       ),
     }),
-    breaks: ["the equipment optimizer is reachable only through a filtered SwingLog"],
+    breaks: ["Telemetry derives no equipment advice; estimates reach only a filtered SwingLog"],
   },
   {
     name: "Telemetry filters the family in SQL instead of application code",

@@ -595,7 +595,8 @@ describe("frozen read-only dependencies", () => {
     // ENT-1D video sources: the upload file name is made canonical before the Storage upload.
     // ENT-1D local acceptance: keyboard-reachable file inputs (sr-only) and a 44px upsell link.
     // ENT-1D D1 and golfer experience: video file checks, recovery copy, honest plan/upgrade copy, Enter opens the chooser.
-    ["app/(dashboard)/analyze/page.tsx", "7933cd7b743558d7125242bb0bdf6f7d808c2ad4c948281e41aac3eb6110211b"],
+    // S6-R1: an unscored full-swing result shows "Not scored" with its basis, never 0; no grade colour; assessment label.
+    ["app/(dashboard)/analyze/page.tsx", "a484db0ed003dd74b44d2a8c33e1efcabeabc8d80cbed6ab5d3e88a953ea740c"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
     // ENT-1D video sources: video_url records the canonical key, never a public URL.
     // ENT-1D video sources: canonical file name before upload (video_url already records the key).

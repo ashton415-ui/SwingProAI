@@ -27,8 +27,21 @@ import { isPersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { resolvePuttingDrillRecommendations } from "@/lib/putting-recommendation-authority-eq5e-c";
 import { resolvePuttingScorePresentation } from "@/lib/putting-score-presentation-eq5f-f";
-import type { SubscriptionTier, DeficiencyItem, HighlightItem } from "@/types/database";
+import type { SubscriptionTier, HighlightItem } from "@/types/database";
 import type { EquipmentFitting } from "@/lib/types/swing";
+import {
+  ASSESSMENT_LABEL,
+  ESTIMATES_DISCLOSURE,
+  EVIDENCE_LIMITS_LABEL,
+  SCORE_BASIS,
+  SWING_SPEED_LABEL,
+  SWING_SPEED_NOTE,
+  SWING_SPEED_NOT_MEASURED,
+  UNSCORED_COPY,
+  UNSCORED_LABEL,
+  presentFullSwingMetrics,
+  presentScore,
+} from "@/lib/swing-metric-presentation";
 
 /** The swing_videos columns this page joins. */
 interface SwingVideoJoin {
@@ -62,7 +75,7 @@ export default async function SwingDetailPage({
   // by the unified result-read authority, so no raw row reaches anything below.
   const { data: ownedRow } = await supabase
     .from("swing_analysis")
-    .select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path)")
+    .select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, spine_angle, hip_rotation, shoulder_rotation, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path)")
     .eq("id", params.id)
     .eq("user_id", user.id)
     .single();
@@ -118,22 +131,22 @@ export default async function SwingDetailPage({
   // Extract individual metrics from the authorized core metrics
   const metrics = swing.metrics as Record<string, unknown> | null;
   const scoringBreakdown = typeof metrics?.scoring_breakdown === "string" ? metrics.scoring_breakdown : null;
+  const evidenceLimits = typeof metrics?.evidence_limits === "string" ? metrics.evidence_limits : null;
 
-  const metricCards = [
-    { label: "Swing Score", value: swing.score, unit: " pts", ideal: "80–100 pts" },
-    { label: "Tempo Ratio", value: swing.tempo_ratio, unit: ":1", ideal: "3.0 : 1" },
-    { label: "Swing Speed", value: swing.swing_speed_mph, unit: " mph", ideal: "90–110 mph" },
-    { label: "Spine Angle", value: typeof metrics?.spine_angle_deg === "number" ? metrics.spine_angle_deg : null, unit: "°", ideal: "28–35°" },
-    { label: "Hip Rotation", value: typeof metrics?.hip_rotation_deg === "number" ? metrics.hip_rotation_deg : null, unit: "°", ideal: "45–55°" },
-    { label: "Shoulder Rotation", value: typeof metrics?.shoulder_rotation_deg === "number" ? metrics.shoulder_rotation_deg : null, unit: "°", ideal: "90–110°" },
-  ];
+  // S6-R1. The four estimates as the read authority recorded them (value and
+  // source), presented approximately; unavailable values say so. No target or
+  // benchmark is shown: none has a cited source (lib/swing-metric-presentation.ts).
+  const estimates = presentFullSwingMetrics(swing.full_swing_metrics);
+  const scoreShown = presentScore(swing.score);
 
   const suggestions = Array.isArray(metrics?.suggestions) ? (metrics.suggestions as string[]) : null;
 
   // v4 granular telemetry arrays — core improvement feedback for every golfer
   // (ENT-1C), already item-level allow-listed by the authority.
   const highlights = swing.swing_highlights as HighlightItem[];
-  const deficiencies = swing.mechanical_deficiencies as DeficiencyItem[];
+  // S6-R1A: the authority's view (nullable checkpoint, joint, severity) is
+  // passed as-is; the panel shows only assessed classifications.
+  const deficiencies = swing.mechanical_deficiencies;
 
   // No stored column carries a deep prose summary or an equipment fitting
   // (detailed_summary_html and analysis_v2 exist in no migration), so the
@@ -351,34 +364,50 @@ export default async function SwingDetailPage({
            "full_swing" and by a null family, which remains the established
            full-swing compatibility path. */
         <>
-          {/* Metrics Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-8">
-            {metricCards.map((m) => (
+          {/* Score and swing estimates (S6-R1): the score with its basis, each
+              estimate with its source, and what is not measured said plainly. */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-3">
+            <div className="bg-golf-surface border border-white/5 rounded-4xl p-6">
+              <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-3">Swing Score</p>
+              <p className="text-3xl font-mono font-black italic tracking-tighter text-white">
+                {scoreShown.scored ? `${scoreShown.value} pts` : UNSCORED_LABEL}
+              </p>
+              <p className="text-[9px] text-gray-500 mt-2 leading-snug">
+                {scoreShown.scored ? SCORE_BASIS : UNSCORED_COPY}
+              </p>
+            </div>
+            {estimates.map((m) => (
               <div key={m.label} className="bg-golf-surface border border-white/5 rounded-4xl p-6">
                 <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-3">{m.label}</p>
-                <p className={`text-3xl font-mono font-black italic tracking-tighter ${
-                  m.label === "Swing Score"
-                    ? (m.value ?? 0) >= 80
-                      ? "text-golf-green"
-                      : (m.value ?? 0) >= 60
-                      ? "text-yellow-400"
-                      : "text-red-400"
-                    : "text-white"
-                }`}>
-                  {m.value != null ? `${m.value}${m.unit}` : "—"}
+                <p className={`font-mono font-black italic tracking-tighter ${m.status === "estimate" ? "text-3xl text-white" : "text-base text-gray-500"}`}>
+                  {m.display}
                 </p>
-                <p className="text-[9px] text-golf-green font-bold uppercase mt-2 tracking-widest">
-                  Ideal: {m.ideal}
-                </p>
+                {m.sourceLabel && <p className="text-[9px] text-gray-500 mt-2 leading-snug">{m.sourceLabel}</p>}
+                {m.clientNote && <p className="text-[9px] text-gray-500 mt-1 leading-snug">{m.clientNote}</p>}
+                {m.reference && <p className="text-[9px] text-gray-500 mt-1 leading-snug">{m.reference}</p>}
               </div>
             ))}
+            <div className="bg-golf-surface border border-white/5 rounded-4xl p-6">
+              <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-3">{SWING_SPEED_LABEL}</p>
+              <p className="text-base font-mono font-black italic tracking-tighter text-gray-500">{SWING_SPEED_NOT_MEASURED}</p>
+              <p className="text-[9px] text-gray-500 mt-2 leading-snug">{SWING_SPEED_NOTE}</p>
+            </div>
           </div>
+          <p className="text-[9px] text-gray-600 mb-8">{ESTIMATES_DISCLOSURE}</p>
 
           {/* Scoring Math — chain-of-thought breakdown from the AI */}
           {scoringBreakdown && (
             <div className="bg-golf-surface border border-white/5 rounded-4xl px-6 py-4 mb-6">
               <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-1">Scoring Math</p>
               <p className="text-xs text-gray-400 font-mono leading-relaxed">{scoringBreakdown}</p>
+            </div>
+          )}
+
+          {/* What the video could not show (S6-R1) */}
+          {evidenceLimits && (
+            <div className="bg-golf-surface border border-white/5 rounded-4xl px-6 py-4 mb-6">
+              <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-1">{EVIDENCE_LIMITS_LABEL}</p>
+              <p className="text-xs text-gray-400 leading-relaxed">{evidenceLimits}</p>
             </div>
           )}
 
@@ -390,7 +419,7 @@ export default async function SwingDetailPage({
               </div>
               <h3 className="text-[10px] font-black text-golf-green uppercase tracking-[0.2em] mb-5 flex items-center gap-2">
                 <Zap size={12} />
-                AI Coach Feedback
+                {ASSESSMENT_LABEL}
               </h3>
               <p className="text-gray-300 leading-relaxed text-sm">{swing.feedback}</p>
             </div>

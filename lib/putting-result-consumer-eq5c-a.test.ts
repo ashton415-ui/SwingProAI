@@ -754,13 +754,16 @@ describe("the putting family suppresses every full-swing-only region", () => {
 describe("full-swing and null-family rows are untouched", () => {
   it("keeps every full-swing render site intact", () => {
     const region = fullSwingRegion();
+    // S6-R1 replaced the metric cards and the feedback heading on purpose: the
+    // anchors follow the new single render site and labels.
     for (const anchor of [
-      "metricCards.map((m) => (",
+      "estimates.map((m) => (",
       "{m.label}",
-      "Ideal: {m.ideal}",
-      'm.label === "Swing Score"',
+      "{m.sourceLabel",
+      "scoreShown.scored",
+      "{SWING_SPEED_NOT_MEASURED}",
       "Scoring Math",
-      "AI Coach Feedback",
+      "{ASSESSMENT_LABEL}",
       "Deep Biomechanical Audit",
       "<SwingHighlightsPanel",
       "<MechanicalDeficienciesPanel",
@@ -772,22 +775,16 @@ describe("full-swing and null-family rows are untouched", () => {
     }
   });
 
-  it("keeps the six full-swing metric cards and their ideal ranges byte-for-byte", () => {
-    // The card definitions sit in the page's derivation block, above the JSX,
-    // so they are asserted against the file while their single render site is
-    // asserted against the full-swing region above. Putting suppresses the
-    // render, not the declaration.
-    for (const card of [
-      '{ label: "Swing Score", value: swing.score, unit: " pts", ideal: "80–100 pts" }',
-      '{ label: "Tempo Ratio", value: swing.tempo_ratio, unit: ":1", ideal: "3.0 : 1" }',
-      '{ label: "Swing Speed", value: swing.swing_speed_mph, unit: " mph", ideal: "90–110 mph" }',
-      'label: "Spine Angle"',
-      'label: "Hip Rotation"',
-      'label: "Shoulder Rotation"',
-    ]) {
-      expect(pageSource, `full-swing metric card changed: ${card}`).toContain(card);
+  it("builds the full-swing cards once from the authority's estimates, with no uncited ideal ranges (S6-R1)", () => {
+    // The derivation sits above the JSX, so it is asserted against the file
+    // while its single render site is asserted against the full-swing region
+    // above. Putting suppresses the render, not the declaration.
+    expect(pageSource).toContain("const estimates = presentFullSwingMetrics(swing.full_swing_metrics);");
+    expect(pageSource).toContain("const scoreShown = presentScore(swing.score);");
+    for (const removed of ["ideal:", "Ideal: {m.ideal}", "80–100 pts", "90–110 mph", "28–35°", "_deg"]) {
+      expect(pageSource, `uncited target or legacy key returned: ${removed}`).not.toContain(removed);
     }
-    expect(countOccurrences(pageSource, "metricCards.map(")).toBe(1);
+    expect(countOccurrences(pageSource, "estimates.map(")).toBe(1);
   });
 
   it("routes a null analysis_family down the full-swing path", () => {

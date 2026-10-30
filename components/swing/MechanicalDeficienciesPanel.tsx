@@ -9,7 +9,22 @@ import {
   Target,
   Wrench,
 } from "lucide-react";
-import type { DeficiencyItem, DeficiencySeverity } from "@/types/database";
+import type { DeficiencySeverity } from "@/types/database";
+
+/**
+ * S6-R1A. A fault as the result authority serves it. checkpoint, joint and
+ * severity are null when not assessed — the producer never assessed a
+ * checkpoint or a joint position, and wrote a constant "minor" — so only values
+ * that were recorded as assessments are shown. The coaching text is kept.
+ */
+export interface DeficiencyView {
+  readonly checkpoint: string | null;
+  readonly joint_coordinate: { readonly joint: string } | string | null;
+  readonly fault_description: string;
+  readonly severity: DeficiencySeverity | null;
+  readonly corrective_drill_title: string;
+  readonly corrective_drill_detail?: string | null;
+}
 
 interface MechanicalDeficienciesPanelProps {
   /**
@@ -18,7 +33,7 @@ interface MechanicalDeficienciesPanelProps {
    * callers pass nothing.
    */
   locked?: boolean;
-  deficiencies?: DeficiencyItem[] | null;
+  deficiencies?: readonly DeficiencyView[] | null;
   isLoading?: boolean;
 }
 
@@ -128,8 +143,7 @@ export function MechanicalDeficienciesPanel({
             Birdie &amp; Eagle
           </p>
           <p className="text-xs text-gray-500 max-w-xs leading-relaxed mb-5">
-            A joint-by-joint fault audit with severity grading and the exact drills
-            to fix each one.
+            The faults your video shows, each explained, with a drill to work on.
           </p>
           <Link
             href="/upgrade"
@@ -196,22 +210,31 @@ export function MechanicalDeficienciesPanel({
       </div>
 
       <div className="space-y-4">
-        {deficiencies.map((d, i) => (
+        {deficiencies.map((d, i) => {
+          const checkpoint = d.checkpoint ? CHECKPOINT_LABEL[d.checkpoint] ?? d.checkpoint : null;
+          const joint = typeof d.joint_coordinate === "string" ? d.joint_coordinate : d.joint_coordinate?.joint ?? null;
+          const location = [checkpoint, joint].filter((part): part is string => Boolean(part)).join(" · ");
+          return (
           <div
-            key={`${d.checkpoint}-${i}`}
+            key={`${d.checkpoint ?? "fault"}-${i}`}
             className={`rounded-3xl p-5 border ${
               d.severity === "major"
                 ? "bg-red-500/[0.04] border-red-500/20"
-                : "bg-amber-400/[0.03] border-amber-400/15"
+                : d.severity === "minor"
+                  ? "bg-amber-400/[0.03] border-amber-400/15"
+                  : "bg-white/[0.02] border-white/10"
             }`}
           >
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <span className="text-[9px] font-black uppercase tracking-widest text-gray-400">
-                {CHECKPOINT_LABEL[d.checkpoint] ?? d.checkpoint}
-                <span className="text-gray-600"> · {d.joint_coordinate.joint}</span>
-              </span>
-              <SeverityBadge severity={d.severity} />
-            </div>
+            {(location || d.severity !== null) && (
+              <div className="flex items-center justify-between gap-3 mb-2">
+                {location ? (
+                  <span className="text-[9px] font-black uppercase tracking-widest text-gray-400">{location}</span>
+                ) : (
+                  <span />
+                )}
+                {d.severity !== null && <SeverityBadge severity={d.severity} />}
+              </div>
+            )}
 
             <p className="text-sm text-white leading-relaxed">
               {d.fault_description}
@@ -223,7 +246,8 @@ export function MechanicalDeficienciesPanel({
               locked={!canSeeDrills}
             />
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {!canSeeDrills && (

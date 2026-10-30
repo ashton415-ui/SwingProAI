@@ -4,9 +4,19 @@ import Link from "next/link";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { authorizeOwnedAnalysisRows } from "@/lib/analysis-result-read-authority";
 import {
+  ASSESSMENT_LABEL,
+  ESTIMATES_DISCLOSURE,
+  ESTIMATES_HEADING,
+  SCORE_BASIS,
+  UNSCORED_LABEL,
+  presentFullSwingMetrics,
+  presentScore,
+  type PresentedMetric,
+} from "@/lib/swing-metric-presentation";
+import {
   Video, Target, CheckCircle2, Clock, AlertCircle, Loader2, Calendar,
   Activity, ArrowUpRight, AlertTriangle, Crosshair, Zap, ChevronRight,
-  BarChart3, Cpu, Gauge, Layers, TrendingUp, RotateCcw, BarChart2,
+  BarChart3, TrendingUp,
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14,23 +24,11 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface BiometricsData {
-  spine_angle?:       number;
-  hip_rotation?:      number;
-  shoulder_rotation?: number;
-  tempo_ratio?:       string;
   putting_analysis?:  string;
   the_feel?:          string;
   posture?:           { rating: string; observation: string; correction: string };
   swing_plane?:       { rating: string; observation: string; correction: string };
   impact?:            { rating: string; observation: string; correction: string };
-}
-
-interface EquipmentInsight {
-  shaftFlex:    { recommendation: string; confidence: "high" | "medium" | "low"; reason: string };
-  driverConfig: { recommendation: string; confidence: "high" | "medium" | "low"; reason: string };
-  ballSpec:     { recommendation: string; confidence: "high" | "medium" | "low"; reason: string };
-  hipSpeedIndex: number | null;   // 0–100 derived proxy
-  attackAngleBias: "draw" | "fade" | "neutral" | "unknown";
 }
 
 interface SwingLog {
@@ -42,6 +40,8 @@ interface SwingLog {
   club:        string | null;
   filename:    string | null;
   bio:         BiometricsData;
+  /** S6-R1: the four estimates as presented (value and source, or unavailable). */
+  estimates:   PresentedMetric[];
   highlights:  string[];
   deficiencies: string[];
 }
@@ -79,130 +79,6 @@ function parseRangeMetrics(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Equipment Optimizer — pure logic, no API calls
-// ─────────────────────────────────────────────────────────────────────────────
-
-function parseTempoNum(s?: string): number | null {
-  if (!s) return null;
-  const parts = s.split(":").map(Number);
-  return parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) && parts[1] !== 0
-    ? parts[0] / parts[1]
-    : null;
-}
-
-function computeEquipmentInsight(bio: BiometricsData, score: number | null): EquipmentInsight {
-  const { hip_rotation: hip, shoulder_rotation: shoulder, spine_angle: spine, tempo_ratio } = bio;
-  const tempo = parseTempoNum(tempo_ratio);
-
-  // ── Hip Speed Index (0–100 proxy) ─────────────────────────────────────────
-  // Combines hip rotation magnitude with how quickly it's completed (tempo)
-  let hipSpeedIndex: number | null = null;
-  if (hip != null && tempo != null) {
-    // Hip speed ∝ rotation × (1 / downswing fraction)
-    // Normalize: 45° at 3:1 tempo = 50 (average), scale up/down
-    hipSpeedIndex = Math.min(100, Math.max(0, Math.round((hip / 45) * (3 / tempo) * 50)));
-  } else if (hip != null) {
-    hipSpeedIndex = Math.min(100, Math.round((hip / 60) * 70));
-  }
-
-  // ── Attack Angle Bias ─────────────────────────────────────────────────────
-  // Hips leading shoulders through impact → inside-out (draw bias)
-  // Shoulders dominating → outside-in (fade / slice)
-  let attackAngleBias: EquipmentInsight["attackAngleBias"] = "unknown";
-  if (hip != null && shoulder != null) {
-    const ratio = hip / shoulder;
-    if (ratio >= 0.55)       attackAngleBias = "draw";
-    else if (ratio >= 0.42)  attackAngleBias = "neutral";
-    else                     attackAngleBias = "fade";
-  }
-
-  // ── Shaft Flex ────────────────────────────────────────────────────────────
-  let shaftFlex: EquipmentInsight["shaftFlex"];
-  if ((hip != null && hip > 52) || (tempo != null && tempo < 2.4)) {
-    shaftFlex = {
-      recommendation: "X-Stiff (Tour)",
-      confidence: "high",
-      reason: `Your hip speed index of ${hipSpeedIndex ?? "—"}/100 and rapid transition (${tempo_ratio ?? "fast"} tempo) generate elite clubhead speed signatures. A stiffer tip section prevents excessive shaft kick timing issues, preserving face angle at impact.`,
-    };
-  } else if ((hip != null && hip > 44) || (tempo != null && tempo < 2.9)) {
-    shaftFlex = {
-      recommendation: "Stiff",
-      confidence: hip != null && tempo != null ? "high" : "medium",
-      reason: `With ${hip != null ? `${hip.toFixed(0)}° of hip clearance` : "above-average hip drive"} and a ${tempo_ratio ?? "efficient"} tempo, your downswing load demands a Stiff flex. Regular shafts will kick too early, promoting a flipping action and loss of distance.`,
-    };
-  } else if ((hip != null && hip > 35) || (tempo != null && tempo < 3.6)) {
-    shaftFlex = {
-      recommendation: "Regular",
-      confidence: "medium",
-      reason: `Your measured rotation and tempo pattern aligns with a Regular-flex shaft. The shaft will load and release in sync with your natural transition timing, maximising the energy transfer to the ball at impact.`,
-    };
-  } else {
-    shaftFlex = {
-      recommendation: "Senior / A-Flex",
-      confidence: hip != null ? "medium" : "low",
-      reason: `${hip != null ? `A hip rotation of ${hip.toFixed(0)}°` : "Your rotation pattern"} and ${tempo_ratio ? `${tempo_ratio} tempo` : "relaxed tempo"} indicate a measured, smooth transition. A softer shaft amplifies the natural whip in your swing and adds carry distance without forcing speed.`,
-    };
-  }
-
-  // ── Driver Configuration ──────────────────────────────────────────────────
-  let driverConfig: EquipmentInsight["driverConfig"];
-  const hasGoodHipLead = attackAngleBias === "draw";
-  const hasRestrictedHips = hip != null && hip < 38;
-
-  if ((shoulder != null && shoulder > 90) && (hip != null && hip > 45) && hasGoodHipLead) {
-    driverConfig = {
-      recommendation: "Low-Spin Head · 9–10° Loft",
-      confidence: "high",
-      reason: `Your ${shoulder?.toFixed(0)}° shoulder turn combined with ${hip?.toFixed(0)}° of hip lead creates a naturally high launch with ample ball speed. A low-spin driver head prevents ballooning and maximises penetrating distance in the wind.`,
-    };
-  } else if (hasRestrictedHips || attackAngleBias === "fade") {
-    driverConfig = {
-      recommendation: "Draw-Biased Head · 10.5–11.5° Loft",
-      confidence: "medium",
-      reason: `${hasRestrictedHips ? `Limited hip clearance (${hip?.toFixed(0)}°)` : "A fade-biased swing path"} suggests the clubhead is approaching from outside the target line. A draw-bias weight setting combined with higher loft softens the fade tendency and adds forgiveness on misses.`,
-    };
-  } else if (spine != null && spine < 32) {
-    driverConfig = {
-      recommendation: "Neutral Head · 10.5–12° Loft",
-      confidence: "medium",
-      reason: `Your upright spine angle (${spine.toFixed(0)}°) creates a steeper attack angle, reducing effective dynamic loft at impact. Extra static loft compensates and ensures you're launching the ball on an optimal 14–17° trajectory.`,
-    };
-  } else {
-    driverConfig = {
-      recommendation: "Neutral Head · 10.5° Loft",
-      confidence: "medium",
-      reason: `Your numbers show a well-balanced setup. A neutral, adjustable driver head gives you the flexibility to dial in loft and lie angle as your swing evolves with practice.`,
-    };
-  }
-
-  // ── Ball Specification ────────────────────────────────────────────────────
-  let ballSpec: EquipmentInsight["ballSpec"];
-  const effectiveScore = score ?? 60;
-
-  if (effectiveScore >= 80 || (hipSpeedIndex != null && hipSpeedIndex >= 70)) {
-    ballSpec = {
-      recommendation: "Tour Performance (90+ compression)",
-      confidence: "high",
-      reason: `Your swing data signature — ${hipSpeedIndex != null ? `hip speed index ${hipSpeedIndex}/100` : "high rotation"}, ${shoulder != null ? `${shoulder.toFixed(0)}° shoulder turn` : "strong backswing"} — generates the ball speed required to compress a tour-calibre ball fully. A high-compression ball reduces spin divergence and sharpens shot shape control.`,
-    };
-  } else if (effectiveScore >= 65 || (hipSpeedIndex != null && hipSpeedIndex >= 45)) {
-    ballSpec = {
-      recommendation: "Mid-Range (75–85 compression)",
-      confidence: "medium",
-      reason: `Your swing speed and rotation profile sits in the mid-compression sweet spot. These balls offer enough feedback for improvement while providing the distance and control you need to break scoring barriers.`,
-    };
-  } else {
-    ballSpec = {
-      recommendation: "Distance / Low Compression",
-      confidence: "medium",
-      reason: `Optimising for distance at your current swing profile will pay the biggest dividends. A low-compression distance ball maximises carry and reduces the energy lost to under-compression, adding yards without mechanical change.`,
-    };
-  }
-
-  return { shaftFlex, driverConfig, ballSpec, hipSpeedIndex, attackAngleBias };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -231,76 +107,21 @@ function StatusChip({ status }: { status: string }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Metric card with range gauge
+// Estimate card (S6-R1): an approximate value with its source, or "Not
+// available". No rating, range bar or benchmark: none has a cited source.
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface MetricCardProps {
-  label:      string;
-  value:      number | string | undefined;
-  unit?:      string;
-  min:        number;
-  max:        number;
-  idealMin:   number;
-  idealMax:   number;
-  benchmark:  string;
-  invert?:    boolean; // lower is better (spine angle: lower = more upright)
-}
-
-function metricRating(val: number, idealMin: number, idealMax: number): { label: string; color: string } {
-  const margin = (idealMax - idealMin) * 0.2;
-  if (val >= idealMin && val <= idealMax)                       return { label: "Ideal",     color: "text-golf-green" };
-  if (val >= idealMin - margin && val <= idealMax + margin)     return { label: "Good",      color: "text-golf-green" };
-  if (val >= idealMin - margin * 3 && val <= idealMax + margin * 3) return { label: "Average", color: "text-yellow-400" };
-  return { label: "Off Range", color: "text-red-400" };
-}
-
-function MetricCard({ label, value, unit, min, max, idealMin, idealMax, benchmark }: MetricCardProps) {
-  if (value == null) return null;
-  const numVal   = typeof value === "number" ? value : parseFloat(String(value));
-  const isNum    = !isNaN(numVal);
-  const pct      = isNum ? Math.max(0, Math.min(100, ((numVal - min) / (max - min)) * 100)) : null;
-  const idealL   = Math.max(0, ((idealMin - min) / (max - min)) * 100);
-  const idealW   = Math.min(100 - idealL, ((idealMax - idealMin) / (max - min)) * 100);
-  const rating   = isNum ? metricRating(numVal, idealMin, idealMax) : null;
-
+function EstimateCard({ metric }: { metric: PresentedMetric }) {
+  const available = metric.status === "estimate";
   return (
-    <div className="flex-1 min-w-[130px] p-4 rounded-2xl bg-black/40 border border-white/[0.07] flex flex-col gap-2">
-      {/* Value */}
-      <div className="flex items-end gap-1">
-        <span className="text-3xl font-black font-mono text-white leading-none">
-          {isNum ? numVal.toFixed(1) : value}
-        </span>
-        {unit && <span className="text-sm text-gray-500 pb-0.5">{unit}</span>}
-      </div>
-
-      {/* Range bar */}
-      {pct != null && (
-        <div className="relative h-2 rounded-full bg-white/[0.06] overflow-hidden">
-          {/* Ideal zone highlight */}
-          <div
-            className="absolute top-0 h-full rounded-full bg-golf-green/20"
-            style={{ left: `${idealL}%`, width: `${idealW}%` }}
-          />
-          {/* Current value marker */}
-          <div
-            className="absolute top-0 h-full w-1 rounded-full bg-white shadow-[0_0_6px_rgba(255,255,255,0.6)]"
-            style={{ left: `calc(${pct}% - 2px)` }}
-          />
-        </div>
-      )}
-
-      {/* Label row */}
-      <div className="flex items-center justify-between mt-0.5">
-        <span className="text-[9px] font-black uppercase tracking-[0.18em] text-gray-500">{label}</span>
-        {rating && (
-          <span className={`text-[9px] font-black uppercase tracking-widest ${rating.color}`}>
-            {rating.label}
-          </span>
-        )}
-      </div>
-
-      {/* Benchmark */}
-      <span className="text-[9px] text-gray-700 leading-tight">{benchmark}</span>
+    <div className="flex-1 min-w-[130px] p-4 rounded-2xl bg-black/40 border border-white/[0.07] flex flex-col gap-1.5">
+      <span className={`font-black font-mono leading-none ${available ? "text-3xl text-white" : "text-base text-gray-500"}`}>
+        {metric.display}
+      </span>
+      <span className="text-[9px] font-black uppercase tracking-[0.18em] text-gray-500">{metric.label}</span>
+      {metric.sourceLabel && <span className="text-[9px] text-gray-600 leading-tight">{metric.sourceLabel}</span>}
+      {metric.clientNote && <span className="text-[9px] text-gray-600 leading-tight">{metric.clientNote}</span>}
+      {metric.reference && <span className="text-[9px] text-gray-600 leading-tight">{metric.reference}</span>}
     </div>
   );
 }
@@ -328,106 +149,10 @@ function CoachSummary({ text }: { text: string }) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-2">
             <span className="text-[8px] font-black uppercase tracking-[0.25em] text-golf-green">
-              AI Coach Assessment
+              {ASSESSMENT_LABEL}
             </span>
-            <span className="text-[8px] text-gray-700">· Gemini 1.5 Pro</span>
           </div>
           <p className="text-[12px] text-gray-300 leading-[1.75] font-light">{text}</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Equipment Optimizer
-// ─────────────────────────────────────────────────────────────────────────────
-
-function confidenceDot(c: "high" | "medium" | "low") {
-  const map = { high: "bg-golf-green", medium: "bg-yellow-400", low: "bg-gray-600" };
-  return <span className={`inline-block w-1.5 h-1.5 rounded-full ${map[c]} shrink-0 mt-0.5`} />;
-}
-
-function EquipmentOptimizer({ insight }: { insight: EquipmentInsight }) {
-  const attackLabel = {
-    draw: "Draw-Bias Attack",
-    fade: "Fade-Bias Attack",
-    neutral: "Neutral Path",
-    unknown: "Path Unknown",
-  }[insight.attackAngleBias];
-
-  const attackColor = {
-    draw: "text-golf-green",
-    fade: "text-amber-400",
-    neutral: "text-blue-400",
-    unknown: "text-gray-500",
-  }[insight.attackAngleBias];
-
-  return (
-    <div className="rounded-2xl border border-amber-400/15 bg-amber-400/[0.03] overflow-hidden">
-      {/* Header */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-3.5 border-b border-amber-400/10">
-        <div className="w-7 h-7 rounded-lg bg-amber-400/10 border border-amber-400/20 flex items-center justify-center shrink-0">
-          <Cpu className="w-3.5 h-3.5 text-amber-400" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <span className="text-[9px] font-black uppercase tracking-[0.25em] text-amber-400">
-            Equipment Optimizer Insight
-          </span>
-        </div>
-        {/* Hip Speed Index pill */}
-        {insight.hipSpeedIndex != null && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/30 border border-white/[0.07] shrink-0">
-            <Gauge className="w-3 h-3 text-gray-500" />
-            <span className="text-[9px] font-black font-mono text-white">{insight.hipSpeedIndex}</span>
-            <span className="text-[8px] text-gray-600">HSI</span>
-          </div>
-        )}
-        {/* Attack angle bias */}
-        <span className={`text-[9px] font-black uppercase tracking-widest shrink-0 ${attackColor}`}>
-          {attackLabel}
-        </span>
-      </div>
-
-      {/* Three insight tiles */}
-      <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-amber-400/[0.08]">
-        {/* Shaft */}
-        <div className="p-4 flex flex-col gap-2.5">
-          <div className="flex items-center gap-2">
-            <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-gray-600">Shaft Flex</span>
-          </div>
-          <div className="flex items-start gap-2">
-            {confidenceDot(insight.shaftFlex.confidence)}
-            <span className="text-sm font-black text-white leading-tight">{insight.shaftFlex.recommendation}</span>
-          </div>
-          <p className="text-[10px] text-gray-500 leading-relaxed">{insight.shaftFlex.reason}</p>
-        </div>
-
-        {/* Driver */}
-        <div className="p-4 flex flex-col gap-2.5">
-          <div className="flex items-center gap-2">
-            <RotateCcw className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-gray-600">Driver Config</span>
-          </div>
-          <div className="flex items-start gap-2">
-            {confidenceDot(insight.driverConfig.confidence)}
-            <span className="text-sm font-black text-white leading-tight">{insight.driverConfig.recommendation}</span>
-          </div>
-          <p className="text-[10px] text-gray-500 leading-relaxed">{insight.driverConfig.reason}</p>
-        </div>
-
-        {/* Ball */}
-        <div className="p-4 flex flex-col gap-2.5">
-          <div className="flex items-center gap-2">
-            <BarChart2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-gray-600">Ball Spec</span>
-          </div>
-          <div className="flex items-start gap-2">
-            {confidenceDot(insight.ballSpec.confidence)}
-            <span className="text-sm font-black text-white leading-tight">{insight.ballSpec.recommendation}</span>
-          </div>
-          <p className="text-[10px] text-gray-500 leading-relaxed">{insight.ballSpec.reason}</p>
         </div>
       </div>
     </div>
@@ -441,13 +166,9 @@ function EquipmentOptimizer({ insight }: { insight: EquipmentInsight }) {
 function SwingLogCard({ log }: { log: SwingLog }) {
   const isComplete  = log.status === "complete";
   const label       = log.club ?? log.filename ?? "Untitled Swing";
-  const equipment   = isComplete ? computeEquipmentInsight(log.bio, log.score) : null;
-  const hasBio      = log.bio.spine_angle != null || log.bio.hip_rotation != null || log.bio.shoulder_rotation != null;
-
-  const scoreColor  = log.score == null ? "text-gray-600"
-                    : log.score >= 80 ? "text-golf-green"
-                    : log.score >= 65 ? "text-yellow-400"
-                    : "text-red-400";
+  // S6-R1: a score is shown with its basis and no grade colour; a complete
+  // analysis without one says "Not scored", never 0.
+  const score       = presentScore(log.score);
 
   return (
     <div className="rounded-2xl border border-white/[0.07] bg-golf-header overflow-hidden">
@@ -461,8 +182,10 @@ function SwingLogCard({ log }: { log: SwingLog }) {
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-1">
             <span className="text-base font-black text-white truncate">{label}</span>
             <StatusChip status={log.status} />
-            {log.score != null && (
-              <span className={`text-sm font-black font-mono ${scoreColor}`}>{log.score} / 100</span>
+            {isComplete && (
+              <span className="text-sm font-black font-mono text-white" title={SCORE_BASIS}>
+                {score.scored ? `${score.value} / 100` : UNSCORED_LABEL}
+              </span>
             )}
           </div>
           <div className="flex items-center gap-1.5 text-[10px] text-gray-600">
@@ -484,64 +207,20 @@ function SwingLogCard({ log }: { log: SwingLog }) {
         )}
       </div>
 
-      {/* ── Biomechanical metrics ─────────────────────────────────────────── */}
-      {isComplete && hasBio && (
+      {/* ── Swing estimates (S6-R1) ── */}
+      {isComplete && (
         <div className="p-5 pb-4">
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-1">
             <TrendingUp className="w-3.5 h-3.5 text-gray-600" />
             <span className="text-[8px] font-black uppercase tracking-[0.25em] text-gray-600">
-              Biomechanical Signature
+              {ESTIMATES_HEADING}
             </span>
           </div>
+          <p className="text-[9px] text-gray-600 mb-3">{ESTIMATES_DISCLOSURE} {SCORE_BASIS}</p>
           <div className="flex flex-wrap gap-3">
-            <MetricCard
-              label="Spine Angle"
-              value={log.bio.spine_angle}
-              unit="°"
-              min={15} max={65} idealMin={35} idealMax={45}
-              benchmark="Tour ideal: 35–45°"
-            />
-            <MetricCard
-              label="Hip Rotation"
-              value={log.bio.hip_rotation}
-              unit="°"
-              min={10} max={70} idealMin={42} idealMax={55}
-              benchmark="Impact clearance · Tour: 45–55°"
-            />
-            <MetricCard
-              label="Shoulder Turn"
-              value={log.bio.shoulder_rotation}
-              unit="°"
-              min={50} max={120} idealMin={85} idealMax={100}
-              benchmark="Backswing coil · Tour: 90–100°"
-            />
-            {log.bio.tempo_ratio && (
-              <div className="flex-1 min-w-[120px] p-4 rounded-2xl bg-black/40 border border-white/[0.07] flex flex-col gap-2">
-                <span className="text-3xl font-black font-mono text-white leading-none">{log.bio.tempo_ratio}</span>
-                <div className="h-2 rounded-full bg-white/[0.06]">
-                  {/* Tempo bar: 2:1 = 0%, 3:1 = 50%, 4:1 = 100% */}
-                  {(() => {
-                    const t = parseTempoNum(log.bio.tempo_ratio);
-                    const pct = t != null ? Math.max(0, Math.min(100, ((t - 2) / 2) * 100)) : null;
-                    return pct != null ? (
-                      <div className="relative h-full">
-                        <div className="absolute top-0 h-full rounded-full bg-golf-green/20" style={{ left: "25%", width: "50%" }} />
-                        <div className="absolute top-0 h-full w-1 rounded-full bg-white shadow-[0_0_6px_rgba(255,255,255,0.6)]" style={{ left: `calc(${pct}% - 2px)` }} />
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[9px] font-black uppercase tracking-[0.18em] text-gray-500">Tempo</span>
-                  {(() => {
-                    const t = parseTempoNum(log.bio.tempo_ratio);
-                    const label = t == null ? null : t < 2.5 ? { l: "Fast", c: "text-red-400" } : t <= 3.5 ? { l: "Ideal", c: "text-golf-green" } : { l: "Slow", c: "text-yellow-400" };
-                    return label ? <span className={`text-[9px] font-black uppercase tracking-widest ${label.c}`}>{label.l}</span> : null;
-                  })()}
-                </div>
-                <span className="text-[9px] text-gray-700">Backswing : downswing · Tour avg: 3:1</span>
-              </div>
-            )}
+            {log.estimates.map((metric) => (
+              <EstimateCard key={metric.label} metric={metric} />
+            ))}
           </div>
         </div>
       )}
@@ -561,13 +240,6 @@ function SwingLogCard({ log }: { log: SwingLog }) {
             <p className="text-[8px] font-black uppercase tracking-[0.22em] text-golf-green mb-1.5">The Feel</p>
             <p className="text-xs text-gray-200 leading-relaxed italic">"{log.bio.the_feel}"</p>
           </div>
-        </div>
-      )}
-
-      {/* ── Equipment Optimizer ───────────────────────────────────────────── */}
-      {isComplete && equipment && (
-        <div className="px-5 pb-4">
-          <EquipmentOptimizer insight={equipment} />
         </div>
       )}
 
@@ -693,7 +365,7 @@ export default async function TelemetryPage() {
       .from("swing_analysis")
       .select(`
         id, user_id, status, score, feedback, created_at, analysis_family, equipment_snapshot,
-        spine_angle, hip_rotation, shoulder_rotation,
+        tempo_ratio, spine_angle, hip_rotation, shoulder_rotation,
         swing_video:swing_videos(club, original_filename)
       `)
       .eq("user_id", user.id)
@@ -719,10 +391,10 @@ export default async function TelemetryPage() {
 
   // EQ5C-C. Putting analyses leave the pipeline here, before anything
   // downstream of them exists. This page is a full-swing analytical portal: it
-  // reads full-swing biomechanics, interprets a full-swing score and derives
-  // shaft, driver and ball recommendations from them. A putt produces none of
-  // those inputs, so letting one through would not merely look wrong — it
-  // would generate fitting advice from measurements that were never taken.
+  // presents full-swing estimates and interprets a full-swing score. A putt
+  // produces neither, so letting one through would present values that were
+  // never estimated. (S6-R1 removed the derived shaft, driver and ball advice:
+  // estimates from video cannot support equipment fitting.)
   //
   // Compatibility is a positive allow-list. Legacy rows written before the
   // family column exists carry null and remain part of the established
@@ -742,20 +414,7 @@ export default async function TelemetryPage() {
     const rawHL  = r.swing_highlights as RawHL[];
     const rawDF  = r.mechanical_deficiencies as RawDF[];
 
-    // Prefer dedicated numeric columns (written by API route from client measurements);
-    // fall back to the JSONB metrics blob for records written before the dedicated columns existed.
-    const spineAngle       = typeof r.spine_angle === "number"       ? r.spine_angle
-                           : typeof raw.spine_angle === "number"     ? raw.spine_angle       : undefined;
-    const hipRotation      = typeof r.hip_rotation === "number"      ? r.hip_rotation
-                           : typeof raw.hip_rotation === "number"    ? raw.hip_rotation      : undefined;
-    const shoulderRotation = typeof r.shoulder_rotation === "number" ? r.shoulder_rotation
-                           : typeof raw.shoulder_rotation === "number" ? raw.shoulder_rotation : undefined;
-
     const bio: BiometricsData = {
-      spine_angle:       spineAngle,
-      hip_rotation:      hipRotation,
-      shoulder_rotation: shoulderRotation,
-      tempo_ratio:       typeof raw.tempo_ratio === "string"       ? raw.tempo_ratio       : undefined,
       putting_analysis:  typeof raw.putting_analysis === "string"  ? raw.putting_analysis  : undefined,
       the_feel:          typeof raw.the_feel === "string"          ? raw.the_feel          : undefined,
       posture:           raw.posture  as BiometricsData["posture"]  ?? undefined,
@@ -776,6 +435,8 @@ export default async function TelemetryPage() {
       club:         getHistoricalEquipmentDisplayName(r.equipment_snapshot) ?? video?.club ?? null,
       filename:     video?.original_filename ?? null,
       bio,
+      // S6-R1: value and source from the read authority, never the raw columns.
+      estimates:    presentFullSwingMetrics(r.full_swing_metrics),
       highlights:   rawHL.map((h) => typeof h.positive_movement === "string" ? h.positive_movement : "").filter(Boolean),
       deficiencies: rawDF.map((d) => typeof d.fault_description === "string" ? d.fault_description : "").filter(Boolean),
     };

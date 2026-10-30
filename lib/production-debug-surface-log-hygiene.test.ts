@@ -367,10 +367,134 @@ describe("analyze-swing log hygiene", () => {
     expect(apiSource).toContain(
       'console.log("[analyze-swing] Gemini response length (chars):", rawText.length)',
     );
-    // Field NAMES are application constants; the values behind them are not logged.
-    expect(apiSource).toContain(
-      'console.error("[analyze-swing] response missing required fields:", missing.join(", "))',
-    );
+    // S6-R1: the full-swing contract rejection is fixed copy; its reason code is
+    // internal and never logged (it replaced the missing-required-fields line).
+    expect(apiSource).toContain('console.error("[analyze-swing] full-swing response rejected")');
+  });
+});
+
+// ─── PART C2 — ENT-1D S6 provider response diagnostics ───────────────────────
+
+/** Source with comments removed, so prose about what is never logged cannot mask code. */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
+/**
+ * The argument list of every call to `name(` in `source`, as raw text, found
+ * by the same paren-depth scan as extractConsoleCalls.
+ */
+function callArguments(source: string, name: string): string[] {
+  const found: string[] = [];
+  let cursor = 0;
+  for (;;) {
+    const start = source.indexOf(`${name}(`, cursor);
+    if (start === -1) break;
+    const open = start + name.length;
+    let depth = 0;
+    let quote: string | null = null;
+    let end = open;
+    for (; end < source.length; end++) {
+      const ch = source[end];
+      if (quote !== null) {
+        if (ch === "\\") {
+          end++;
+          continue;
+        }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "(") depth++;
+      else if (ch === ")") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    found.push(source.slice(open + 1, end).replace(/\s+/g, " ").trim());
+    cursor = end + 1;
+  }
+  return found;
+}
+
+describe("analyze-swing provider response diagnostics stay allowlisted", () => {
+  const helperSource = stripComments(readSource("lib/gemini-response-diagnostics.ts"));
+  const routeCode = stripComments(apiSource);
+
+  it("the helper has exactly two console calls, each logging only the formatted line", () => {
+    expect(extractConsoleCalls(helperSource)).toEqual(["console.log(line)", "console.error(line)"]);
+  });
+
+  it("the helper reads no response text, thought, signature, safety, feedback or error field", () => {
+    // A response part's text, but not the record's own textChars field.
+    expect(helperSource, "the diagnostics helper must not read .text").not.toMatch(/\.text\b/);
+    // A thought part, but not the supplied thoughtsTokenCount.
+    expect(helperSource, "the diagnostics helper must not read .thought").not.toMatch(/\.thought\b/);
+    for (const banned of [
+      "parts",
+      "thought:",
+      "thoughtSignature",
+      "safetyRatings",
+      "promptFeedback",
+      "finishMessage",
+      "citationMetadata",
+      "modelVersion",
+      "responseId",
+      ".message",
+      "JSON.stringify",
+      "...response",
+      "...usage",
+      "...candidates",
+      "String(response",
+      "String(usage",
+    ]) {
+      expect(helperSource, `the diagnostics helper must not use ${banned}`).not.toContain(banned);
+    }
+    // Exactly the four supplied counts are read from usageMetadata.
+    expect(helperSource.match(/usage\.[A-Za-z]+/g)?.sort()).toEqual([
+      "usage.candidatesTokenCount",
+      "usage.promptTokenCount",
+      "usage.thoughtsTokenCount",
+      "usage.totalTokenCount",
+    ]);
+  });
+
+  it("the route passes only fixed codes and the diagnostics record to the logger", () => {
+    const calls = callArguments(routeCode, "logGeminiResponseDiagnostics");
+    expect(calls.length).toBeGreaterThan(0);
+    for (const args of calls) {
+      expect(args).toMatch(
+        /^"(full_swing|putting)", ("[a-z_]+"|responseStage|puttingStage), (responseDiagnostics|puttingDiagnostics)$/,
+      );
+    }
+  });
+
+  it("the route describes only the provider response object and adds only a text length", () => {
+    expect(callArguments(routeCode, "describeGeminiResponse").sort()).toEqual(["puttingResult", "result"]);
+    expect(callArguments(routeCode, "withTextLength").sort()).toEqual([
+      "puttingDiagnostics, puttingRawText.length",
+      "responseDiagnostics, rawText.length",
+    ]);
+  });
+
+  it("completion is decided by the completion policy before any text is read, never by the diagnostics", () => {
+    // S6-R1. Both families: describe → decide (explicit STOP only) → extract.
+    expect(callArguments(routeCode, "decideProviderCompletion").sort()).toEqual(["puttingResult", "result"]);
+    for (const [describe, decide, extract] of [
+      ["describeGeminiResponse(result)", "decideProviderCompletion(result)", "responseText(result)"],
+      ["describeGeminiResponse(puttingResult)", "decideProviderCompletion(puttingResult)", "responseText(puttingResult)"],
+    ]) {
+      expect(routeCode.indexOf(describe)).toBeGreaterThan(0);
+      expect(routeCode.indexOf(decide)).toBeGreaterThan(routeCode.indexOf(describe));
+      expect(routeCode.indexOf(extract)).toBeGreaterThan(routeCode.indexOf(decide));
+    }
+    const policy = stripComments(readSource("lib/gemini-completion-policy.ts"));
+    expect(policy).not.toContain("gemini-response-diagnostics");
+    expect(policy).not.toContain("console.");
+    expect(policy).toContain('if (reason === "STOP") return COMPLETE;');
   });
 });
 
@@ -452,7 +576,8 @@ describe("analyze-swing functional anchors", () => {
     expect(apiSource).toContain("loadOwnedSwingVideo(");
     expect(apiSource).toContain("MAX_ANALYSIS_VIDEO_BYTES");
     expect(apiSource).toContain("JSON.parse(rawText)");
-    expect(apiSource).toContain("requiredFields");
+    // S6-R1: the whole-object content contract replaced the requiredFields list.
+    expect(apiSource).toContain("validateFullSwingModelResponse(parsed)");
   });
 
   it("keeps every analysis status write and the success response", () => {

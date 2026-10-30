@@ -32,14 +32,12 @@ interface ResultViewInput {
   readonly spine_angle: number | null;
   readonly hip_rotation: number | null;
   readonly shoulder_rotation: number | null;
+  readonly full_swing_metrics: Readonly<
+    Record<"spine_angle" | "hip_rotation" | "shoulder_rotation" | "tempo_ratio", EstimateInput>
+  > | null;
   readonly metrics: {
     scoring_breakdown?: string;
-    spine_angle?: number;
-    hip_rotation?: number;
-    shoulder_rotation?: number;
-    spine_angle_deg?: number;
-    hip_rotation_deg?: number;
-    shoulder_rotation_deg?: number;
+    evidence_limits?: string;
     suggestions?: string[];
     fault_tags?: string[];
     drills?: { name: string; the_why: string; the_how: string; the_feel: string }[];
@@ -50,17 +48,23 @@ interface ResultViewInput {
     pro_cue?: string;
     the_feel?: string;
   } | null;
-  readonly swing_highlights: readonly { checkpoint: string; positive_movement: string; mechanical_benefit: string }[];
+  readonly swing_highlights: readonly { checkpoint: string | null; positive_movement: string; mechanical_benefit: string }[];
   readonly mechanical_deficiencies: readonly {
-    checkpoint: string;
-    joint_coordinate: { joint: string } | string;
+    checkpoint: string | null;
+    joint_coordinate: { joint: string } | string | null;
     fault_description: string;
-    severity: "minor" | "major";
+    severity: "minor" | "major" | null;
     corrective_drill_title: string;
     corrective_drill_detail: string | null;
   }[];
   readonly putting_analysis: PersistedPuttingAnalysisV1 | null;
   readonly putting_score: Record<string, unknown> | null;
+}
+
+interface EstimateInput {
+  readonly value: number | string | null;
+  readonly source: "ai_video_estimate" | "unrecorded";
+  readonly client_unverified_estimate: number | string | null;
 }
 
 interface PillarInput {
@@ -75,19 +79,35 @@ export interface AnalysisPillarV1 {
   readonly correction: string;
 }
 
+/**
+ * S6-R1. One full-swing estimate with its source. `value` is null when it is
+ * unavailable (zero is a value). `source` "ai_video_estimate" is the model's
+ * own value from the video; "unrecorded" is a row written before sources were
+ * recorded. A client-supplied estimate (its origin cannot be verified) is a
+ * separate, unverified entry.
+ */
+export interface SwingEstimateV1 {
+  readonly value: number | string | null;
+  readonly source: "ai_video_estimate" | "unrecorded";
+  readonly clientUnverifiedEstimate: number | string | null;
+}
+
 export interface FullSwingCoachingV1 {
   readonly scoringBreakdown: string | null;
+  /** What the video did not let the model judge. */
+  readonly evidenceLimits: string | null;
   readonly faultTags: string[];
   /** Legacy rows' tips, still shown on the web history. */
   readonly suggestions: string[];
-  readonly strengths: { readonly checkpoint: string; readonly movement: string; readonly benefit: string }[];
+  /** S6-R1A: checkpoint, joint and severity are null when not assessed. */
+  readonly strengths: { readonly checkpoint: string | null; readonly movement: string; readonly benefit: string }[];
   readonly improvementAreas: {
-    readonly checkpoint: string;
+    readonly checkpoint: string | null;
     readonly joint: string | null;
     readonly description: string;
     readonly detailTitle: string;
     readonly detail: string | null;
-    readonly severity: "minor" | "major";
+    readonly severity: "minor" | "major" | null;
   }[];
   readonly drills: { readonly name: string; readonly why: string; readonly how: string; readonly feel: string }[];
   readonly posture: AnalysisPillarV1 | null;
@@ -105,15 +125,30 @@ export interface AnalysisResultV1 {
   readonly analysisFamily: "full_swing" | "putting" | null;
   readonly createdAt: string | null;
   readonly clubDisplayName: string | null;
+  /** An AI rubric score; null when the analysis could not be scored (never 0 as a default). */
   readonly score: number | null;
   readonly feedback: string | null;
+  /**
+   * Instrument-measured values. The keys are kept for compatibility, but no
+   * instrument producer exists: every value is null. The swing values that used
+   * to appear here were estimates and are now served, with their source, in
+   * `estimates`. A stored legacy swing speed is not proven to be measured, so it
+   * is not returned here either (S6-R1A).
+   */
   readonly measurements: {
-    readonly tempoRatio: number | null;
-    readonly swingSpeedMph: number | null;
-    readonly spineAngle: number | null;
-    readonly hipRotation: number | null;
-    readonly shoulderRotation: number | null;
+    readonly tempoRatio: null;
+    readonly swingSpeedMph: null;
+    readonly spineAngle: null;
+    readonly hipRotation: null;
+    readonly shoulderRotation: null;
   };
+  /** S6-R1. Full-swing estimates with their sources; null for a putt. */
+  readonly estimates: {
+    readonly spineAngle: SwingEstimateV1;
+    readonly hipRotation: SwingEstimateV1;
+    readonly shoulderRotation: SwingEstimateV1;
+    readonly tempoRatio: SwingEstimateV1;
+  } | null;
   /** Core coaching for a full-swing analysis; null for a putt. */
   readonly coaching: FullSwingCoachingV1 | null;
   /** Putting result for a putt; null for full swing. */
@@ -123,6 +158,12 @@ export interface AnalysisResultV1 {
     readonly strokeIndex: PuttingScorePresentationState | null;
   } | null;
 }
+
+const estimate = (value: EstimateInput): SwingEstimateV1 => ({
+  value: value.value,
+  source: value.source,
+  clientUnverifiedEstimate: value.client_unverified_estimate,
+});
 
 const pillar = (value: PillarInput | null | undefined): AnalysisPillarV1 | null =>
   value ? { rating: value.rating, observation: value.observation, correction: value.correction } : null;
@@ -138,6 +179,7 @@ export function toAnalysisResultV1(
     ? null
     : {
         scoringBreakdown: m.scoring_breakdown ?? null,
+        evidenceLimits: m.evidence_limits ?? null,
         faultTags: [...(m.fault_tags ?? [])],
         suggestions: [...(m.suggestions ?? [])],
         strengths: view.swing_highlights.map((h) => ({
@@ -147,7 +189,12 @@ export function toAnalysisResultV1(
         })),
         improvementAreas: view.mechanical_deficiencies.map((d) => ({
           checkpoint: d.checkpoint,
-          joint: typeof d.joint_coordinate === "string" ? d.joint_coordinate : d.joint_coordinate.joint || null,
+          joint:
+            d.joint_coordinate === null
+              ? null
+              : typeof d.joint_coordinate === "string"
+                ? d.joint_coordinate
+                : d.joint_coordinate.joint || null,
           description: d.fault_description,
           detailTitle: d.corrective_drill_title,
           detail: d.corrective_drill_detail,
@@ -171,15 +218,24 @@ export function toAnalysisResultV1(
     clubDisplayName: getHistoricalEquipmentDisplayName(view.equipment_snapshot),
     score: view.score,
     feedback: view.feedback,
-    // Same precedence as the web history: the dedicated column, then the
-    // current metrics key, then the legacy *_deg key.
     measurements: {
-      tempoRatio: view.tempo_ratio,
-      swingSpeedMph: view.swing_speed_mph,
-      spineAngle: view.spine_angle ?? m.spine_angle ?? m.spine_angle_deg ?? null,
-      hipRotation: view.hip_rotation ?? m.hip_rotation ?? m.hip_rotation_deg ?? null,
-      shoulderRotation: view.shoulder_rotation ?? m.shoulder_rotation ?? m.shoulder_rotation_deg ?? null,
+      tempoRatio: null,
+      swingSpeedMph: null,
+      spineAngle: null,
+      hipRotation: null,
+      shoulderRotation: null,
     },
+    // S6-R1. Value and source from the read authority's full_swing_metrics,
+    // the same values the web surfaces present. Not measurements.
+    estimates:
+      isPutt || view.full_swing_metrics === null
+        ? null
+        : {
+            spineAngle: estimate(view.full_swing_metrics.spine_angle),
+            hipRotation: estimate(view.full_swing_metrics.hip_rotation),
+            shoulderRotation: estimate(view.full_swing_metrics.shoulder_rotation),
+            tempoRatio: estimate(view.full_swing_metrics.tempo_ratio),
+          },
     coaching,
     // As on the web page: a result is shown only for a completed analysis, so
     // an envelope left on a failed or re-running row is never presented.

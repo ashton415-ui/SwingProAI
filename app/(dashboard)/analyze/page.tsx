@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
 import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
+import { ASSESSMENT_LABEL, SCORE_BASIS, UNSCORED_COPY, UNSCORED_LABEL } from "@/lib/swing-metric-presentation";
 import {
   canonicalUploadFileName,
   MAX_ANALYSIS_VIDEO_BYTES,
@@ -122,7 +123,8 @@ const ANALYSIS_CONNECTION_LOST_MESSAGE =
 interface SwingDrill { name: string; why: string; how: string; feel: string; videoUrl: string; }
 interface OverlayMetric { feedback: string; overlay: { x1: number; y1: number; x2: number; y2: number }; }
 interface AnalysisResult {
-  feedback: string; score: number; weakSpots: string[];
+  /** S6-R1: null when the analysis could not be scored; never replaced by 0. */
+  feedback: string; score: number | null; weakSpots: string[];
   drills: SwingDrill[];
   metrics: {
     swingSpeed: number; ballSpeed: number; launchAngle: number; smashFactor: number;
@@ -508,7 +510,7 @@ export default function AnalyzePage() {
     })();
     return {
       feedback:          String(row.feedback ?? ""),
-      score:             typeof row.score === "number" ? row.score : 0,
+      score:             typeof row.score === "number" && Number.isFinite(row.score) ? row.score : null,
       scoring_breakdown: typeof m.scoring_breakdown === "string" ? m.scoring_breakdown : undefined,
       weakSpots:  defs.slice(0, 4).map((d) => d.fault_description ?? "").filter(Boolean),
       drills:     rawDrills.map((d) => ({
@@ -1466,8 +1468,13 @@ export default function AnalyzePage() {
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-golf-surface p-6 rounded-2xl border border-golf-green/20">
                 <p className="text-[9px] text-gray-500 font-black uppercase tracking-widest mb-2">Swing Score</p>
-                <p className={`text-5xl font-black italic ${result.score >= 80 ? "text-golf-green" : result.score >= 60 ? "text-amber-400" : "text-red-400"}`}>
-                  {result.score}
+                {result.score !== null ? (
+                  <p className="text-5xl font-black italic text-white">{result.score}</p>
+                ) : (
+                  <p className="text-2xl font-black uppercase tracking-widest text-gray-400">{UNSCORED_LABEL}</p>
+                )}
+                <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
+                  {result.score !== null ? SCORE_BASIS : UNSCORED_COPY}
                 </p>
                 {result.scoring_breakdown && (
                   <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
@@ -1490,7 +1497,7 @@ export default function AnalyzePage() {
             <div className="p-5 bg-golf-green/5 border border-golf-green/20 rounded-2xl">
               <div className="flex items-center gap-2 mb-3">
                 <Info size={14} className="text-golf-green" />
-                <span className="text-[9px] font-black text-golf-green uppercase tracking-widest">AI Biomechanical Evaluation</span>
+                <span className="text-[9px] font-black text-golf-green uppercase tracking-widest">{ASSESSMENT_LABEL}</span>
               </div>
               <p className="text-sm text-gray-300 leading-relaxed">{result.feedback}</p>
             </div>

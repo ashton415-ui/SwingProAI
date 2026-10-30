@@ -207,16 +207,68 @@ select id, user_id, storage_path, video_url, created_at
     a Storage outage or a provider failure with a usable video, keeps Retry.
     Compatibility: it works for rows failed before this change, and stays
     correct if a row later fails for a different reason.
-- **Measurement provenance.**
-  - `mediapipeMetrics` are computed on the golfer's device and cannot be
-    verified by the server. The prompt labels them "client-reported
-    estimates", tells the model to check each against the video, and to state
-    uncertainty (not agreement) where the video disagrees or cannot show it.
-  - The stored `spine_angle`, `hip_rotation`, `shoulder_rotation` and
-    `tempo_ratio` keep the client estimate when one was sent, else the model's
-    own visual estimate. No column records which; neither is an instrument
-    measurement. Labelling stored values by source needs a product and schema
-    decision. No live client currently sends `mediapipeMetrics`.
+- **Measurement provenance (S6-R1, D1 + P1; local, uncommitted).**
+  - `mediapipeMetrics` are client-supplied: sent with the request, and the
+    server cannot verify where they came from or how they were produced. The
+    prompt lists accepted values as client-supplied estimates (unverified),
+    with no ranges, ratings or implied causes, and tells the
+    model to check each against the video and never copy one into its own
+    estimate fields. No live client currently sends `mediapipeMetrics`
+    (`SwingUploader` is not mounted).
+  - The model's `spine_angle`, `hip_rotation`, `shoulder_rotation` and
+    `tempo_ratio` are its own approximate estimates from the video, or null
+    when the video does not show them. The stored columns hold those values;
+    a client estimate never replaces one, including an unavailable one.
+  - Value and source are recorded together in
+    `metrics.metric_evidence` (`schema_version` 1): per metric,
+    `ai_video_estimate` and `client_unverified_estimate`, assigned by the
+    server. No migration: the key lives in the existing `metrics` jsonb.
+  - The read authority serves `full_swing_metrics` (value, source and any
+    unverified client value) from that evidence. Rows written before it are
+    `unrecorded`: their column value, else the same-named metrics key; the
+    legacy `*_deg` keys are not read. The native v1 DTO serves these as
+    `estimates`; `measurements` carries instrument-measured values only.
+  - A full-swing analysis the video cannot score completes with `score` null
+    (the column is nullable and no constraint or trigger requires a score);
+    it is never stored as 0 or as the rubric's starting value.
+  - A provider answer completes only on an explicit `STOP`
+    (`lib/gemini-completion-policy.ts`), for both families.
+- **S6-R1A corrections (local, uncommitted).**
+  - Scored versus unscored is decided by explicit, validated
+    `evidence_coverage` (address, top of backswing, impact: booleans), never
+    by reading free text. A score exists only when all three are covered and
+    at least one pillar is rated, and lies within the rubric's clamp (55-99).
+    Full coverage is necessary for a score but does not require one: an
+    unscored result with full coverage, explained in `scoring_breakdown`, is
+    valid when other limits (for example timing the video cannot show) prevent
+    applying the rubric (S6-R1B). A score without coverage, or a pillar rated
+    without its position covered, is refused, not repaired. The rubric's items,
+    weights and clamp are unchanged. Coverage is stored in `metrics` and not
+    served.
+  - The v1 DTO keeps the `measurements` keys (`tempoRatio`, `swingSpeedMph`,
+    `spineAngle`, `hipRotation`, `shoulderRotation`), all `null`: no
+    instrument producer exists, and a stored legacy swing speed is not proven
+    to be measured. The values are in `estimates` with their source.
+  - Highlight and deficiency `checkpoint`, deficiency `joint_coordinate` and
+    `severity` are `null` when not assessed. New rows store `null`. Repository
+    history shows the route always wrote `checkpoint: "impact"` and positions
+    `x/y 0.5`, and since e2b1dda `severity: "minor"` with joint `"general"`;
+    the read authority serves those constants as `null`, drops positions, and
+    keeps a model-named area and its severity from the first producer. Result
+    contract change: `AnalysisHighlight.checkpoint`,
+    `AnalysisDeficiency.checkpoint`, `.joint_coordinate` (now
+    `{ joint } | string | null`, no x/y) and `.severity`, and the v1
+    `strengths[].checkpoint`, `improvementAreas[].checkpoint`, `.joint` and
+    `.severity`, are nullable.
+  - `nullable` in the response schema is part of the provider's documented
+    `Schema` object (Gemini API reference, `ai.google.dev/api/generate-content`,
+    Schema: "Represents a select subset of an OpenAPI 3.0 schema object";
+    `nullable` boolean, "Optional. Indicates if the value may be null.") and of
+    the installed SDK 0.24.1 `BaseSchema` ("If true, the value can be null.").
+    The serialized request is checked offline against a loopback fake
+    provider; acceptance by the live service remains unverified and belongs
+    within the first separately authorized S6 scenario (no separate provider
+    probe).
 
 ## 3. Activation sequence (each step separately authorized)
 
@@ -439,8 +491,8 @@ request takes it over.
   - real-provider (Gemini) quality acceptance, including how the model
     handles disagreement with client estimates (only prompt construction is
     proven);
-  - user-facing measurement provenance: stored swing metrics are not labelled
-    as estimates or by source on the report and history pages (section 2,
-    "Measurement provenance").
+  - user-facing measurement provenance: addressed locally by S6-R1 (estimates
+    shown approximately with their source; section 2), which is uncommitted
+    and not yet provider-tested; generated coaching quality remains unproven.
 - Separate authorization for commit, push, PR, database and production
   actions.

@@ -11,6 +11,13 @@ import {
   type PersistedPuttingAnalysisV1,
 } from "@/lib/putting-analysis-contract";
 import { isPersistedPuttingScoreV1 } from "@/lib/putting-score-presentation-eq5f-f";
+import {
+  FULL_SWING_METRIC_KEYS,
+  isAngleEstimate,
+  isTempoEstimate,
+  readMetricEvidence,
+  type FullSwingMetricKey,
+} from "@/lib/full-swing-analysis-contract";
 
 /**
  * SwingProAI — unified analysis-result read authority (ENT-1C).
@@ -36,8 +43,9 @@ import { isPersistedPuttingScoreV1 } from "@/lib/putting-score-presentation-eq5f
  * Classification of the stored payload (ENT-1C product rulings):
  *
  *   core, every legitimate account (FREE included, kept after a downgrade):
- *     score, feedback, measurements, swing_highlights, mechanical_deficiencies,
- *     and the named metrics keys below — scoring breakdown, fault tags,
+ *     score, feedback, swing estimates (full_swing_metrics: each value with its
+ *     source, S6-R1), swing_highlights, mechanical_deficiencies,
+ *     and the named metrics keys below — scoring breakdown, evidence limits, fault tags,
  *     foundational drills, posture / swing-plane / impact notes, practice
  *     focus, pro cue and feel. The current producer writes all of these
  *     identically for every tier, so none of it is an advanced or ultra-deep
@@ -66,17 +74,26 @@ export const ANALYSIS_PAYLOAD_COLUMNS =
 
 // ─── Result shape ─────────────────────────────────────────────────────────────
 
+/**
+ * S6-R1A. checkpoint, joint and severity are null when not assessed. The only
+ * producer (app/api/analyze-swing/route.ts) has never assessed a checkpoint or
+ * a joint position: since its first version it wrote checkpoint "impact" and
+ * x/y 0.5 for every item, and since e2b1dda severity "minor" with joint
+ * "general". Those exact constants are read as "not assessed"; anything else a
+ * row carries is kept as stored.
+ */
 export interface AnalysisHighlight {
-  readonly checkpoint: string;
+  readonly checkpoint: string | null;
   readonly positive_movement: string;
   readonly mechanical_benefit: string;
 }
 
 export interface AnalysisDeficiency {
-  readonly checkpoint: string;
-  readonly joint_coordinate: { readonly joint: string; readonly x: number; readonly y: number } | string;
+  readonly checkpoint: string | null;
+  /** A named joint or area when one was recorded; positions are never served (never assessed). */
+  readonly joint_coordinate: { readonly joint: string } | string | null;
   readonly fault_description: string;
-  readonly severity: "minor" | "major";
+  readonly severity: "minor" | "major" | null;
   /**
    * Named for a drill, but the current producer writes the fault's explanation
    * here and leaves the title empty. Classified as core improvement-area text.
@@ -101,6 +118,8 @@ export interface AnalysisDrill {
 /** The core metrics keys. Every other key in the stored jsonb is dropped. */
 export interface AnalysisCoreMetrics {
   scoring_breakdown?: string;
+  /** S6-R1: what the video did not let the model judge. */
+  evidence_limits?: string;
   spine_angle?: number;
   hip_rotation?: number;
   shoulder_rotation?: number;
@@ -143,6 +162,11 @@ export interface AnalysisResultView {
   readonly spine_angle: number | null;
   readonly hip_rotation: number | null;
   readonly shoulder_rotation: number | null;
+  /**
+   * S6-R1. The four full-swing estimates, each with the source it was stored
+   * under; null for a putt. The surfaces present these, never the raw columns.
+   */
+  readonly full_swing_metrics: FullSwingMetricsView | null;
   readonly metrics: AnalysisCoreMetrics | null;
   readonly swing_highlights: AnalysisHighlight[];
   readonly mechanical_deficiencies: AnalysisDeficiency[];
@@ -163,24 +187,50 @@ const num = (value: unknown): number | undefined =>
 const strList = (value: unknown): string[] | undefined =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : undefined;
 
+/** The producer's constant checkpoint: never an assessment (see AnalysisHighlight). */
+const PLACEHOLDER_CHECKPOINT = "impact";
+
+/** A stored checkpoint, or null when absent, empty or the producer's constant. */
+function assessedCheckpoint(value: unknown): string | null {
+  const checkpoint = str(value);
+  return checkpoint && checkpoint !== PLACEHOLDER_CHECKPOINT ? checkpoint : null;
+}
+
 export function sanitizeHighlights(value: unknown): AnalysisHighlight[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     if (!isRecord(item)) return [];
     return [{
-      checkpoint: str(item.checkpoint) ?? "",
+      checkpoint: assessedCheckpoint(item.checkpoint),
       positive_movement: str(item.positive_movement) ?? "",
       mechanical_benefit: str(item.mechanical_benefit) ?? "",
     }];
   });
 }
 
+/** The producer's constant joint name since e2b1dda: never an assessment. */
+const PLACEHOLDER_JOINT = "general";
+
+/** A named joint or area, or null. Coordinates are dropped: none was ever assessed. */
 function sanitizeJoint(value: unknown): AnalysisDeficiency["joint_coordinate"] {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return value.trim() && value !== PLACEHOLDER_JOINT ? value : null;
   if (isRecord(value)) {
-    return { joint: str(value.joint) ?? "", x: num(value.x) ?? 0, y: num(value.y) ?? 0 };
+    const joint = str(value.joint);
+    return joint && joint.trim() && joint !== PLACEHOLDER_JOINT ? { joint } : null;
   }
-  return { joint: "", x: 0, y: 0 };
+  return null;
+}
+
+/**
+ * A stored severity, or null. Rows carrying the producer's placeholder joint
+ * ("general") were written with the constant "minor", which is not an
+ * assessment; rows from the first producer (a model-named area) keep theirs.
+ */
+function assessedSeverity(item: Record<string, unknown>): AnalysisDeficiency["severity"] {
+  const joint = item.joint_coordinate;
+  const placeholder = isRecord(joint) ? joint.joint === PLACEHOLDER_JOINT : joint === PLACEHOLDER_JOINT;
+  if (placeholder) return null;
+  return item.severity === "major" || item.severity === "minor" ? item.severity : null;
 }
 
 export function sanitizeDeficiencies(value: unknown): AnalysisDeficiency[] {
@@ -188,10 +238,10 @@ export function sanitizeDeficiencies(value: unknown): AnalysisDeficiency[] {
   return value.flatMap((item) => {
     if (!isRecord(item)) return [];
     return [{
-      checkpoint: str(item.checkpoint) ?? "",
+      checkpoint: assessedCheckpoint(item.checkpoint),
       joint_coordinate: sanitizeJoint(item.joint_coordinate),
       fault_description: str(item.fault_description) ?? "",
-      severity: item.severity === "major" ? "major" : "minor",
+      severity: assessedSeverity(item),
       corrective_drill_title: str(item.corrective_drill_title) ?? "",
       corrective_drill_detail: str(item.corrective_drill_detail) ?? null,
     }];
@@ -228,6 +278,7 @@ export function sanitizeCoreMetrics(value: unknown): AnalysisCoreMetrics | null 
     if (v !== undefined) out[key] = v;
   };
   assign("scoring_breakdown", str(value.scoring_breakdown));
+  assign("evidence_limits", str(value.evidence_limits));
   assign("spine_angle", num(value.spine_angle));
   assign("hip_rotation", num(value.hip_rotation));
   assign("shoulder_rotation", num(value.shoulder_rotation));
@@ -245,6 +296,68 @@ export function sanitizeCoreMetrics(value: unknown): AnalysisCoreMetrics | null 
   assign("pro_cue", str(value.pro_cue));
   assign("the_feel", str(value.the_feel));
   assign("putting_analysis", str(value.putting_analysis));
+  return out;
+}
+
+// ─── Full-swing estimates: value and source together (S6-R1) ──────────────────
+
+/**
+ * Where a presented value came from. "ai_video_estimate": the model's own
+ * value from the video, recorded with its source. "unrecorded": a row written
+ * before sources were recorded, so the origin of its value is not known.
+ */
+export type FullSwingMetricSource = "ai_video_estimate" | "unrecorded";
+
+export interface FullSwingMetricView {
+  /** Null when the value is unavailable. Zero is a value. */
+  readonly value: number | string | null;
+  readonly source: FullSwingMetricSource;
+  /** A client-supplied estimate recorded beside the value; unverified (origin cannot be verified), never the value. */
+  readonly client_unverified_estimate: number | string | null;
+}
+
+export type FullSwingMetricsView = Readonly<Record<FullSwingMetricKey, FullSwingMetricView>>;
+
+/** A legacy numeric tempo column (e.g. 2.5) in the stored "N:1" form, or null. */
+function legacyTempo(value: unknown): string | null {
+  const n = num(value);
+  if (n === undefined || n <= 0 || n >= 100) return null;
+  const formatted = `${Math.round(n * 100) / 100}:1`;
+  return isTempoEstimate(formatted) ? formatted : null;
+}
+
+/**
+ * The four estimates from the canonical stored fields only.
+ *
+ * A row with recorded metric evidence is read from that evidence alone: the
+ * value is the AI's estimate (null when the video did not show it) and the
+ * client's estimate stays a separate, unverified entry. A row without it
+ * predates source recording, so its value — the dedicated column, else the
+ * same-named metrics key that rows written before the columns carry — is
+ * "unrecorded". The legacy *_deg keys are not read: no current producer writes
+ * them. Every value is re-validated; anything malformed is unavailable.
+ */
+export function resolveFullSwingMetrics(row: Record<string, unknown>): FullSwingMetricsView {
+  const metrics = isRecord(row.metrics) ? row.metrics : {};
+  const evidence = readMetricEvidence(metrics.metric_evidence);
+  const out = {} as Record<FullSwingMetricKey, FullSwingMetricView>;
+  for (const key of FULL_SWING_METRIC_KEYS) {
+    if (evidence) {
+      out[key] = {
+        value: evidence[key].ai_video_estimate,
+        source: "ai_video_estimate",
+        client_unverified_estimate: evidence[key].client_unverified_estimate,
+      };
+      continue;
+    }
+    let value: number | string | null;
+    if (key === "tempo_ratio") {
+      value = isTempoEstimate(metrics.tempo_ratio) ? metrics.tempo_ratio : legacyTempo(row.tempo_ratio);
+    } else {
+      value = isAngleEstimate(row[key]) ? (row[key] as number) : isAngleEstimate(metrics[key]) ? (metrics[key] as number) : null;
+    }
+    out[key] = { value, source: "unrecorded", client_unverified_estimate: null };
+  }
   return out;
 }
 
@@ -280,6 +393,7 @@ export function serializeAnalysisResult(
     spine_angle: num(row.spine_angle) ?? null,
     hip_rotation: num(row.hip_rotation) ?? null,
     shoulder_rotation: num(row.shoulder_rotation) ?? null,
+    full_swing_metrics: family === "putting" ? null : resolveFullSwingMetrics(row),
     metrics: sanitizeCoreMetrics(row.metrics),
     swing_highlights: sanitizeHighlights(row.swing_highlights),
     mechanical_deficiencies: sanitizeDeficiencies(row.mechanical_deficiencies),

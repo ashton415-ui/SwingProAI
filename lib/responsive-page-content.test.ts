@@ -1258,68 +1258,51 @@ describe("Progress Hub — phone telemetry renderer and desktop table", () => {
 });
 
 // ============================================================================
-// Telemetry Equipment Optimizer — narrow-screen header containment (RW3-S1)
+// Telemetry swing estimates — narrow-screen containment (RW3-S1, S6-R1)
 // ============================================================================
+//
+// S6-R1 removed the Equipment Optimizer (estimates from video cannot support
+// shaft, driver or ball advice), so its header containment no longer applies.
+// The same narrow-screen intent now covers the estimate cards that replaced
+// the metric cards: they wrap rather than clip, shrink without squeezing, and
+// truncate nothing.
 
-/**
- * Isolates the Equipment Optimizer header row: from the component's header
- * marker through the start of its three insight tiles.
- */
-function isolateEquipmentOptimizerHeader(source: string): string {
-  const startMarker = "function EquipmentOptimizer(";
+/** Isolates the EstimateCard component. */
+function isolateEstimateCard(source: string): string {
+  const startMarker = "function EstimateCard(";
   const startIdx = source.indexOf(startMarker);
   expect(startIdx, `${TELEMETRY_PAGE_FILE}: could not locate "${startMarker}"`).toBeGreaterThanOrEqual(0);
-  const headerIdx = source.indexOf("{/* Header */}", startIdx);
-  expect(headerIdx, `${TELEMETRY_PAGE_FILE}: could not locate the optimizer header marker`).toBeGreaterThan(startIdx);
-  const endMarker = "{/* Three insight tiles */}";
-  const endIdx = source.indexOf(endMarker, headerIdx);
-  expect(endIdx, `${TELEMETRY_PAGE_FILE}: could not locate "${endMarker}"`).toBeGreaterThan(headerIdx);
-  return source.slice(headerIdx, endIdx);
+  const endIdx = source.indexOf("\n}\n", startIdx);
+  expect(endIdx, `${TELEMETRY_PAGE_FILE}: could not find the end of EstimateCard`).toBeGreaterThan(startIdx);
+  return source.slice(startIdx, endIdx);
 }
 
-describe("Telemetry Equipment Optimizer — narrow-screen header containment", () => {
-  it("header row permits wrapping instead of clipping", () => {
-    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
-    const rowMatch = header.match(/<div className="([^"]*)"/);
-    expect(rowMatch, `${TELEMETRY_PAGE_FILE}: could not isolate the optimizer header row`).not.toBeNull();
-    const tokens = rowMatch![1].split(/\s+/).filter(Boolean);
-    expect(tokens, "optimizer header row must remain a flex row").toContain("flex");
-    expect(tokens, "optimizer header row must be allowed to wrap on narrow screens").toContain("flex-wrap");
-  });
-
-  it("the flexible title container is allowed to shrink", () => {
-    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
-    expect(
-      header,
-      `${TELEMETRY_PAGE_FILE}: the flex-1 title container must carry min-w-0`
-    ).toContain('className="flex-1 min-w-0"');
-  });
-
-  it("the HSI pill stays intact and shrink-protected", () => {
-    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
-    const pill = header.match(/<div className="([^"]*rounded-full[^"]*)"/);
-    expect(pill, `${TELEMETRY_PAGE_FILE}: could not isolate the HSI pill`).not.toBeNull();
-    expect(pill![1].split(/\s+/).filter(Boolean), "HSI pill must not be squeezed").toContain("shrink-0");
-    expect(header, "HSI value must remain").toContain("insight.hipSpeedIndex");
-    expect(header, "HSI label must remain").toContain("HSI");
-  });
-
-  it("the attack-angle label stays intact and shrink-protected", () => {
-    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
-    expect(header, "attack-angle label must not be squeezed").toMatch(/tracking-widest shrink-0 \$\{attackColor\}/);
-    expect(header, "attack-angle label text must remain").toContain("{attackLabel}");
-  });
-
-  it("the optimizer header truncates nothing to fit", () => {
-    const header = isolateEquipmentOptimizerHeader(readSource(TELEMETRY_PAGE_FILE));
-    expect(header, "optimizer header must not truncate its title").not.toContain("truncate");
-    expect(header, "optimizer title text must remain").toContain("Equipment Optimizer Insight");
-  });
-
-  it("all three optimizer insight tiles remain present", () => {
+describe("Telemetry swing estimates — narrow-screen containment", () => {
+  it("the estimate row wraps instead of clipping", () => {
     const source = readSource(TELEMETRY_PAGE_FILE);
-    for (const tile of ["Shaft Flex", "Driver Config", "Ball Spec"]) {
-      expect(source, `${TELEMETRY_PAGE_FILE}: optimizer tile "${tile}" missing`).toContain(tile);
+    const row = source.indexOf("{log.estimates.map((metric) => (");
+    expect(row, `${TELEMETRY_PAGE_FILE}: could not locate the estimate row`).toBeGreaterThan(0);
+    const container = source.slice(source.lastIndexOf("<div", row), row);
+    expect(container, "estimate row must be a wrapping flex row").toContain('className="flex flex-wrap gap-3"');
+  });
+
+  it("each card shares the row and keeps a readable minimum width", () => {
+    const card = isolateEstimateCard(readSource(TELEMETRY_PAGE_FILE));
+    expect(card).toContain("flex-1 min-w-[130px]");
+  });
+
+  it("an estimate card truncates nothing to fit", () => {
+    const card = isolateEstimateCard(readSource(TELEMETRY_PAGE_FILE));
+    expect(card).not.toContain("truncate");
+    for (const part of ["{metric.display}", "{metric.label}", "{metric.sourceLabel}"]) {
+      expect(card, `estimate card lost ${part}`).toContain(part);
+    }
+  });
+
+  it("the Equipment Optimizer and its derived advice stay removed", () => {
+    const source = readSource(TELEMETRY_PAGE_FILE);
+    for (const removed of ["function EquipmentOptimizer(", "Equipment Optimizer Insight", "hipSpeedIndex", "HSI", "Shaft Flex", "Driver Config", "Ball Spec"]) {
+      expect(source, `${TELEMETRY_PAGE_FILE}: removed optimizer element returned: ${removed}`).not.toContain(removed);
     }
   });
 });

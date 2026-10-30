@@ -9,24 +9,43 @@
  *      (it guards on `typeof window === "undefined"`).  Any real numbers arrive
  *      via the optional `mediapipeMetrics` field in the request body, which the
  *      AnalysisReport client component should pre-compute and include.
- * 3. Merge server-side (null) and client-side metrics — client values win.
+ * 3. Accept only well-formed client-supplied estimates. The server cannot
+ *    verify where they came from, so they are unverified: shown to the model
+ *    as client-supplied estimates and recorded beside the AI's own values,
+ *    never in place of them (S6-R1, S6-R1A).
  * 4. Fetch the raw video bytes (up to MAX_ANALYSIS_VIDEO_BYTES = 14 MB).
  *    ENT-1D: a video that cannot be loaded — missing, empty, oversized,
  *    unrecognised, or not fetchable right now — ends the request before the
  *    model is called. Client metrics never stand in for the video, and
  *    nothing is scored or stored (videoLoadRefused).
- * 5. Call Gemini 1.5 Pro with:
- *    a) A world-class PGA coach system instruction with embedded diagnostic rules
+ * 5. Call gemini-2.5-flash once (lib/gemini-transport.ts) with:
+ *    a) an evidence-first system instruction: no credentials, no uncited
+ *       targets, no forced numbers or causes, an explicit "cannot judge" path
  *    b) Inline video base64
- *    c) Raw biomechanical numbers with plain-English clinical interpretations
+ *    c) Any client estimates, labelled unverified
  *    d) JSON-only response format
- * 6. Parse the JSON response, validate required fields, log any failures.
- * 7. Write results to swing_analysis and return.
+ * 6. Complete only on an explicit STOP (lib/gemini-completion-policy.ts), then
+ *    parse and validate the whole object (lib/full-swing-analysis-contract.ts).
+ * 7. Write results to swing_analysis and return. An analysis the video cannot
+ *    score completes with score null, never a default.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { SchemaType, type Schema } from "@google/generative-ai";
 import { GeminiHttpError, generateContentOnce, responseText } from "@/lib/gemini-transport";
+import {
+  describeGeminiResponse,
+  logGeminiResponseDiagnostics,
+  withTextLength,
+  type GeminiResponseDiagnostics,
+  type ResponseOutcome,
+} from "@/lib/gemini-response-diagnostics";
+import { decideProviderCompletion } from "@/lib/gemini-completion-policy";
+import {
+  PILLAR_RATINGS,
+  buildMetricEvidence,
+  validateFullSwingModelResponse,
+} from "@/lib/full-swing-analysis-contract";
 import { createClient } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { extractSwingMetrics } from "@/lib/biometrics";
@@ -82,18 +101,17 @@ function resolveGeminiKey(): string | undefined {
 interface RequestBody {
   analysisId: string;
   /**
-   * Pre-computed MediaPipe metrics from the client component.
-   * The server-side extractSwingMetrics() call always returns null (browser-only),
-   * so the client should call extractSwingMetrics(signedUrl) before hitting this
-   * endpoint and pass the results here.  All fields are optional — the prompt
-   * gracefully handles missing values.
+   * Client-supplied estimates (field name kept for compatibility). The server
+   * cannot verify where they came from or how they were produced, so they are
+   * unverified: listed to the model as such and stored beside, never in place
+   * of, the AI's own values (S6-R1A). All fields are optional.
    */
   mediapipeMetrics?: {
     spineAngle?:        number | null;
     hipRotation?:       number | null;
     shoulderRotation?:  number | null;
     tempoRatio?:        string | null;
-    setupSpineAngle?:   number | null;   // for early-extension diagnosis
+    setupSpineAngle?:   number | null;   // listed to the model as an unverified pair
     impactSpineAngle?:  number | null;
   };
 }
@@ -119,11 +137,12 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-// ── Biomechanical interpretation rules ────────────────────────────────────────
-// Each rule maps a client-reported estimate to a plain-English reading of what
-// that value would indicate. ENT-1D: the values are computed on the golfer's
-// device and sent with the request, so the server cannot verify them; every
-// reading is framed as "if the estimate holds", never as a confirmed finding.
+// ── Client-supplied estimates for the prompt ─────────────────────────────────
+// ENT-1D S6-R1/S6-R1A. Values a client sent with the request. The server
+// cannot verify where they came from or how they were produced, so they are
+// listed as client-supplied estimates, unverified, and nothing more: no ranges,
+// ratings, benchmarks or implied causes are attached, and the model is told to
+// check each against the video.
 
 function buildMetricsContext(metrics: {
   spineAngle?:       number | null;
@@ -133,91 +152,22 @@ function buildMetricsContext(metrics: {
   setupSpineAngle?:  number | null;
   impactSpineAngle?: number | null;
 }): string {
-  const lines: string[] = [
-    "=== CLIENT-REPORTED ESTIMATES: what each value would indicate (not independently verified) ===",
-  ];
-
-  // Spine angle at address
-  if (metrics.spineAngle != null) {
-    const s = metrics.spineAngle;
-    let dx = "";
-    if (s < 30)       dx = "⚠ CRITICAL: Spine too upright at address (<30°). Expect thin contact and poor weight transfer.";
-    else if (s < 35)  dx = "⚠ Slightly upright spine angle. Address posture should deepen by 5-10°.";
-    else if (s <= 45) dx = "✓ Ideal spine angle range (35-45°). Solid foundation.";
-    else if (s <= 50) dx = "⚠ Slightly excessive tilt. Monitor for early extension to compensate.";
-    else              dx = "⚠ Excessive spine tilt (>50°). High risk of reverse pivot.";
-    lines.push(`Spine Angle (address): ${s}° — ${dx}`);
-  } else {
-    lines.push("Spine Angle: not supplied — estimate from visual posture cues.");
-  }
-
-  // Early extension diagnosis (setup vs impact spine angle change)
+  const supplied: string[] = [];
+  if (metrics.spineAngle != null)       supplied.push(`  Spine angle at address: ${metrics.spineAngle}°`);
+  if (metrics.shoulderRotation != null) supplied.push(`  Shoulder rotation at the top: ${metrics.shoulderRotation}°`);
+  if (metrics.hipRotation != null)      supplied.push(`  Hip rotation at impact: ${metrics.hipRotation}°`);
+  if (metrics.tempoRatio != null)       supplied.push(`  Tempo ratio (backswing:downswing): ${metrics.tempoRatio}`);
   if (metrics.setupSpineAngle != null && metrics.impactSpineAngle != null) {
-    const drop = metrics.setupSpineAngle - metrics.impactSpineAngle;
-    if (drop > 5) {
-      lines.push(`Early extension indicated by the estimates: spine angle drops ${drop.toFixed(1)}° from setup (${metrics.setupSpineAngle}°) to impact (${metrics.impactSpineAngle}°). If the video confirms it, hips are thrusting toward the ball — causes blocks, pulls, and thin strikes.`);
-    } else if (drop < -5) {
-      lines.push(`Standing up indicated by the estimates: spine angle increases ${Math.abs(drop).toFixed(1)}° at impact. If the video confirms it, posture is lost through the ball — causes topped shots and inconsistent contact.`);
-    } else {
-      lines.push(`Spine angle maintenance: the estimates show it stable within ${Math.abs(drop).toFixed(1)}° from address to impact.`);
-    }
+    supplied.push(`  Spine angle at setup / at impact: ${metrics.setupSpineAngle}° / ${metrics.impactSpineAngle}°`);
   }
-
-  // Shoulder rotation at top of backswing
-  if (metrics.shoulderRotation != null) {
-    const r = metrics.shoulderRotation;
-    let dx = "";
-    if (r < 70)       dx = "⚠ CRITICAL: Severely restricted backswing (<70°). Major power and timing loss.";
-    else if (r < 80)  dx = "⚠ Below-average shoulder turn (70-80°). Common in older/less flexible golfers. Work on thoracic mobility.";
-    else if (r <= 95) dx = "✓ Good shoulder rotation. Solid coil for power.";
-    else if (r <= 105) dx = "✓ Excellent shoulder turn. Tour-level rotation.";
-    else              dx = "⚠ Over-rotation risk (>105°). May introduce loop or loss of control.";
-    lines.push(`Shoulder Rotation (top of swing): ${r}° — ${dx}`);
-  } else {
-    lines.push("Shoulder Rotation: not supplied — estimate from visual backswing extent.");
+  if (supplied.length === 0) {
+    return "CLIENT-SUPPLIED ESTIMATES: none were supplied. Use only what the video shows.";
   }
-
-  // Hip rotation at impact
-  if (metrics.hipRotation != null) {
-    const h = metrics.hipRotation;
-    let dx = "";
-    if (h < 30)       dx = "⚠ CRITICAL: Insufficient hip clearance (<30°). Arms will race ahead of body — blocks and pushes.";
-    else if (h < 40)  dx = "⚠ Below-average hip drive (30-40°). Body not leading the downswing.";
-    else if (h <= 50) dx = "✓ Good hip rotation at impact. Strong sequencing.";
-    else if (h <= 60) dx = "✓ Excellent hip clearance. Tour-level body rotation.";
-    else              dx = "⚠ Possibly excessive hip rotation (>60°). Watch for early extension compensation.";
-    lines.push(`Hip Rotation (impact): ${h}° — ${dx}`);
-  } else {
-    lines.push("Hip Rotation: not supplied — estimate from visual hip position at impact.");
-  }
-
-  // X-Factor (shoulder turn relative to hip turn — power differential)
-  if (metrics.shoulderRotation != null && metrics.hipRotation != null) {
-    const xFactor = metrics.shoulderRotation - metrics.hipRotation;
-    if (xFactor >= 45)       lines.push(`X-Factor: ${xFactor.toFixed(0)}° separation — excellent power loading.`);
-    else if (xFactor >= 30)  lines.push(`X-Factor: ${xFactor.toFixed(0)}° separation — good. Average tour X-Factor is 45°.`);
-    else if (xFactor >= 15)  lines.push(`X-Factor: ${xFactor.toFixed(0)}° separation — below average. Insufficient shoulder-hip differential, reducing stored power.`);
-    else                     lines.push(`X-Factor: ${xFactor.toFixed(0)}° — MINIMAL separation. Body and shoulders turning together destroys power; work on hip resistance in backswing.`);
-  }
-
-  // Tempo ratio
-  if (metrics.tempoRatio) {
-    const t = metrics.tempoRatio;
-    const num = parseTempoRatioToNumber(t);
-    let dx = "";
-    if (num != null) {
-      if (num < 2)        dx = "⚠ Extremely fast transition. Casting, no lag, power leak.";
-      else if (num < 2.5) dx = "⚠ Quick tempo — may cause early release.";
-      else if (num <= 3.5) dx = "✓ Ideal tempo range (tour average 3:1).";
-      else if (num <= 4.5) dx = "⚠ Slow tempo — risk of deceleration at impact.";
-      else                 dx = "⚠ Very slow tempo — significant power loss.";
-    }
-    lines.push(`Tempo Ratio (backswing:downswing): ${t}${dx ? " — " + dx : ""}`);
-  } else {
-    lines.push("Tempo Ratio: not supplied — assess from visual rhythm of the swing.");
-  }
-
-  return lines.join("\n");
+  return [
+    "CLIENT-SUPPLIED ESTIMATES (sent with the request; unverified — the server cannot verify where they came from, and they may be wrong):",
+    ...supplied,
+    "Check each against the video. Mention one only as a client-supplied estimate (unverified), say plainly where the video disagrees or cannot show it, and do not apply a scoring adjustment or a diagnosis on a client-supplied estimate alone. Do not copy any of them into the JSON estimate fields.",
+  ].join("\n");
 }
 
 // ── Native Structured Output schema ──────────────────────────────────────────
@@ -225,92 +175,115 @@ function buildMetricsContext(metrics: {
 // and shape at the API level, so no markdown fences can ever appear in the
 // response and JSON.parse() receives a clean string every time.
 
+// ENT-1D S6-R1. Nullable means "the video does not support a value": the
+// model may say so instead of inventing one, and the route validates the
+// whole object (lib/full-swing-analysis-contract.ts) before anything is kept.
 const pillarSchema = {
   type: SchemaType.OBJECT,
   properties: {
-    rating:      { type: SchemaType.STRING, enum: ["excellent", "good", "needs_work", "poor"] },
-    observation: { type: SchemaType.STRING },
-    correction:  { type: SchemaType.STRING },
+    rating:      { type: SchemaType.STRING, enum: [...PILLAR_RATINGS] },
+    observation: { type: SchemaType.STRING, description: "What the video shows for this area, or what it does not let you see when the rating is insufficient_evidence." },
+    correction:  { type: SchemaType.STRING, description: "One supportable adjustment for what you observed. Empty when the rating is insufficient_evidence." },
   },
   required: ["rating", "observation", "correction"],
 };
+
+const estimateDescription =
+  "Your own approximate estimate from the video, in whole degrees, or null when the video does not show it clearly. Never guess to fill the field, and do not copy a client-supplied estimate.";
 
 const RESPONSE_SCHEMA = {
   type: SchemaType.OBJECT,
   properties: {
     scoring_breakdown: {
       type: SchemaType.STRING,
-      description: "Show your math. Start at a baseline of 75 and list every addition and deduction based on the rubric. E.g., '75 + 5 (Shoulders) - 5 (Early Ext) - 3 (Laid off) = 72'.",
+      description: "If you scored: the rubric arithmetic, e.g. '75 + 5 (...) - 3 (...) = 77', listing only adjustments the video shows. If you did not score: why the video does not let you apply the rubric.",
     },
     score: {
       type: SchemaType.INTEGER,
-      description: "The exact final integer calculated in the scoring_breakdown.",
+      nullable: true,
+      description: "The final clamped integer (55-99) from scoring_breakdown, only when all three evidence_coverage positions are true and the video lets you apply the rubric; otherwise null, with the reason in scoring_breakdown. Full coverage alone does not require a score. Never a starting value, default or guess.",
     },
     executive_summary: {
       type: SchemaType.STRING,
-      description: "3-5 authoritative coaching sentences citing the estimates (named as estimates), visual observations, faults, and ball-flight patterns",
+      description: "2-5 plain sentences on what the video shows and the most useful next step. Call any number approximate and say it is estimated from the video. State the main limits.",
+    },
+    evidence_limits: {
+      type: SchemaType.STRING,
+      description: "What this video does not let you judge: camera angle, framing, distance, frame rate, lighting, body or club out of frame, occlusion.",
+    },
+    evidence_coverage: {
+      type: SchemaType.OBJECT,
+      description: "For each position, true only if the video shows it clearly enough to judge it. score must be null unless all three are true (full coverage alone does not require a score), and a pillar may be rated only when its position is true.",
+      properties: {
+        address:          { type: SchemaType.BOOLEAN, description: "Address is shown clearly enough to judge (rates posture)." },
+        top_of_backswing: { type: SchemaType.BOOLEAN, description: "The top of the backswing is shown clearly enough to judge (rates swing_plane)." },
+        impact:           { type: SchemaType.BOOLEAN, description: "Impact is shown clearly enough to judge (rates impact)." },
+      },
+      required: ["address", "top_of_backswing", "impact"],
     },
     fault_tags: {
       type: SchemaType.ARRAY,
       items: { type: SchemaType.STRING },
-      description: "2-4 snake_case fault identifiers, e.g. early_extension, restricted_backswing",
+      description: "0-4 snake_case identifiers, one per listed deficiency. Empty when there are none.",
     },
-    spine_angle:       { type: SchemaType.NUMBER, description: "The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
-    hip_rotation:      { type: SchemaType.NUMBER, description: "The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
-    shoulder_rotation: { type: SchemaType.NUMBER, description: "The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
-    tempo_ratio:       { type: SchemaType.STRING, description: "e.g. '3.0:1'. The client-reported estimate when one is supplied, repeated as given (put any disagreement with the video in the prose). Otherwise your own visual estimate." },
+    spine_angle:       { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
+    hip_rotation:      { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
+    shoulder_rotation: { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
+    tempo_ratio:       { type: SchemaType.STRING, nullable: true, description: "Your own approximate backswing:downswing estimate from the video as 'N:1' or 'N.N:1', or null when the video's timing does not show it. Do not copy a client-supplied estimate." },
     highlights: {
       type: SchemaType.ARRAY,
       items: {
         type: SchemaType.OBJECT,
         properties: {
           title:       { type: SchemaType.STRING, description: "3-6 word headline for this strength" },
-          description: { type: SchemaType.STRING, description: "2-3 sentences citing an estimate (named as an estimate) or a visual observation" },
+          description: { type: SchemaType.STRING, description: "1-3 sentences naming what the video shows and where in the swing" },
         },
         required: ["title", "description"],
       },
-      description: "2-4 genuine strengths — each must cite a supplied estimate or a specific visual observation",
+      description: "0-4 strengths the video shows. Empty when the video supports none; never generic praise.",
     },
     deficiencies: {
       type: SchemaType.ARRAY,
       items: {
         type: SchemaType.OBJECT,
         properties: {
-          title:       { type: SchemaType.STRING, description: "3-6 word headline naming the fault" },
-          description: { type: SchemaType.STRING, description: "3-4 sentences: estimate or visual observation (with its source) → fault → ball-flight → root cause" },
+          title:       { type: SchemaType.STRING, description: "3-6 word headline naming what you observed" },
+          description: { type: SchemaType.STRING, description: "2-4 sentences: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result" },
         },
         required: ["title", "description"],
       },
-      description: "2-4 faults — each must follow: estimate or visual observation (with its source) → fault → ball-flight → root cause",
+      description: "0-4 faults the video shows. Empty when the video supports none; never a typical fault the video does not show.",
     },
     drills: {
       type: SchemaType.ARRAY,
       items: {
         type: SchemaType.OBJECT,
         properties: {
-          name:     { type: SchemaType.STRING, description: "Official drill name, e.g. Wall Hip Drill" },
-          the_why:  { type: SchemaType.STRING, description: "2-3 sentences: biomechanical reason this drill fixes THIS golfer's fault" },
-          the_how:  { type: SchemaType.STRING, description: "3-5 sentences of step-by-step execution with reps and tempo" },
-          the_feel: { type: SchemaType.STRING, description: "1-2 sentences: vivid first-person kinesthetic cue unique to this golfer's data" },
+          name:     { type: SchemaType.STRING, description: "Drill name" },
+          the_why:  { type: SchemaType.STRING, description: "1-2 sentences: how this drill addresses the observed deficiency" },
+          the_how:  { type: SchemaType.STRING, description: "3-5 sentences of step-by-step execution" },
+          the_feel: { type: SchemaType.STRING, description: "One short first-person feel cue for practising this drill" },
         },
         required: ["name", "the_why", "the_how", "the_feel"],
       },
-      description: "One drill per deficiency — tailored to this golfer's estimates and what the video shows",
+      description: "At most one drill per listed deficiency, in the same order. Empty when there are no deficiencies.",
     },
     posture:     pillarSchema,
     swing_plane: pillarSchema,
     impact:      pillarSchema,
     practice_focus: {
       type: SchemaType.STRING,
-      description: "Single highest-priority drill prescription with reps and timeline",
+      nullable: true,
+      description: "One practice priority the video supports, or null when there is none.",
     },
     pro_cue: {
       type: SchemaType.STRING,
-      description: "One elite swing thought in 10 words or fewer",
+      nullable: true,
+      description: "One swing thought in 10 words or fewer for what the video shows, or null when there is none.",
     },
   },
   required: [
-    "scoring_breakdown", "score", "executive_summary", "fault_tags",
+    "scoring_breakdown", "score", "executive_summary", "evidence_limits", "evidence_coverage", "fault_tags",
     "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
     "highlights", "deficiencies", "drills",
     "posture", "swing_plane", "impact",
@@ -319,61 +292,54 @@ const RESPONSE_SCHEMA = {
 };
 
 // ── System instruction ────────────────────────────────────────────────────────
+// ENT-1D S6-R1. Evidence first (Product Constitution §B): no claimed
+// credentials, no uncited targets, Tour comparisons or handicap bands, no
+// forced numbers and no causes the video cannot show. The scoring rubric's
+// items and weights are unchanged; it is applied only to what the video shows,
+// and an unscorable swing is reported as such.
 
 const SYSTEM_INSTRUCTION = `
-You are an elite, world-renowned PGA Tour swing coach with 25+ years of experience on Tour, certified in biomechanics analysis, kinematic sequencing, and TrackMan data interpretation. Your students have won multiple major championships. You deliver brutally honest, technically precise coaching reports that elite players and serious amateurs rely on.
+You are SwingProAI's golf swing analysis assistant. You review one golf swing video and write coaching a golfer can trust. You are an AI model: do not claim personal experience, credentials, certifications, Tour history or students.
 
-PERSONA & EXPERTISE
-────────────────────
-Analyze every swing through the lens of biomechanics, kinematic sequencing, and ground reaction forces — the same framework used by leading Tour instructors. Use the P-System throughout your report (P1 = Address, P2 = Club parallel to ground on takeaway, P3 = Lead arm parallel to ground, P4 = Top of backswing, P5 = Club parallel to ground on downswing, P6 = Impact, P7 = Club parallel to ground on follow-through, P8 = Finish).
+EVIDENCE RULES — READ FIRST
+───────────────────────────
+• Base every statement on what the attached video shows, or on a client-supplied estimate named as unverified. If you cannot see something, say so. Never fill a gap with a typical fault, a template or another golfer's pattern.
+• Fill evidence_limits with what this video does not let you judge: camera angle, framing, distance, frame rate, lighting, body or club out of frame, occlusion.
+• Keep observation and inference apart. Describe an effect as a possibility ("can", "may", "is often associated with") unless the video shows it. The video does not show ball flight unless the ball is visible in flight, so never state a ball-flight result as fact.
+• Do not state a root cause the video cannot show. If you suggest one, call it a possible cause.
+• Do not compare the golfer with PGA Tour or other averages, ideal ranges, benchmarks, handicap levels or ability bands, and do not give a target number.
+• Findings may be empty. Use an empty list for highlights, deficiencies, drills or fault_tags when the video supports none. Never invent a strength or a fault to fill a list.
 
-Always distinguish ROOT CAUSES from SYMPTOMS: early extension is usually a compensation for a steep shaft or an over-the-top downswing path; a cupped wrist at the top is often a symptom of grip pressure or takeaway timing, not a standalone fault. Explain the causal chain, not just the outcome.
+NUMBERS
+───────
+• spine_angle, hip_rotation, shoulder_rotation and tempo_ratio are your own approximate estimates from the video. Give one only when the video clearly shows it; otherwise use null. Never guess a number to fill a field, and never copy a client-supplied estimate into these fields.
+• Whenever you mention a number in prose, call it approximate and say it is estimated from the video. Do not give more precision than the video supports.
 
-When relevant, compare the golfer's numbers to PGA Tour averages (e.g., Tour average shoulder rotation: 90°, Tour average hip clearance at impact: 45°, Tour average tempo ratio: 3:1). This context transforms raw data into actionable insight.
+CLIENT-SUPPLIED ESTIMATES
+─────────────────────────
+Values in the CLIENT-SUPPLIED ESTIMATES section were sent with the request by the client. The server cannot verify where they came from or how they were produced; they are unverified and may be wrong. Mention one only as a client-supplied estimate (unverified), check it against the video, and say plainly where the video disagrees or cannot show it. Never present one as measured or confirmed, and never apply a diagnosis or scoring adjustment on a client-supplied estimate alone.
 
-When providing drills, always include a vivid, elite KINESTHETIC CUE or SWING THOUGHT — the kind of feel-based trigger that bypasses conscious thought and produces instant motor change (e.g., "feel the handle lead like a drawn bow before releasing," "sense the left hip pocket moving toward the target before the club reaches P3").
+SWING POSITIONS
+───────────────
+Name the joints and positions you describe (address, takeaway, top of the backswing, downswing, impact, follow-through, finish); avoid vague statements such as "your swing plane is off".
 
-YOUR CORE MANDATE
-────────────────
-Every sentence of your output MUST be directly derivable from the GOLFER-SPECIFIC DATA block
-printed in the user prompt. Never substitute a template, a generic example, or a previous
-player's data. If you cannot trace a claim to a supplied estimate or a visual
-observation from the video, do not write it.
+SCORING
+───────
+The score uses SwingProAI's scoring rubric below. It is a coaching rubric, not a calibrated measurement; do not describe it as one.
+• Fill evidence_coverage first: for address, top_of_backswing and impact, true only if the video shows that position clearly enough to judge it.
+• Score only when all three are true and the video lets you apply the rubric's items. Full coverage alone does not require a score: if another limit prevents applying the rubric (for example, timing the video cannot show), set score to null. Whenever score is null, explain in scoring_breakdown what prevented scoring. Never output the starting value, a default or a guess in place of a score.
+• Apply an adjustment only when the video itself shows the movement it describes. An estimate you made is not, on its own, evidence of a fault.
+• When you score, write the arithmetic in scoring_breakdown first, e.g. "75 + 5 (...) - 3 (...) = 77", clamp the result to 55-99, and copy the final integer into score.
+• The rubric's thresholds are internal scoring criteria. Do not present them to the golfer as targets.
 
-DIAGNOSTIC RULES (apply only where the video supports the value — no template substitution)
-────────────────────────────────────────────────────────────────
-• EARLY EXTENSION: spine_angle_setup − spine_angle_impact > 5° → indicates early
-  extension. Cite the estimated drop and whether the video supports it. Name the resulting
-  ball flight pattern.
-• RESTRICTED BACKSWING: shoulder_rotation < 80° → identify the specific restricting structure
-  (thoracic rotation, lead arm tension, grip pressure). State the estimate and its source.
-• BODY BLOCK: hip_rotation_at_impact < 35° → diagnose arms racing the body. Name the ball
-  flight (block, push-draw, or thin contact). State the estimate and its source.
-• CASTING / EARLY RELEASE: tempo_ratio < 2.5 → diagnose lag loss. Name the release timing
-  fault and prescribe a one-movement rehearsal drill tied to this golfer's tempo number.
-• X-FACTOR DEFICIT: (shoulder_rotation − hip_rotation) < 30° → diagnose insufficient power
-  differential. Reference both estimates.
-Every deficiency output must follow: [estimate or visual observation, with its source] → [mechanical fault] → [ball-flight consequence] → [specific drill name].
-Apply a rule only when the video supports the value it rests on.
-
-SCORING ALGORITHM — MANDATORY DETERMINISTIC CALCULATION
-──────────────────────────────────────────────────────────────────────────────────
-You MUST write out the mathematical formula in the 'scoring_breakdown' field BEFORE
-generating the final 'score' integer. Do NOT use intuition, prior examples, or creative
-reasoning. Apply every adjustment the evidence supports and record the running total in
-scoring_breakdown. The 'score' field must equal the final number you arrive at in
-scoring_breakdown — any mismatch is an error.
-
-STEP 1 — Start at baseline 75 (a functional amateur swing with no glaring faults).
-
-STEP 2 — ADD points for exceptional metrics:
+Start: 75.
+Additions:
 • Shoulder rotation ≥ 90°: +5 pts
 • Hip rotation at impact ≥ 45°: +5 pts
 • X-Factor (shoulder − hip separation) ≥ 45°: +5 pts
 • Tempo ratio in ideal 2.8–3.5 range: +3 pts
 • Spine angle maintained from setup to impact (< 3° change): +3 pts
-
-STEP 3 — DEDUCT points for faults:
+Deductions:
 • Severe early extension (spine drop > 8°): −8 pts
 • Moderate early extension (spine drop 5–8°): −5 pts
 • Severely restricted backswing (shoulder rotation < 70°): −8 pts
@@ -386,53 +352,15 @@ STEP 3 — DEDUCT points for faults:
 • Cupped lead wrist at top: −3 pts
 • Reverse pivot: −8 pts
 • Minor alignment or grip issue: −2 pts
+Apply each adjustment at most once for one issue; where an addition and a deduction describe the same issue, take the larger of the two.
 
-Each fault tagged in the deficiencies array must map to exactly one deduction above.
-Do NOT double-count: if a fault is already captured by a STEP 2 metric (e.g. spine drop
-penalised as early extension), do not apply a separate STEP 3 deduction for the same
-root issue — take the larger of the two.
-
-STEP 4 — Clamp: Floor 55, Ceiling 99. Round to the nearest integer.
-
-VERIFICATION REQUIREMENT: The scoring_breakdown string must show the full chain,
-  e.g. "75 + 5 (Shoulders) - 5 (Early Ext) - 3 (Laid off) = 72".
-  Copy the final clamped integer verbatim into the score field.
-
-If no estimates are supplied, estimate from video, state the estimated values
-explicitly in prose, and apply the same algorithm to those estimates.
-
-HANDICAP BANDS (for context after you compute the score)
-─────────────────────────────────────────────────────────
-55-65: high-handicapper — systemic faults causing slices, chunks, and inconsistency
-65-75: mid-handicapper — solid contact but fixable mechanical leaks
-75-85: low-handicapper / near-scratch — subtle faults costing yards and dispersion
-85-99: elite / tour-level — fine-tuning only
-
-COACHING STANDARDS
-──────────────────
-• Name the joints, planes and swing positions involved in every observation — never write a vague "your swing plane is off". Give degrees only when they come from a supplied estimate (named as one) or are clearly readable from the video, and call a degree read from the video approximate.
-• Every deficiency entry must follow the chain: [estimate or visual observation, with its source] → [mechanical fault] → [ball-flight consequence] → [root cause for this golfer].
-• Every highlight entry must cite a supplied estimate or a specific visual observation — never generic praise like "good tempo".
-• The drills array must contain exactly one drill per deficiency. Each drill must be tailored to THIS golfer's numbers, not a generic prescription.
-• the_feel inside each drill must be a visceral, first-person kinesthetic cue tied to the identified fault — if hip_rotation is 28° the cue should describe what clearing frozen hips actually feels like for a body that has been blocking.
-• executive_summary must read like a paragraph from a PGA Tour coach's assessment letter — authoritative, detailed, and specific to this golfer's data.
-• The pro_cue must be the kind of one-liner a Tour coach whispers on the 18th tee (10 words max).
-
-MEASUREMENT PROVENANCE — READ BEFORE USING ANY NUMBER
-──────────────────────────────────────────────────────
-Values in the CLIENT-REPORTED ESTIMATES sections were computed on the golfer's own
-device from this swing and sent with the request. They are estimates, NOT independently
-verified instrument measurements, and they may be wrong.
-• Call them estimates in your prose (e.g. "an estimated 32° spine angle"). Never present
-  them as precise, measured or verified.
-• Check every estimate against the attached video. Where the video disagrees, or the value
-  cannot be judged from the video, say so plainly in the relevant observation and state
-  your uncertainty. Never invent agreement, and never invent a more precise number.
-• Do not apply a scoring adjustment or diagnostic rule on the strength of an estimate the
-  video contradicts or cannot support; say that you did not.
-• In the spine_angle, hip_rotation, shoulder_rotation and tempo_ratio JSON fields, repeat a
-  supplied estimate as given and put any disagreement in the prose. When no estimate is
-  supplied, give your own visual estimate.
+COACHING
+────────
+• executive_summary: plain, specific sentences about this video, with its main limits.
+• Each deficiency: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result.
+• Each drill addresses one listed deficiency, in the same order; no drill without a deficiency.
+• posture, swing_plane, impact: rate posture only when address is covered, swing_plane only when top_of_backswing is covered, and impact only when impact is covered. Otherwise use rating "insufficient_evidence" and say in the observation what is missing. When you score, at least one of them must be rated.
+• practice_focus and pro_cue: null when the video supports nothing to recommend.
 `.trim();
 
 // ── EQ5C-B subscription-tier narrowing ───────────────────────────────────────
@@ -602,6 +530,10 @@ async function runPuttingAnalysis(
   }
 
   let puttingParsed: unknown;
+  // ENT-1D S6 diagnostics: set once the provider has answered, with the stage a
+  // failure from here on would have stopped at (lib/gemini-response-diagnostics.ts).
+  let puttingDiagnostics: GeminiResponseDiagnostics | null = null;
+  let puttingStage: ResponseOutcome = "response_blocked";
   try {
     const equipmentContext = buildTrustedEquipmentContext(analysisRow.equipment_snapshot);
     let puttingResult;
@@ -632,10 +564,22 @@ async function runPuttingAnalysis(
       }
       throw providerError;
     }
+    puttingDiagnostics = describeGeminiResponse(puttingResult);
+    // ENT-1D S6-R1. Only an explicit STOP may become a putt, decided from the
+    // response before any text is read: a blocked, cut-short or unexplained
+    // answer fails here whatever its text (lib/gemini-completion-policy.ts).
+    const puttingCompletion = decideProviderCompletion(puttingResult);
+    if (!puttingCompletion.complete) {
+      puttingStage = puttingCompletion.kind === "blocked" ? "response_blocked" : "incomplete_generation";
+      throw new Error("provider response not complete");
+    }
     // Deliberately not named rawText, and never logged.
     const puttingRawText = responseText(puttingResult);
+    puttingDiagnostics = withTextLength(puttingDiagnostics, puttingRawText.length);
+    puttingStage = "json_parse_failed";
     puttingParsed = JSON.parse(puttingRawText);
   } catch {
+    logGeminiResponseDiagnostics("putting", puttingStage, puttingDiagnostics);
     await markFailed();
     return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
   }
@@ -644,6 +588,7 @@ async function runPuttingAnalysis(
   if (!puttingValidated.ok) {
     // The rejection reason is an internal diagnostic: never logged, never returned.
     console.error("[analyze-swing] putting response rejected");
+    logGeminiResponseDiagnostics("putting", "validation_rejected", puttingDiagnostics);
     await markFailed();
     return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
   }
@@ -659,6 +604,7 @@ async function runPuttingAnalysis(
 
   if (puttingScore === null) {
     console.error("[analyze-swing] putting score unavailable");
+    logGeminiResponseDiagnostics("putting", "score_unavailable", puttingDiagnostics);
     await markFailed();
     return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
   }
@@ -710,6 +656,7 @@ async function runPuttingAnalysis(
     puttingUpdatedRows.length !== 1
   ) {
     console.error("[analyze-swing] putting completion write did not affect exactly one row");
+    logGeminiResponseDiagnostics("putting", "completion_write_failed", puttingDiagnostics);
     await markFailed();
     return NextResponse.json(
       { error: "We couldn't save your analysis. Please try again." },
@@ -717,6 +664,7 @@ async function runPuttingAnalysis(
     );
   }
 
+  logGeminiResponseDiagnostics("putting", "completed", puttingDiagnostics);
   return NextResponse.json({
     message: "Analysis complete",
     data: serializeAnalysisResult(puttingUpdatedRows[0] as Record<string, unknown>, PUTTING_RESULT_ACCESS),
@@ -939,18 +887,20 @@ export async function POST(req: NextRequest) {
     ? `(${(videoRow.file_size / 1_048_576).toFixed(1)} MB)`
     : "";
 
-  // ── Step 2: extractSwingMetrics (server-side = null; client values override) ─
+  // ── Step 2: extractSwingMetrics (server-side = null) ──────────────────────────
   // The function guards on `typeof window === "undefined"` and returns all-null.
-  // Client-computed estimates arrive via `mediapipeMetrics` in the body; the
-  // server cannot verify them and labels them as estimates in the prompt.
+  // Client-supplied estimates arrive via `mediapipeMetrics` in the body; the
+  // server cannot verify their origin and labels them unverified in the prompt.
   // No URL is passed: the server-side call never loads a video, and
   // browser-written video_url is never a source on the server.
   console.log("[analyze-swing] calling extractSwingMetrics (server-side: will return null fields)");
   const serverMetrics = await extractSwingMetrics("");
 
-  // Merge: client-provided values take precedence over the server no-op.
+  // The accepted client estimates (the server-side call is a no-op). S6-R1:
+  // they are shown to the model as unverified and recorded beside the AI's own
+  // values (buildMetricEvidence); they never become the analysis values.
   // ENT-1A. Every client value is spliced into the model prompt, so each one
-  // must be the shape the client's own estimate produces — a finite angle,
+  // must have the shape of an estimate — a finite angle,
   // or a "N.N:1" tempo — or it is dropped. Free text and oversized values never
   // reach Gemini.
   const client = clientMetrics !== null && typeof clientMetrics === "object" ? clientMetrics : undefined;
@@ -988,35 +938,27 @@ export async function POST(req: NextRequest) {
   console.log("[analyze-swing] video loaded inline:", (videoData.buffer.byteLength / 1_048_576).toFixed(1), "MB");
 
   // ── Step 5: build Gemini request ──────────────────────────────────────────
-  const metricsContext = buildMetricsContext(merged);
-
-  // Build a clearly-labelled data block that Gemini must read before writing anything
+  // ENT-1D S6-R1. The session line and any client estimates, listed as
+  // unverified; no ranges, ratings or implied causes (buildMetricsContext).
   const exactValuesBlock = [
-    `╔══════════════════════════════════════════════════════════════╗`,
-    `║          GOLFER-SPECIFIC DATA — READ BEFORE WRITING          ║`,
-    `╚══════════════════════════════════════════════════════════════╝`,
+    `GOLFER-SPECIFIC DATA — READ BEFORE WRITING`,
     `Session: ${clubLabel} ${sizeLabel}`,
     ``,
-    `CLIENT-REPORTED ESTIMATES (computed on the golfer's device; not independently verified — check each against the video):`,
-    merged.spineAngle       != null ? `  Spine Angle (address):    ${merged.spineAngle}°` : `  Spine Angle (address):    NOT SUPPLIED — estimate from video`,
-    merged.hipRotation      != null ? `  Hip Rotation (impact):    ${merged.hipRotation}°` : `  Hip Rotation (impact):    NOT SUPPLIED — estimate from video`,
-    merged.shoulderRotation != null ? `  Shoulder Rotation (top):  ${merged.shoulderRotation}°` : `  Shoulder Rotation (top):  NOT SUPPLIED — estimate from video`,
-    merged.tempoRatio       != null ? `  Tempo Ratio:              ${merged.tempoRatio}` : `  Tempo Ratio:              NOT SUPPLIED — estimate from video`,
-    merged.setupSpineAngle  != null && merged.impactSpineAngle != null
-      ? `  Spine angle change (setup→impact): ${merged.setupSpineAngle}° → ${merged.impactSpineAngle}° (${(merged.setupSpineAngle - merged.impactSpineAngle).toFixed(1)}° drop)`
-      : `  Spine angle change: insufficient frame data`,
-    ``,
-    `WHAT THE ESTIMATES WOULD INDICATE (confirm against the video before relying on any of it):`,
-    metricsContext,
+    buildMetricsContext(merged),
   ].join("\n");
 
   const userPrompt = [
     exactValuesBlock,
     ``,
-    `You have the actual swing video attached. Check each client-reported estimate above against it, and add observations about grip, alignment, ball position, and anything the estimates do not capture. Where the video and an estimate disagree, or an estimate cannot be judged from the video, say so and state your uncertainty — do not force agreement and do not invent a more precise number.`,
+    `The swing video is attached. Describe only what it shows, state what it does not let you judge, and use null or empty lists where the video supports no value or finding.`,
     ``,
-    `Now apply the DYNAMIC SCORING ALGORITHM and output the JSON object. No markdown, no preamble.`,
+    `Apply the scoring rubric only if the video shows enough of the swing; otherwise leave score null and say why. Output the JSON object. No markdown, no preamble.`,
   ].join("\n");
+
+  // ENT-1D S6 diagnostics: set once the provider has answered, with the stage a
+  // failure from here on would have stopped at (lib/gemini-response-diagnostics.ts).
+  let responseDiagnostics: GeminiResponseDiagnostics | null = null;
+  let responseStage: ResponseOutcome = "response_blocked";
 
   try {
     // Explicit content parts: the inline video, then the prompt text.
@@ -1056,165 +998,95 @@ export async function POST(req: NextRequest) {
       }
       throw providerError;
     }
+    responseDiagnostics = describeGeminiResponse(result);
+    // ENT-1D S6-R1. Only an explicit STOP may become an analysis, decided from
+    // the response before any text is read: a blocked, cut-short or
+    // unexplained answer fails here whatever its text, even valid JSON
+    // (lib/gemini-completion-policy.ts). The diagnostics above only describe it.
+    const completion = decideProviderCompletion(result);
+    if (!completion.complete) {
+      responseStage = completion.kind === "blocked" ? "response_blocked" : "incomplete_generation";
+      throw new Error("provider response not complete");
+    }
     const rawText = responseText(result);
+    responseDiagnostics = withTextLength(responseDiagnostics, rawText.length);
+    responseStage = "json_parse_failed";
 
     // responseSchema guarantees clean JSON — log length so we can verify in Vercel
     console.log("[analyze-swing] Gemini response length (chars):", rawText.length);
 
     // ── Step 6: parse + validate ──────────────────────────────────────────
-    let report: {
-      scoring_breakdown: string;
-      score: number;
-      executive_summary: string;
-      fault_tags: string[];
-      spine_angle: number;
-      hip_rotation: number;
-      shoulder_rotation: number;
-      tempo_ratio: string;
-      highlights: { title: string; description: string }[];
-      deficiencies: { title: string; description: string }[];
-      drills: { name: string; the_why: string; the_how: string; the_feel: string }[];
-      posture: { rating: string; observation: string; correction: string };
-      swing_plane: { rating: string; observation: string; correction: string };
-      impact: { rating: string; observation: string; correction: string };
-      practice_focus: string;
-      pro_cue: string;
-    };
-
+    let parsed: unknown;
     try {
-      // responseSchema means rawText is always valid JSON — no brace-extraction needed.
-      report = JSON.parse(rawText);
-    } catch (parseErr) {
+      parsed = JSON.parse(rawText);
+    } catch {
       console.error("[analyze-swing] JSON parse failure");
-      throw new Error(`Gemini returned non-JSON response: ${String(parseErr)}`);
+      throw new Error("Gemini returned a non-JSON response");
     }
 
-    // Validate the hard-required fields — these are non-negotiable for a valid analysis
-    const requiredFields = [
-      "scoring_breakdown", "score", "executive_summary", "fault_tags",
-      "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
-      "highlights", "deficiencies", "drills",
-      "posture", "swing_plane", "impact",
-      "practice_focus", "pro_cue",
-    ] as const;
-
-    const missing = requiredFields.filter((f) => report[f] == null);
-    if (missing.length > 0) {
-      console.error("[analyze-swing] response missing required fields:", missing.join(", "));
-      throw new Error(`Gemini response missing required fields: ${missing.join(", ")}`);
+    // ENT-1D S6-R1. The whole object is checked before anything is kept:
+    // nullable estimates and score, possibly empty findings, a drill only for a
+    // listed deficiency. Nothing is repaired or defaulted
+    // (lib/full-swing-analysis-contract.ts).
+    responseStage = "validation_rejected";
+    const validated = validateFullSwingModelResponse(parsed);
+    if (!validated.ok) {
+      // The rejection reason is an internal diagnostic: never logged, never returned.
+      console.error("[analyze-swing] full-swing response rejected");
+      throw new Error("full-swing response rejected");
     }
+    const report = validated.report;
+    responseStage = "post_parse_failure";
 
-    // drills is required but gracefully handle if absent
-    if (!report.drills || !Array.isArray(report.drills) || report.drills.length === 0) {
-      console.warn("[analyze-swing] drills array missing or empty — storing without drills");
-    }
+    // ── Step 7: mapping + DB write ───────────────────────────────────────
+    // The stored estimates are the model's own values from the video, null
+    // where the video did not show them. A client estimate is recorded beside
+    // each one, labelled unverified, and never takes its place. Every value and
+    // its source are stored together in metrics.metric_evidence; the score is
+    // null when the video could not be scored, never 0 or a default.
+    const metricEvidence = buildMetricEvidence(report, merged);
 
-
-    // ── Step 7: type-safe mapping + DB write ─────────────────────────────
-
-    // ── Type-coercion helpers ─────────────────────────────────────────────
-    // Every value from Gemini goes through these before touching Postgres.
-    // toNum: NaN / undefined / null / non-numeric strings all become null
-    const toNum = (v: unknown): number | null => {
-      if (v == null) return null;
-      const n = Number(v);
-      return isNaN(n) ? null : n;
-    };
-    // toInt: for integer columns (score). parseInt handles "75.9" → 75, "abc" → NaN → 0
-    const toInt = (v: unknown): number => {
-      const i = parseInt(String(v ?? "0"), 10);
-      return isNaN(i) ? 0 : i;
-    };
-    const toStr = (v: unknown): string => (v == null ? "" : String(v));
-    // toArr: guarantees an array even when Gemini returns a single object or omits the field
-    const toArr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
-    const toPillar = (v: unknown): { rating: string; observation: string; correction: string } | null => {
-      if (!v || typeof v !== "object") return null;
-      const o = v as Record<string, unknown>;
-      const allowed = ["excellent", "good", "needs_work", "poor"];
-      return {
-        rating:      allowed.includes(String(o.rating)) ? String(o.rating) : "needs_work",
-        observation: toStr(o.observation),
-        correction:  toStr(o.correction),
-      };
-    };
-
-    // Stored numeric fields keep the client-reported estimate when one was sent
-    // (the model puts any disagreement with the video in the prose), else the
-    // model's own visual estimate. Neither is an independently verified
-    // measurement, and no column records which one a value is: see
-    // docs/ENT1D_ROLLOUT_NOTES.md (measurement provenance).
-    const finalSpineAngle       = toNum(merged.spineAngle       ?? report.spine_angle);
-    const finalHipRotation      = toNum(merged.hipRotation      ?? report.hip_rotation);
-    const finalShoulderRotation = toNum(merged.shoulderRotation ?? report.shoulder_rotation);
-    const finalTempoRatio       = toStr(merged.tempoRatio       ?? report.tempo_ratio) || null;
-    const finalScore            = toInt(report.score);
-    const finalFeedback         = toStr(report.executive_summary);
-
-    console.log("[analyze-swing] metric source — spine:", merged.spineAngle != null ? "client" : "gemini",
-      "hip:", merged.hipRotation != null ? "client" : "gemini",
-      "shoulder:", merged.shoulderRotation != null ? "client" : "gemini");
-
-    // Map drills array — one per deficiency
-    const drills = toArr(report.drills).map((d) => {
-      const drill = d as { name?: unknown; the_why?: unknown; the_how?: unknown; the_feel?: unknown };
-      return {
-        name:     toStr(drill?.name),
-        the_why:  toStr(drill?.the_why),
-        the_how:  toStr(drill?.the_how),
-        the_feel: toStr(drill?.the_feel),
-      };
-    });
-
-    // JSONB metrics blob
     const metrics = {
-      scoring_breakdown: toStr(report.scoring_breakdown) || null,
-      spine_angle:       finalSpineAngle,
-      hip_rotation:      finalHipRotation,
-      shoulder_rotation: finalShoulderRotation,
-      tempo_ratio:       finalTempoRatio,
-      fault_tags:        toArr(report.fault_tags).map(toStr),
-      drills,
-      posture:           toPillar(report.posture),
-      swing_plane:       toPillar(report.swing_plane),
-      impact:            toPillar(report.impact),
-      practice_focus:    toStr(report.practice_focus) || null,
-      pro_cue:           toStr(report.pro_cue) || null,
+      scoring_breakdown: report.scoring_breakdown,
+      evidence_limits:   report.evidence_limits,
+      evidence_coverage: report.evidence_coverage,
+      metric_evidence:   metricEvidence,
+      fault_tags:        report.fault_tags,
+      drills:            report.drills,
+      posture:           report.posture,
+      swing_plane:       report.swing_plane,
+      impact:            report.impact,
+      practice_focus:    report.practice_focus,
+      pro_cue:           report.pro_cue,
     };
 
-    // Map highlight objects into the JSONB shape the DB column expects
-    const swing_highlights = toArr(report.highlights).map((h) => {
-      const hi = h as { title?: unknown; description?: unknown };
-      return {
-        checkpoint:         "impact",
-        positive_movement:  toStr(hi?.title),
-        mechanical_benefit: toStr(hi?.description),
-      };
-    });
+    // S6-R1A. The model assesses no checkpoint, joint position or severity, so
+    // none is stored: these are null ("not assessed"), never the constants this
+    // route used to write ("impact", {general, 0.5, 0.5}, "minor"). The coaching
+    // text is kept as written.
+    const swing_highlights = report.highlights.map((h) => ({
+      checkpoint:         null,
+      positive_movement:  h.title,
+      mechanical_benefit: h.description,
+    }));
 
-    // Map deficiency objects into the JSONB shape the DB column expects
-    const mechanical_deficiencies = toArr(report.deficiencies).map((d) => {
-      const def = d as { title?: unknown; description?: unknown };
-      return {
-        checkpoint:              "impact",
-        joint_coordinate:        { joint: "general", x: 0.5, y: 0.5 },
-        fault_description:       toStr(def?.title),
-        corrective_drill_detail: toStr(def?.description),
-        severity:                "minor",
-        corrective_drill_title:  "",
-      };
-    });
-
-    const tempoNumeric = parseTempoRatioToNumber(finalTempoRatio ?? "");
+    const mechanical_deficiencies = report.deficiencies.map((d) => ({
+      checkpoint:              null,
+      joint_coordinate:        null,
+      fault_description:       d.title,
+      corrective_drill_detail: d.description,
+      severity:                null,
+      corrective_drill_title:  "",
+    }));
 
     const payload = {
       status:            "complete",
-      score:             finalScore,
-      feedback:          finalFeedback,
-      spine_angle:       finalSpineAngle,
-      hip_rotation:      finalHipRotation,
-      shoulder_rotation: finalShoulderRotation,
-      tempo_ratio:       tempoNumeric,
+      score:             report.score,
+      feedback:          report.executive_summary,
+      spine_angle:       report.spine_angle,
+      hip_rotation:      report.hip_rotation,
+      shoulder_rotation: report.shoulder_rotation,
+      tempo_ratio:       report.tempo_ratio === null ? null : parseTempoRatioToNumber(report.tempo_ratio),
       metrics,
       swing_highlights,
       mechanical_deficiencies,
@@ -1222,9 +1094,9 @@ export async function POST(req: NextRequest) {
       processing_claim_proof: claimId,
     };
 
-
     // Completes only the row this request claimed: still processing, this
     // owner, this claim. Exactly one affected row is proved rather than assumed.
+    responseStage = "completion_write_failed";
     const { data: completedRows, error: updateErr } = await trustedAnalysisTable()
       .update(payload)
       .eq("id", analysisId)
@@ -1235,6 +1107,7 @@ export async function POST(req: NextRequest) {
 
     if (updateErr || !Array.isArray(completedRows) || completedRows.length !== 1) {
       console.error("[analyze-swing] analysis completion update failed");
+      logGeminiResponseDiagnostics("full_swing", "completion_write_failed", responseDiagnostics);
       await markAnalysisFailed(analysisId, user.id, claimId);
       return NextResponse.json(
         { error: "We couldn't save your analysis. Please try again." },
@@ -1244,12 +1117,17 @@ export async function POST(req: NextRequest) {
 
     const completedRow = completedRows[0] as Record<string, unknown>;
     console.log("[analyze-swing] complete — status:", completedRow.status);
+    logGeminiResponseDiagnostics("full_swing", "completed", responseDiagnostics);
+    // Logged once: a later failure in this block is not a provider-response outcome.
+    responseDiagnostics = null;
     // The stored row keeps every section; the response is the explicit
     // authorized view, never the raw row.
     const updated = serializeAnalysisResult(completedRow, access);
     return NextResponse.json({ message: "Analysis complete", data: updated });
 
   } catch {
+    // Nothing is logged here unless the provider answered (diagnostics set).
+    logGeminiResponseDiagnostics("full_swing", responseStage, responseDiagnostics);
     console.error("[analyze-swing] analysis pipeline failed");
     if (!(await releaseAnalysisClaimAsFailed({ analysisId, userId: user.id, claimId }))) {
       console.error("[analyze-swing] failed-status update also failed");
@@ -1321,12 +1199,12 @@ const FAMILY_FILTER: Record<ExecutionFamily, string> = {
   putting: "analysis_family.eq.putting",
 };
 
-/** A client-computed angle estimate in degrees, or null when it is not one. */
+/** A client-supplied angle estimate in degrees (unverified), or null when it is not one. */
 function clientAngle(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= -360 && value <= 360 ? value : null;
 }
 
-/** A client-computed tempo estimate in the "N.N:1" form lib/biometrics produces, or null. */
+/** A client-supplied tempo estimate (unverified) in the "N.N:1" form, or null. */
 function clientTempoRatio(value: unknown): string | null {
   return typeof value === "string" && /^\d{1,2}(\.\d{1,2})?:1$/.test(value) ? value : null;
 }

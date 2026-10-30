@@ -254,12 +254,14 @@ describe("result visibility is decided on the server, before any prop is built",
 describe("the full-swing report survives the family split unchanged", () => {
   it("keeps every full-swing render site that putting suppresses", () => {
     const region = fullSwingRegion();
+    // S6-R1 replaced the metric cards and the feedback heading on purpose: the
+    // anchors follow the new single render site and labels.
     for (const anchor of [
-      "metricCards.map((m) => (",
-      "Ideal: {m.ideal}",
-      'm.label === "Swing Score"',
+      "estimates.map((m) => (",
+      "{m.sourceLabel",
+      "scoreShown.scored",
       "Scoring Math",
-      "AI Coach Feedback",
+      "{ASSESSMENT_LABEL}",
       "Deep Biomechanical Audit",
       "<SwingHighlightsPanel",
       "<MechanicalDeficienciesPanel",
@@ -271,12 +273,13 @@ describe("the full-swing report survives the family split unchanged", () => {
     }
   });
 
-  it("renders the six full-swing metric cards from exactly one site", () => {
+  it("renders the full-swing estimate cards from exactly one site", () => {
     // The definitions live above the JSX, so the family split works by not
-    // rendering them rather than by removing them.
-    expect(countOccurrences(pageSource, "metricCards.map(")).toBe(1);
-    expect(fullSwingRegion()).toContain("metricCards.map(");
-    expect(puttingRegion()).not.toContain("metricCards");
+    // rendering them rather than by removing them (S6-R1: estimates, not metricCards).
+    expect(countOccurrences(pageSource, "estimates.map(")).toBe(1);
+    expect(fullSwingRegion()).toContain("estimates.map(");
+    expect(puttingRegion()).not.toContain("estimates.map(");
+    expect(puttingRegion()).not.toContain("scoreShown");
   });
 
   it("keeps the full-swing detailed-summary HTML rendering it already had", () => {
