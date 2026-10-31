@@ -284,6 +284,42 @@ select id, user_id, storage_path, video_url, created_at
   - Not yet runtime-validated: whether 16384 is enough is unproven until a
     separately authorized staging scenario. A larger budget can lengthen
     responses and raise per-call latency and cost.
+- **Full-swing output consistency (S6 R6B repair candidate; local,
+  uncommitted).**
+  - Basis: R6 at 16384 ended `max_tokens` again with the same prompt and
+    thinking counts. A one-request offline-prepared diagnostic (R6B) showed
+    that the answer began `scoring_breakdown`, the first field the schema
+    declared, with a short arithmetic fragment. It then repeated a newline
+    escape until the budget ran out, and no other field was reached.
+  - The response schema now lists its properties evidence-first, both
+    declared in that order and set with the documented Schema field
+    `propertyOrdering`:
+    1. `evidence_limits` and `evidence_coverage`;
+    2. the four estimates;
+    3. the three pillar assessments;
+    4. highlights, deficiencies, fault tags and drills;
+    5. `executive_summary`, `practice_focus` and `pro_cue`;
+    6. last, `scoring_breakdown` and `score`.
+
+    `required` lists the same members in the same order. No field, type,
+    nullable setting or enum changed.
+  - The system instruction no longer says which field to write first ("Fill
+    evidence_coverage first", "write the arithmetic in scoring_breakdown
+    first"). Scoring still depends on the video evidence.
+  - `scoring_breakdown` is requested as one compact line, with no line breaks,
+    repeated spaces or padding:
+    - scored: the rubric arithmetic with a brief label per adjustment, ending
+      in the final score;
+    - unscored: a brief explanation of why scoring is unsupported.
+
+    The rubric baseline, weights and 55-99 clamp are unchanged. Answers are
+    not truncated or repaired, and no default score is substituted.
+  - Unchanged: model, temperature 0.0, default thinking, the 16384 and 4096
+    budgets, transport, deadline, response limit, one call, STOP-only
+    acceptance, honest unscored results (full or partial coverage), the
+    numeric-score eligibility checks, estimates, provenance and putting.
+  - Not runtime-validated: whether the model now finishes within budget is
+    unknown until a separately authorized live check.
 
 ## 3. Activation sequence (each step separately authorized)
 

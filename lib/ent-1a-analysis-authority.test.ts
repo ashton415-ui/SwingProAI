@@ -3697,3 +3697,135 @@ describe("AC6. the nullable response schema is what the transport actually sends
     }
   });
 });
+
+describe("AC7. full-swing output consistency: evidence-first order, compact scoring_breakdown (S6 R6B)", () => {
+  const ORDER = [
+    "evidence_limits", "evidence_coverage",
+    "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
+    "posture", "swing_plane", "impact",
+    "highlights", "deficiencies", "fault_tags", "drills",
+    "executive_summary", "practice_focus", "pro_cue",
+    "scoring_breakdown", "score",
+  ];
+  // Types, nullable, enums, items and required membership of the schema at 8886efc, with descriptions and ordering
+  // removed and every key sorted (computed offline from the reviewed request d937eb49…a8d1).
+  const STRUCTURE_AT_8886EFC = "260e3d10e04cc60a11dee760304fbff5629df1fa238a0db9f8886632ddfbe3e7";
+  const structureOf = (x: unknown): unknown => {
+    if (Array.isArray(x)) return x.map(structureOf);
+    if (x && typeof x === "object") {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(x).sort()) {
+        if (k === "description" || k === "propertyOrdering") continue;
+        const v = (x as Record<string, unknown>)[k];
+        out[k] = k === "required" ? [...(v as string[])].sort() : structureOf(v);
+      }
+      return out;
+    }
+    return x;
+  };
+
+  /** The request body the route's real transport sends, captured by a loopback fake provider. */
+  async function capturedBody(answer: string = JSON.stringify(validReport())): Promise<Record<string, any>> {
+    let captured = "";
+    const server = createHttpServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        captured = Buffer.concat(chunks).toString("utf8");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: answer }] }, finishReason: "STOP" }] }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      state.realTransportPort = (server.address() as HttpAddressInfo).port;
+      expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+      expect(captured).toBe(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest));
+      return JSON.parse(captured);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("the serialized schema asks for evidence, estimates and pillars before scoring, with scoring last", async () => {
+    const schema = (await capturedBody()).generationConfig.responseSchema;
+    expect(schema.propertyOrdering).toEqual(ORDER);
+    expect(Object.keys(schema.properties)).toEqual(ORDER);
+    expect(schema.required).toEqual(ORDER);
+    const at = (k: string) => ORDER.indexOf(k);
+    for (const evidence of ["evidence_limits", "evidence_coverage", "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "posture", "swing_plane", "impact"]) {
+      expect(at(evidence), evidence).toBeLessThan(at("scoring_breakdown"));
+    }
+    expect(ORDER.slice(-2)).toEqual(["scoring_breakdown", "score"]);
+    expect(state.geminiCalls).toBe(1);
+  });
+
+  it("every field, type, nullable setting, enum and required member is unchanged", async () => {
+    const { createHash } = await import("node:crypto");
+    const schema = (await capturedBody()).generationConfig.responseSchema;
+    expect(createHash("sha256").update(JSON.stringify(structureOf(schema))).digest("hex")).toBe(STRUCTURE_AT_8886EFC);
+    expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
+  });
+
+  it("generation settings are unchanged: gemini-2.5-flash, temperature 0, 16384, JSON, no thinking configuration", async () => {
+    const body = await capturedBody();
+    expect(state.modelConfigs[0].model).toBe("gemini-2.5-flash");
+    expect(Object.keys(body.generationConfig)).toEqual(["responseMimeType", "responseSchema", "temperature", "maxOutputTokens"]);
+    expect([body.generationConfig.temperature, body.generationConfig.maxOutputTokens, body.generationConfig.responseMimeType]).toEqual([0, 16384, "application/json"]);
+  });
+
+  it("no instruction says which JSON field to write first; scoring still depends on video evidence", async () => {
+    const body = await capturedBody();
+    const sys = body.systemInstruction.parts[0].text as string;
+    const all = [sys, JSON.stringify(body.generationConfig.responseSchema)].join("\n");
+    expect(all).not.toContain("Fill evidence_coverage first");
+    expect(all).not.toContain("in scoring_breakdown first");
+    expect(all).not.toMatch(/\b(write|fill|output|start with)\b[^.\n]{0,60}\bfirst\b/i);
+    for (const kept of [
+      "Score only when all three are true and the video lets you apply the rubric's items.",
+      "Full coverage alone does not require a score",
+      "Whenever score is null, explain in scoring_breakdown what prevented scoring.",
+      "Never output the starting value, a default or a guess in place of a score.",
+      "Whether you may score depends on it.",
+      "Start: 75.",
+      "clamp the result to 55-99",
+      "Apply each adjustment at most once for one issue",
+    ]) expect(sys, kept).toContain(kept);
+  });
+
+  it("scoring_breakdown is requested as one compact line: arithmetic with labels when scored, a brief reason when not", async () => {
+    const body = await capturedBody();
+    const sys = body.systemInstruction.parts[0].text as string;
+    const desc = body.generationConfig.responseSchema.properties.scoring_breakdown.description as string;
+    expect(sys).toContain("scoring_breakdown is one compact line: no line breaks, no repeated spaces, no padding.");
+    expect(sys).toContain('e.g. "75 + 5 (label) - 3 (label) = 77"');
+    expect(sys).toContain("When score is null, it is a brief explanation of why the video does not support scoring.");
+    expect(desc).toContain("One compact line: no line breaks, no repeated spaces, no padding.");
+    expect(desc).toContain("ending in the final score");
+    expect(desc).toContain("If you did not score: a brief explanation of why the video does not support scoring.");
+  });
+
+  it("an answer in the new key order with a compact scored breakdown completes unchanged", async () => {
+    const report = validReport();
+    const ordered = Object.fromEntries(ORDER.map((k) => [k, report[k]]));
+    state.geminiImpl = async () => JSON.stringify(ordered);
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(storedRow().status).toBe("complete");
+    expect(storedRow().score).toBe(report.score);
+    expect((storedRow().metrics as Record<string, any>).scoring_breakdown).toBe(report.scoring_breakdown);
+  });
+
+  it("a synthetic newline-repetition answer cut at MAX_TOKENS is still refused before any text is read", async () => {
+    // Synthetic fixture only: a short arithmetic start followed by repeated JSON newline escapes, cut mid-escape.
+    const synthetic = '{"evidence_limits":"x","evidence_coverage":{"address":true,"top_of_backswing":true,"impact":true},"scoring_breakdown":"75 + 5 (label) ' + "\\n".repeat(4000) + "\\";
+    state.geminiFinishReason = "MAX_TOKENS";
+    state.geminiImpl = async () => synthetic;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    const lines = consoleLines().map((entry) => entry.line);
+    expect(diagnosticLines()[0].line).toContain("outcome=incomplete_generation finish_reason=max_tokens");
+    expect(diagnosticLines()[0].line).toContain("text_chars=unavailable");
+    expect(lines.some((l) => l.startsWith("[analyze-swing] Gemini response length"))).toBe(false);
+    expect(lines).not.toContain("[analyze-swing] JSON parse failure");
+  });
+});

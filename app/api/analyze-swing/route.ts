@@ -191,22 +191,23 @@ const pillarSchema = {
 const estimateDescription =
   "Your own approximate estimate from the video, in whole degrees, or null when the video does not show it clearly. Never guess to fill the field, and do not copy a client-supplied estimate.";
 
+// ENT-1D S6 output consistency. Evidence first, scoring last: the video's limits
+// and coverage, the AI's own estimates and the pillar assessments come before
+// the findings, the coaching and, last, the score that depends on them.
+// propertyOrdering is the documented Schema field that sets the order of the
+// properties in the response; the properties are also declared in that order.
+const RESPONSE_PROPERTY_ORDER = [
+  "evidence_limits", "evidence_coverage",
+  "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
+  "posture", "swing_plane", "impact",
+  "highlights", "deficiencies", "fault_tags", "drills",
+  "executive_summary", "practice_focus", "pro_cue",
+  "scoring_breakdown", "score",
+];
+
 const RESPONSE_SCHEMA = {
   type: SchemaType.OBJECT,
   properties: {
-    scoring_breakdown: {
-      type: SchemaType.STRING,
-      description: "If you scored: the rubric arithmetic, e.g. '75 + 5 (...) - 3 (...) = 77', listing only adjustments the video shows. If you did not score: why the video does not let you apply the rubric.",
-    },
-    score: {
-      type: SchemaType.INTEGER,
-      nullable: true,
-      description: "The final clamped integer (55-99) from scoring_breakdown, only when all three evidence_coverage positions are true and the video lets you apply the rubric; otherwise null, with the reason in scoring_breakdown. Full coverage alone does not require a score. Never a starting value, default or guess.",
-    },
-    executive_summary: {
-      type: SchemaType.STRING,
-      description: "2-5 plain sentences on what the video shows and the most useful next step. Call any number approximate and say it is estimated from the video. State the main limits.",
-    },
     evidence_limits: {
       type: SchemaType.STRING,
       description: "What this video does not let you judge: camera angle, framing, distance, frame rate, lighting, body or club out of frame, occlusion.",
@@ -221,15 +222,13 @@ const RESPONSE_SCHEMA = {
       },
       required: ["address", "top_of_backswing", "impact"],
     },
-    fault_tags: {
-      type: SchemaType.ARRAY,
-      items: { type: SchemaType.STRING },
-      description: "0-4 snake_case identifiers, one per listed deficiency. Empty when there are none.",
-    },
     spine_angle:       { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
     hip_rotation:      { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
     shoulder_rotation: { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
     tempo_ratio:       { type: SchemaType.STRING, nullable: true, description: "Your own approximate backswing:downswing estimate from the video as 'N:1' or 'N.N:1', or null when the video's timing does not show it. Do not copy a client-supplied estimate." },
+    posture:     pillarSchema,
+    swing_plane: pillarSchema,
+    impact:      pillarSchema,
     highlights: {
       type: SchemaType.ARRAY,
       items: {
@@ -254,6 +253,11 @@ const RESPONSE_SCHEMA = {
       },
       description: "0-4 faults the video shows. Empty when the video supports none; never a typical fault the video does not show.",
     },
+    fault_tags: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING },
+      description: "0-4 snake_case identifiers, one per listed deficiency. Empty when there are none.",
+    },
     drills: {
       type: SchemaType.ARRAY,
       items: {
@@ -268,9 +272,10 @@ const RESPONSE_SCHEMA = {
       },
       description: "At most one drill per listed deficiency, in the same order. Empty when there are no deficiencies.",
     },
-    posture:     pillarSchema,
-    swing_plane: pillarSchema,
-    impact:      pillarSchema,
+    executive_summary: {
+      type: SchemaType.STRING,
+      description: "2-5 plain sentences on what the video shows and the most useful next step. Call any number approximate and say it is estimated from the video. State the main limits.",
+    },
     practice_focus: {
       type: SchemaType.STRING,
       nullable: true,
@@ -281,14 +286,19 @@ const RESPONSE_SCHEMA = {
       nullable: true,
       description: "One swing thought in 10 words or fewer for what the video shows, or null when there is none.",
     },
+    scoring_breakdown: {
+      type: SchemaType.STRING,
+      description: "One compact line: no line breaks, no repeated spaces, no padding. If you scored: the rubric arithmetic with a brief label for each adjustment, listing only adjustments the video shows and ending in the final score, e.g. '75 + 5 (label) - 3 (label) = 77'. If you did not score: a brief explanation of why the video does not support scoring.",
+    },
+    score: {
+      type: SchemaType.INTEGER,
+      nullable: true,
+      description: "The final clamped integer (55-99) from scoring_breakdown, only when all three evidence_coverage positions are true and the video lets you apply the rubric; otherwise null, with the reason in scoring_breakdown. Full coverage alone does not require a score. Never a starting value, default or guess.",
+    },
   },
-  required: [
-    "scoring_breakdown", "score", "executive_summary", "evidence_limits", "evidence_coverage", "fault_tags",
-    "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
-    "highlights", "deficiencies", "drills",
-    "posture", "swing_plane", "impact",
-    "practice_focus", "pro_cue",
-  ],
+  propertyOrdering: [...RESPONSE_PROPERTY_ORDER],
+  // Every property stays required; listed in the same order.
+  required: [...RESPONSE_PROPERTY_ORDER],
 };
 
 // ── System instruction ────────────────────────────────────────────────────────
@@ -326,10 +336,11 @@ Name the joints and positions you describe (address, takeaway, top of the backsw
 SCORING
 ───────
 The score uses SwingProAI's scoring rubric below. It is a coaching rubric, not a calibrated measurement; do not describe it as one.
-• Fill evidence_coverage first: for address, top_of_backswing and impact, true only if the video shows that position clearly enough to judge it.
+• evidence_coverage: for address, top_of_backswing and impact, true only if the video shows that position clearly enough to judge it. Whether you may score depends on it.
 • Score only when all three are true and the video lets you apply the rubric's items. Full coverage alone does not require a score: if another limit prevents applying the rubric (for example, timing the video cannot show), set score to null. Whenever score is null, explain in scoring_breakdown what prevented scoring. Never output the starting value, a default or a guess in place of a score.
 • Apply an adjustment only when the video itself shows the movement it describes. An estimate you made is not, on its own, evidence of a fault.
-• When you score, write the arithmetic in scoring_breakdown first, e.g. "75 + 5 (...) - 3 (...) = 77", clamp the result to 55-99, and copy the final integer into score.
+• When you score, scoring_breakdown is the rubric arithmetic with a brief label for each adjustment, e.g. "75 + 5 (label) - 3 (label) = 77": clamp the result to 55-99, and score is that final integer.
+• scoring_breakdown is one compact line: no line breaks, no repeated spaces, no padding. When score is null, it is a brief explanation of why the video does not support scoring.
 • The rubric's thresholds are internal scoring criteria. Do not present them to the golfer as targets.
 
 Start: 75.
