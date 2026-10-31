@@ -568,7 +568,7 @@ describe("analyze-swing functional anchors", () => {
     expect(apiSource).toContain("SYSTEM_INSTRUCTION");
     expect(apiSource).toContain("RESPONSE_SCHEMA");
     expect(apiSource).toContain("temperature: 0.0");
-    expect(apiSource).toContain("maxOutputTokens: 8192");
+    expect(apiSource).toContain("maxOutputTokens: 16384");
   });
 
   it("keeps the Storage and parsing flow", () => {

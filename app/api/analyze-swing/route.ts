@@ -985,7 +985,7 @@ export async function POST(req: NextRequest) {
           responseMimeType: "application/json",  // required alongside responseSchema
           responseSchema:   RESPONSE_SCHEMA as Schema, // enforces structure at API level — no markdown fences possible
           temperature: 0.0,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 16384,
         },
       });
     } catch (providerError) {

@@ -2800,7 +2800,7 @@ describe("Z. the provider request the route builds is the one the SDK sent", () 
     const sdk = await sdkBodyFor(request);
     expect(sdk.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent");
     expect(buildGenerateContentBody(request)).toBe(sdk.body);
-    expect(request.generationConfig).toMatchObject({ responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 8192 });
+    expect(request.generationConfig).toMatchObject({ responseMimeType: "application/json", temperature: 0.0, maxOutputTokens: 16384 });
   });
 
   it("putting: byte-identical body", async () => {
@@ -3046,7 +3046,7 @@ describe("AA. provider response diagnostics (full swing)", () => {
     expect(state.modelConfigs[0].model).toBe("gemini-2.5-flash");
     const config = state.providerRequests[0].generationConfig;
     expect(config.temperature).toBe(0.0);
-    expect(config.maxOutputTokens).toBe(8192);
+    expect(config.maxOutputTokens).toBe(16384);
     expect(config.responseMimeType).toBe("application/json");
     expect(config.responseSchema).toBeDefined();
     expect(Object.keys(config).sort()).toEqual(["maxOutputTokens", "responseMimeType", "responseSchema", "temperature"]);

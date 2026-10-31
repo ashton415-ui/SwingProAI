@@ -269,6 +269,21 @@ select id, user_id, storage_path, video_url, created_at
     provider; acceptance by the live service remains unverified and belongs
     within the first separately authorized S6 scenario (no separate provider
     probe).
+- **Full-swing output budget (S6-R5 remediation; local, uncommitted).**
+  - In the S6 R5 staging run the full-swing call ended
+    `outcome=incomplete_generation finish_reason=max_tokens` (prompt 3791,
+    candidate 5774, thinking 2404 tokens). Candidate plus thinking tokens were
+    within 14 of the 8192 limit, consistent with thinking sharing the output
+    budget. The route refused the answer before reading any text, as designed.
+  - The full-swing `maxOutputTokens` is raised from 8192 to 16384. Putting
+    stays at 4096. Nothing else changes: model `gemini-2.5-flash` with the
+    default (dynamic) thinking, temperature 0.0, prompt, response schema,
+    transport (one request, never retried or redirected), the 240 s provider
+    deadline, the 2 MiB response limit, STOP-only acceptance and `MAX_TOKENS`
+    refusal before text is read.
+  - Not yet runtime-validated: whether 16384 is enough is unproven until a
+    separately authorized staging scenario. A larger budget can lengthen
+    responses and raise per-call latency and cost.
 
 ## 3. Activation sequence (each step separately authorized)
 
