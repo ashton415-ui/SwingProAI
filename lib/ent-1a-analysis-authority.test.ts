@@ -483,28 +483,58 @@ const HIGHLIGHT_VIEW = { ...HIGHLIGHT, checkpoint: null };
 const DEFICIENCY_VIEW = { ...DEFICIENCY, checkpoint: null, joint_coordinate: null, severity: null };
 const DRILL = { name: "Chair drill", the_why: "why", the_how: "how", the_feel: "feel" };
 
+/**
+ * A provider answer under fs-provider-v2 (server-authoritative scoring): face-on,
+ * every position and detail declared visible except the target reference,
+ * shoulder turn assessable at 92 (+5), hip turn assessable at 44 (no item applies),
+ * reverse pivot observed (-8). The server's score is 72. The deficiency is
+ * unlinked coaching (rubric_id null), so it produces no fault tag.
+ */
+const SEEN_POSITIONS = {
+  address: { visible: "yes", at: "0:00.5" },
+  takeaway_start: { visible: "yes", at: "0:01.0" },
+  top_of_backswing: { visible: "yes", at: "0:02.0" },
+  early_downswing: { visible: "yes", at: "0:02.3" },
+  impact: { visible: "yes", at: "0:02.6" },
+};
+const SEEN_DETAILS = {
+  shoulders: "visible", pelvis: "visible", spine_line: "visible", lead_wrist: "visible",
+  hands_grip: "visible", club_shaft: "visible", clubface: "unclear", target_reference: "not_visible",
+};
+const ASSESSABLE = { assessable: true, basis: "Clearly visible in the video." };
+const NOT_ASSESSABLE = { assessable: false, basis: null };
+const QUALITATIVE_FINDINGS = [
+  { id: "laid_off_p4", status: "not_assessable" },
+  { id: "over_the_top", status: "not_assessable" },
+  { id: "cupped_lead_wrist_top", status: "not_observed" },
+  { id: "reverse_pivot", status: "observed" },
+];
+const SERVER_BREAKDOWN = "75 + 5 (Shoulder rotation) - 8 (Reverse pivot) = 72";
+
 function validReport(): Record<string, unknown> {
   return {
-    scoring_breakdown: "Base 70, +5 tempo, -3 extension",
-    score: 72,
-    executive_summary: "Solid tempo with some early extension.",
     // S6-R1: required by the full-swing contract.
     evidence_limits: "Face-on view only; club path at the top is out of frame.",
-    // S6-R1A: explicit coverage; a scored report needs all three positions.
-    evidence_coverage: { address: true, top_of_backswing: true, impact: true },
-    fault_tags: ["early_extension"],
+    camera_view: "face_on",
+    positions: structuredClone(SEEN_POSITIONS),
+    detail_visibility: { ...SEEN_DETAILS },
     spine_angle: 31,
     hip_rotation: 44,
     shoulder_rotation: 92,
     tempo_ratio: "3:1",
-    highlights: [{ title: "Quiet head through impact", description: "Centred strike" }],
-    deficiencies: [{ title: "Early extension", description: "Hips move toward the ball through impact." }],
-    drills: [DRILL],
+    threshold_assessments: { shoulder_turn_at_top: { ...ASSESSABLE }, hip_turn_at_impact: { ...ASSESSABLE } },
     posture: { rating: "good", observation: "o", correction: "c" },
     swing_plane: { rating: "good", observation: "o", correction: "c" },
     impact: { rating: "needs_work", observation: "o", correction: "c" },
+    rubric_findings: structuredClone(QUALITATIVE_FINDINGS),
+    highlights: [{ title: "Quiet head through impact", description: "Centred strike" }],
+    deficiencies: [{ title: "Early extension", description: "Hips move toward the ball through impact.", rubric_id: null }],
+    drills: [DRILL],
+    executive_summary: "Solid tempo with some early extension.",
     practice_focus: "Hip depth",
     pro_cue: "Stay in the chair",
+    scorable: true,
+    unscored_reason: null,
   };
 }
 
@@ -1424,7 +1454,8 @@ describe("J3. client-supplied values are presented to the provider as unverified
   });
 
   it("a value the video did not show stays unavailable even when the client sent one", async () => {
-    state.geminiImpl = async () => JSON.stringify({ ...validReport(), hip_rotation: null, tempo_ratio: null });
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...validReport(), hip_rotation: null, tempo_ratio: null, threshold_assessments: { shoulder_turn_at_top: ASSESSABLE, hip_turn_at_impact: NOT_ASSESSABLE } });
     expect((await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: MEASURED })).status).toBe(200);
     const row = storedRow();
     expect(row.hip_rotation).toBeNull();
@@ -3157,7 +3188,7 @@ describe("AB1. only an explicit STOP may complete, even with valid JSON", () => 
 describe("AB2. unavailable values and unscorable results", () => {
   it("nullable estimates are stored as null — never 0 — and zero stays a value", async () => {
     state.geminiImpl = async () =>
-      JSON.stringify({ ...validReport(), spine_angle: null, hip_rotation: 0, shoulder_rotation: null, tempo_ratio: null });
+      JSON.stringify({ ...validReport(), spine_angle: null, hip_rotation: 0, shoulder_rotation: null, tempo_ratio: null, threshold_assessments: { shoulder_turn_at_top: NOT_ASSESSABLE, hip_turn_at_impact: NOT_ASSESSABLE } });
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
     const row = storedRow();
     expect([row.spine_angle, row.hip_rotation, row.shoulder_rotation, row.tempo_ratio]).toEqual([null, 0, null, null]);
@@ -3171,9 +3202,8 @@ describe("AB2. unavailable values and unscorable results", () => {
     state.geminiImpl = async () =>
       JSON.stringify({
         ...validReport(),
-        score: null,
-        scoring_breakdown: "Not scored: the downswing is out of frame.",
-        fault_tags: [],
+        scorable: false,
+        unscored_reason: "Not scored: the downswing is out of frame.",
         highlights: [],
         deficiencies: [],
         drills: [],
@@ -3181,7 +3211,9 @@ describe("AB2. unavailable values and unscorable results", () => {
         hip_rotation: null,
         shoulder_rotation: null,
         tempo_ratio: null,
-        evidence_coverage: { address: false, top_of_backswing: false, impact: false },
+        positions: NOTHING_SEEN,
+        threshold_assessments: { shoulder_turn_at_top: NOT_ASSESSABLE, hip_turn_at_impact: NOT_ASSESSABLE },
+        rubric_findings: QUALITATIVE_FINDINGS.map((f) => ({ ...f, status: "not_assessable" })),
         posture: { rating: "insufficient_evidence", observation: "Only the finish is visible.", correction: "" },
         swing_plane: { rating: "insufficient_evidence", observation: "The top is out of frame.", correction: "" },
         impact: { rating: "insufficient_evidence", observation: "Impact is out of frame.", correction: "" },
@@ -3211,9 +3243,13 @@ describe("AB2. unavailable values and unscorable results", () => {
 
   it.each([
     ["a drill without a deficiency", { deficiencies: [], drills: [DRILL] }],
-    ["a fractional score", { score: 72.5 }],
-    ["a score out of range", { score: 140 }],
-    ["a string score", { score: "72" }],
+    ["a provider-authored score", { score: 72 }],
+    ["a provider-authored scoring breakdown", { scoring_breakdown: "75 = 75" }],
+    ["provider-authored fault tags", { fault_tags: ["early_extension"] }],
+    ["provider-authored coverage", { evidence_coverage: { address: true, top_of_backswing: true, impact: true } }],
+    ["an observed finding the declared view cannot support", { rubric_findings: QUALITATIVE_FINDINGS.map((f) => (f.id === "over_the_top" ? { ...f, status: "observed" } : f)) }],
+    ["an estimate whose evidence is declared unclear", { detail_visibility: { ...SEEN_DETAILS, pelvis: "unclear" } }],
+    ["a quarantined item claimed", { rubric_findings: [...QUALITATIVE_FINDINGS, { id: "x_factor", status: "observed" }] }],
     ["an angle out of range", { hip_rotation: 900 }],
     ["a malformed tempo", { tempo_ratio: "fast" }],
     ["a missing evidence statement", { evidence_limits: "" }],
@@ -3441,18 +3477,27 @@ describe("AB4. surfaces show uncertainty, basis and absence; no unsupported equi
 //
 // Offline only (counting mock, loopback fake provider, fixture rendering).
 
-/** The finding's counterexample: nothing assessable, an explicit "not scored", yet a number. */
-function contradictoryUnscorable(score: number, coverage: boolean): string {
+const NOTHING_SEEN = {
+  address: { visible: "unclear", at: null },
+  takeaway_start: { visible: "unclear", at: null },
+  top_of_backswing: { visible: "unclear", at: null },
+  early_downswing: { visible: "unclear", at: null },
+  impact: { visible: "unclear", at: null },
+};
+
+/** The finding's counterexample: nothing assessable, yet declared scorable. */
+function contradictoryUnscorable(coverage: boolean): string {
   return JSON.stringify({
     ...validReport(),
-    score,
-    scoring_breakdown: "Not scored: the swing is out of frame from address to impact.",
-    evidence_coverage: { address: coverage, top_of_backswing: coverage, impact: coverage },
+    scorable: true,
+    unscored_reason: null,
+    positions: coverage ? structuredClone(SEEN_POSITIONS) : NOTHING_SEEN,
     spine_angle: null,
     hip_rotation: null,
     shoulder_rotation: null,
     tempo_ratio: null,
-    fault_tags: [],
+    threshold_assessments: { shoulder_turn_at_top: NOT_ASSESSABLE, hip_turn_at_impact: NOT_ASSESSABLE },
+    rubric_findings: QUALITATIVE_FINDINGS.map((f) => ({ ...f, status: "not_assessable" })),
     highlights: [],
     deficiencies: [],
     drills: [],
@@ -3465,17 +3510,15 @@ function contradictoryUnscorable(score: number, coverage: boolean): string {
 }
 
 describe("AC1. scored and unscored must agree with explicit evidence coverage", () => {
-  it.each([
-    [0, false], [75, false], [99, false], [100, false],
-    [0, true], [75, true], [99, true], [100, true],
-  ])("the counterexample with score %i (coverage claimed: %s) is refused as a whole", async (score, coverage) => {
-    state.geminiImpl = async () => contradictoryUnscorable(score, coverage);
+  it.each([false, true])("the counterexample declared scorable (positions visible: %s) is refused as a whole", async (coverage) => {
+    state.geminiImpl = async () => contradictoryUnscorable(coverage);
     await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
     expect(diagnosticLines()[0].line).toContain("outcome=validation_rejected finish_reason=stop");
   });
 
-  it("the same response with score null is a valid unscored analysis", async () => {
-    state.geminiImpl = async () => JSON.stringify({ ...JSON.parse(contradictoryUnscorable(75, false)), score: null });
+  it("the same response declared not scorable, with a reason, is a valid unscored analysis", async () => {
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...JSON.parse(contradictoryUnscorable(false)), scorable: false, unscored_reason: "Not scored: the swing is out of frame from address to impact." });
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
     expect(storedRow().status).toBe("complete");
     expect(storedRow().score).toBeNull();
@@ -3485,7 +3528,7 @@ describe("AC1. scored and unscored must agree with explicit evidence coverage", 
   it("an honest unscored result with full coverage completes (S6-R1B): covered, assessed, timing unavailable, explained", async () => {
     const explanation = "Not scored: the frame rate is too low to judge the transition or tempo, so the rubric cannot be applied.";
     state.geminiImpl = async () =>
-      JSON.stringify({ ...validReport(), score: null, scoring_breakdown: explanation, tempo_ratio: null });
+      JSON.stringify({ ...validReport(), scorable: false, unscored_reason: explanation, tempo_ratio: null });
     const response = await post({ analysisId: ANALYSIS_ID });
     expect(response.status).toBe(200);
     expect((await json(response)).data.score).toBeNull();
@@ -3503,12 +3546,21 @@ describe("AC1. scored and unscored must agree with explicit evidence coverage", 
 
   it("a pillar rated without its position covered is refused", async () => {
     state.geminiImpl = async () =>
-      JSON.stringify({ ...validReport(), score: null, evidence_coverage: { address: true, top_of_backswing: true, impact: false } });
+      JSON.stringify({
+        ...validReport(),
+        scorable: false,
+        unscored_reason: "Impact is unclear.",
+        positions: { ...structuredClone(SEEN_POSITIONS), impact: { visible: "unclear", at: null } },
+        hip_rotation: null,
+        tempo_ratio: null,
+        threshold_assessments: { shoulder_turn_at_top: ASSESSABLE, hip_turn_at_impact: NOT_ASSESSABLE },
+      });
     await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
   });
 
   it("a scored analysis keeps a legitimate zero-valued estimate", async () => {
-    state.geminiImpl = async () => JSON.stringify({ ...validReport(), hip_rotation: 0 });
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...validReport(), hip_rotation: 0, threshold_assessments: { shoulder_turn_at_top: ASSESSABLE, hip_turn_at_impact: NOT_ASSESSABLE } });
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
     expect(storedRow().hip_rotation).toBe(0);
     expect(storedRow().score).toBe(72);
@@ -3685,11 +3737,12 @@ describe("AC6. the nullable response schema is what the transport actually sends
       expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
       expect(captured).toBe(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest));
       const schema = JSON.parse(captured).generationConfig.responseSchema;
-      for (const field of ["score", "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "practice_focus", "pro_cue"]) {
+      for (const field of ["spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "practice_focus", "pro_cue", "unscored_reason"]) {
         expect(schema.properties[field].nullable, field).toBe(true);
       }
-      expect(schema.required).toContain("evidence_coverage");
-      expect(schema.properties.evidence_coverage.required).toEqual(["address", "top_of_backswing", "impact"]);
+      expect(schema.required).toContain("positions");
+      expect(schema.properties.positions.required).toEqual(["address", "takeaway_start", "top_of_backswing", "early_downswing", "impact"]);
+      for (const removed of ["score", "scoring_breakdown", "fault_tags", "evidence_coverage"]) expect(schema.properties[removed], removed).toBeUndefined();
       expect(state.geminiCalls).toBe(1);
     } finally {
       server.closeAllConnections();
@@ -3698,31 +3751,15 @@ describe("AC6. the nullable response schema is what the transport actually sends
   });
 });
 
-describe("AC7. full-swing output consistency: evidence-first order, compact scoring_breakdown (S6 R6B)", () => {
+describe("AC7. full-swing output consistency: evidence-first order; the server computes the score (fs-provider-v2)", () => {
   const ORDER = [
-    "evidence_limits", "evidence_coverage",
-    "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
-    "posture", "swing_plane", "impact",
-    "highlights", "deficiencies", "fault_tags", "drills",
+    "evidence_limits", "camera_view", "positions", "detail_visibility",
+    "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "threshold_assessments",
+    "posture", "swing_plane", "impact", "rubric_findings",
+    "highlights", "deficiencies", "drills",
     "executive_summary", "practice_focus", "pro_cue",
-    "scoring_breakdown", "score",
+    "scorable", "unscored_reason",
   ];
-  // Types, nullable, enums, items and required membership of the schema at 8886efc, with descriptions and ordering
-  // removed and every key sorted (computed offline from the reviewed request d937eb49…a8d1).
-  const STRUCTURE_AT_8886EFC = "260e3d10e04cc60a11dee760304fbff5629df1fa238a0db9f8886632ddfbe3e7";
-  const structureOf = (x: unknown): unknown => {
-    if (Array.isArray(x)) return x.map(structureOf);
-    if (x && typeof x === "object") {
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(x).sort()) {
-        if (k === "description" || k === "propertyOrdering") continue;
-        const v = (x as Record<string, unknown>)[k];
-        out[k] = k === "required" ? [...(v as string[])].sort() : structureOf(v);
-      }
-      return out;
-    }
-    return x;
-  };
 
   /** The request body the route's real transport sends, captured by a loopback fake provider. */
   async function capturedBody(answer: string = JSON.stringify(validReport())): Promise<Record<string, any>> {
@@ -3748,24 +3785,25 @@ describe("AC7. full-swing output consistency: evidence-first order, compact scor
     }
   }
 
-  it("the serialized schema asks for evidence, estimates and pillars before scoring, with scoring last", async () => {
+  it("the serialized schema asks for declarations, estimates and findings before coaching, with the scorability statement last", async () => {
     const schema = (await capturedBody()).generationConfig.responseSchema;
     expect(schema.propertyOrdering).toEqual(ORDER);
     expect(Object.keys(schema.properties)).toEqual(ORDER);
     expect(schema.required).toEqual(ORDER);
-    const at = (k: string) => ORDER.indexOf(k);
-    for (const evidence of ["evidence_limits", "evidence_coverage", "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "posture", "swing_plane", "impact"]) {
-      expect(at(evidence), evidence).toBeLessThan(at("scoring_breakdown"));
-    }
-    expect(ORDER.slice(-2)).toEqual(["scoring_breakdown", "score"]);
+    expect(ORDER.slice(-2)).toEqual(["scorable", "unscored_reason"]);
     expect(state.geminiCalls).toBe(1);
   });
 
-  it("every field, type, nullable setting, enum and required member is unchanged", async () => {
-    const { createHash } = await import("node:crypto");
+  it("the schema offers only the four active qualitative items; no threshold or quarantined item can be classified or linked", async () => {
     const schema = (await capturedBody()).generationConfig.responseSchema;
-    expect(createHash("sha256").update(JSON.stringify(structureOf(schema))).digest("hex")).toBe(STRUCTURE_AT_8886EFC);
-    expect(new Set(schema.required)).toEqual(new Set(Object.keys(schema.properties)));
+    const qualitative = ["laid_off_p4", "over_the_top", "cupped_lead_wrist_top", "reverse_pivot"];
+    expect(schema.properties.rubric_findings.items.properties.id.enum).toEqual(qualitative);
+    expect(schema.properties.deficiencies.items.properties.rubric_id.enum).toEqual(qualitative);
+    const text = JSON.stringify(schema);
+    for (const id of ["x_factor", "tempo_ratio_ideal", "spine_maintained", "early_extension", "casting_early_release", "minor_alignment_or_grip", "shoulder_turn_full", "restricted_backswing", "body_block", "hip_turn_impact"]) {
+      expect(text, id).not.toContain(id);
+    }
+    expect(schema.properties.threshold_assessments.required).toEqual(["shoulder_turn_at_top", "hip_turn_at_impact"]);
   });
 
   it("generation settings are unchanged: gemini-2.5-flash, temperature 0, 16384, JSON, no thinking configuration", async () => {
@@ -3775,50 +3813,48 @@ describe("AC7. full-swing output consistency: evidence-first order, compact scor
     expect([body.generationConfig.temperature, body.generationConfig.maxOutputTokens, body.generationConfig.responseMimeType]).toEqual([0, 16384, "application/json"]);
   });
 
-  it("no instruction says which JSON field to write first; scoring still depends on video evidence", async () => {
+  it("the model is never asked to classify against a cutoff: no points, thresholds or start value in the instruction or schema", async () => {
     const body = await capturedBody();
     const sys = body.systemInstruction.parts[0].text as string;
     const all = [sys, JSON.stringify(body.generationConfig.responseSchema)].join("\n");
-    expect(all).not.toContain("Fill evidence_coverage first");
-    expect(all).not.toContain("in scoring_breakdown first");
+    for (const banned of ["pts", "Start: 75", "≥", "°", "90", "45", "2.5", "2.8", "3.5", "70", "80", "30", "40", "55-99", "clamp", "X-Factor", "scoring_breakdown", "fault_tags", "evidence_coverage"]) {
+      expect(all, banned).not.toContain(banned);
+    }
+    expect(sys).toContain("You do not write a score.");
+    expect(sys).toContain("You do not compare any estimate with a cutoff.");
+  });
+
+  it("no instruction says which JSON field to write first; evidence guidance is kept throughout", async () => {
+    const body = await capturedBody();
+    const sys = body.systemInstruction.parts[0].text as string;
+    const all = [sys, JSON.stringify(body.generationConfig.responseSchema)].join("\n");
     expect(all).not.toMatch(/\b(write|fill|output|start with)\b[^.\n]{0,60}\bfirst\b/i);
     for (const kept of [
-      "Score only when all three are true and the video lets you apply the rubric's items.",
-      "Full coverage alone does not require a score",
-      "Whenever score is null, explain in scoring_breakdown what prevented scoring.",
-      "Never output the starting value, a default or a guess in place of a score.",
-      "Whether you may score depends on it.",
-      "Start: 75.",
-      "clamp the result to 55-99",
-      "Apply each adjustment at most once for one issue",
+      "Base every statement on what the attached video shows",
+      "Never fill a gap with a typical fault, a template or another golfer's pattern.",
+      "never state a ball-flight result as fact",
+      "Never invent a strength or a fault to fill a list.",
+      "An estimate you made is not, on its own, evidence of a fault.",
+      "Never mark something not_observed because you cannot see it.",
+      "Full coverage alone does not require true.",
+      "Each drill addresses one listed deficiency, in the same order; no drill without a deficiency.",
+      "takeaway_start (the moment the club starts back; not address)",
     ]) expect(sys, kept).toContain(kept);
   });
 
-  it("scoring_breakdown is requested as one compact line: arithmetic with labels when scored, a brief reason when not", async () => {
-    const body = await capturedBody();
-    const sys = body.systemInstruction.parts[0].text as string;
-    const desc = body.generationConfig.responseSchema.properties.scoring_breakdown.description as string;
-    expect(sys).toContain("scoring_breakdown is one compact line: no line breaks, no repeated spaces, no padding.");
-    expect(sys).toContain('e.g. "75 + 5 (label) - 3 (label) = 77"');
-    expect(sys).toContain("When score is null, it is a brief explanation of why the video does not support scoring.");
-    expect(desc).toContain("One compact line: no line breaks, no repeated spaces, no padding.");
-    expect(desc).toContain("ending in the final score");
-    expect(desc).toContain("If you did not score: a brief explanation of why the video does not support scoring.");
-  });
-
-  it("an answer in the new key order with a compact scored breakdown completes unchanged", async () => {
+  it("an answer in the schema order completes; the stored score and breakdown are the server's arithmetic", async () => {
     const report = validReport();
     const ordered = Object.fromEntries(ORDER.map((k) => [k, report[k]]));
     state.geminiImpl = async () => JSON.stringify(ordered);
     expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
     expect(storedRow().status).toBe("complete");
-    expect(storedRow().score).toBe(report.score);
-    expect((storedRow().metrics as Record<string, any>).scoring_breakdown).toBe(report.scoring_breakdown);
+    expect(storedRow().score).toBe(72);
+    expect((storedRow().metrics as Record<string, any>).scoring_breakdown).toBe(SERVER_BREAKDOWN);
   });
 
   it("a synthetic newline-repetition answer cut at MAX_TOKENS is still refused before any text is read", async () => {
-    // Synthetic fixture only: a short arithmetic start followed by repeated JSON newline escapes, cut mid-escape.
-    const synthetic = '{"evidence_limits":"x","evidence_coverage":{"address":true,"top_of_backswing":true,"impact":true},"scoring_breakdown":"75 + 5 (label) ' + "\\n".repeat(4000) + "\\";
+    // Synthetic fixture only: a short start followed by repeated JSON newline escapes, cut mid-escape.
+    const synthetic = '{"evidence_limits":"x","camera_view":"face_on","positions":{"address":{"visible":"yes","at":"0:01' + "\\n".repeat(4000) + "\\";
     state.geminiFinishReason = "MAX_TOKENS";
     state.geminiImpl = async () => synthetic;
     await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
@@ -3827,5 +3863,162 @@ describe("AC7. full-swing output consistency: evidence-first order, compact scor
     expect(diagnosticLines()[0].line).toContain("text_chars=unavailable");
     expect(lines.some((l) => l.startsWith("[analyze-swing] Gemini response length"))).toBe(false);
     expect(lines).not.toContain("[analyze-swing] JSON parse failure");
+  });
+});
+
+// ─── AD. server-authoritative scoring: storage, privacy and compatibility ─────
+describe("AD. the canonical report is stored in the existing shapes; the assessment is internal; legacy rows still read", () => {
+  const INTERNAL_MARKERS = ["rubric_assessment", "camera_view", "detail_visibility", "threshold_assessments", "rubric_findings", "fs-provider-v2", "not-coach-reviewed", "takeaway_start"];
+  const deepKeys = (x: unknown, prefix = ""): string[] => {
+    if (Array.isArray(x)) return [`${prefix}[]`, ...(x.length ? deepKeys(x[0], `${prefix}[]`) : [])];
+    if (x && typeof x === "object") return Object.keys(x).sort().flatMap((k) => [`${prefix}.${k}`, ...deepKeys((x as Record<string, unknown>)[k], `${prefix}.${k}`)]);
+    return [];
+  };
+
+  it("stores the server score, breakdown, boolean coverage and derived tags, plus a versioned internal assessment", async () => {
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    const row = storedRow();
+    const metrics = row.metrics as Record<string, any>;
+    expect(row.score).toBe(72);
+    expect(metrics.scoring_breakdown).toBe(SERVER_BREAKDOWN);
+    expect(metrics.evidence_coverage).toEqual({ address: true, top_of_backswing: true, impact: true });
+    expect(metrics.fault_tags).toEqual([]);
+    expect(metrics.rubric_assessment).toMatchObject({
+      version: 1, provider_contract: "fs-provider-v2", rubric_version: "fs-rubric-1-draft-not-coach-reviewed", policy: "P1-provisional",
+      outcome: "scored", raw_total: 72, scorable_declared: true,
+    });
+    expect(metrics.rubric_assessment.declarations.camera_view).toBe("face_on");
+    expect(Object.keys(metrics).sort()).toEqual([
+      "drills", "evidence_coverage", "evidence_limits", "fault_tags", "impact", "metric_evidence", "posture",
+      "practice_focus", "pro_cue", "rubric_assessment", "scoring_breakdown", "swing_plane",
+    ]);
+  });
+
+  it("a deficiency linked to an observed item yields the rubric ID as its fault tag", async () => {
+    state.geminiImpl = async () =>
+      JSON.stringify({ ...validReport(), deficiencies: [{ title: "Reverse pivot", description: "d", rubric_id: "reverse_pivot" }] });
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect((storedRow().metrics as Record<string, any>).fault_tags).toEqual(["reverse_pivot"]);
+    expect((await json(await getResult(ANALYSIS_ID))).data.coaching.faultTags).toEqual(["reverse_pivot"]);
+  });
+
+  it("neither the POST response, the native result nor the served views contain the assessment or any declaration", async () => {
+    const response = await post({ analysisId: ANALYSIS_ID });
+    const postText = JSON.stringify(await json(response));
+    const nativeText = JSON.stringify(await json(await getResult(ANALYSIS_ID)));
+    const viewText = JSON.stringify(serializeAnalysisResult(storedRow(), NO_PREMIUM_ACCESS));
+    for (const text of [postText, nativeText, viewText]) {
+      for (const marker of INTERNAL_MARKERS) expect(text, marker).not.toContain(marker);
+    }
+    expect(JSON.parse(postText).data.score).toBe(72);
+  });
+
+  it("a new row and a legacy row serve identical keys (authorized view and native DTO)", async () => {
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    const fresh = storedRow();
+    const legacy = completeRow({
+      metrics: {
+        scoring_breakdown: "Base 70", evidence_limits: "Legacy limits.", fault_tags: ["early_extension"], drills: [structuredClone(DRILL)],
+        posture: { rating: "good", observation: "o", correction: "c" }, swing_plane: { rating: "good", observation: "o", correction: "c" },
+        impact: { rating: "good", observation: "o", correction: "c" }, practice_focus: "p", pro_cue: "c",
+      },
+    });
+    const freshView = serializeAnalysisResult(fresh, NO_PREMIUM_ACCESS);
+    const legacyView = serializeAnalysisResult(legacy, NO_PREMIUM_ACCESS);
+    expect(deepKeys(freshView)).toEqual(deepKeys(legacyView));
+    state.analyses = [fresh];
+    const freshNative = (await json(await getResult(ANALYSIS_ID))).data;
+    state.analyses = [legacy];
+    const legacyNative = (await json(await getResult(ANALYSIS_ID))).data;
+    expect(deepKeys(freshNative)).toEqual(deepKeys(legacyNative));
+    // Legacy free-text tags are still read and served unchanged.
+    expect(legacyNative.coaching.faultTags).toEqual(["early_extension"]);
+    expect(legacyNative.score).toBe(72);
+  });
+
+  it("an unscored new row presents as Not scored with the reason, never 0 or 75", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), scorable: false, unscored_reason: "Not scored: the transition cannot be timed." });
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    const { data } = await json(await getResult(ANALYSIS_ID));
+    expect(data.score).toBeNull();
+    expect(data.coaching.scoringBreakdown).toBe("Not scored: the transition cannot be timed.");
+    expect((storedRow().metrics as Record<string, any>).rubric_assessment.outcome).toBe("unscored");
+  });
+
+  it("the rejection reason is never logged or returned, and no declaration reaches the logs", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), score: 72 });
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    const logged = consoleLines().map((entry) => entry.line).join("\n");
+    for (const marker of ["provider_authored_scoring", "camera_view", "face_on", "reverse_pivot"]) expect(logged, marker).not.toContain(marker);
+  });
+});
+
+// ─── AE. request bytes outside the intentionally changed fields (server-authoritative scoring) ───
+//
+// The full-swing system instruction and response schema change on purpose; every other byte of the
+// provider request must equal the b2af7ae request. The putting request must be byte-identical in full.
+// Baselines were captured from the unchanged b2af7ae route with this same test (fsscoring validation).
+describe("AE. request bodies are byte-identical to b2af7ae outside the intentionally changed fields", () => {
+  // Owner decision D-PROMPT (local candidate): exactly one user-prompt sentence changed. The comparison
+  // reverses exactly that sentence in a clone of the outbound request; the video, every other prompt
+  // line and the generation settings are compared byte for byte against the b2af7ae baseline.
+  const OLD_SENTENCE =
+    "Apply the scoring rubric only if the video shows enough of the swing; otherwise leave score null and say why. Output the JSON object. No markdown, no preamble.";
+  const NEW_SENTENCE =
+    "Follow the response schema. Set scorable to false and explain why in unscored_reason whenever the video does not support applying the rubric. Output the JSON object. No markdown, no preamble.";
+  const sha = async (s: string) => (await import("node:crypto")).createHash("sha256").update(s).digest("hex");
+  const userTexts = (body: Record<string, any>): string[] =>
+    (body.contents as { parts: { text?: string }[] }[]).flatMap((c) => c.parts.map((part) => part.text).filter((x): x is string => typeof x === "string"));
+  /** The outbound body with the authorized sentence reversed (exactly once), minus systemInstruction and responseSchema. */
+  const restWithSentenceReversed = (request: unknown) => {
+    const body = JSON.parse(buildGenerateContentBody(request as GeminiGenerateRequest));
+    let replacements = 0;
+    for (const content of body.contents as { parts: { text?: string }[] }[]) {
+      for (const part of content.parts) {
+        if (typeof part.text !== "string") continue;
+        const occurrences = part.text.split(NEW_SENTENCE).length - 1;
+        replacements += occurrences;
+        part.text = part.text.split(NEW_SENTENCE).join(OLD_SENTENCE);
+      }
+    }
+    expect(replacements).toBe(1);
+    delete body.systemInstruction;
+    delete body.generationConfig.responseSchema;
+    return JSON.stringify(body);
+  };
+  const expectNewSentenceOnly = (request: unknown) => {
+    const text = userTexts(JSON.parse(buildGenerateContentBody(request as GeminiGenerateRequest))).join(String.fromCharCode(10));
+    expect(text.split(NEW_SENTENCE).length - 1).toBe(1);
+    expect(text).not.toContain(OLD_SENTENCE);
+    expect(text).not.toContain("leave score null");
+  };
+
+  it("full swing without client values: only the authorized sentence differs outside systemInstruction and responseSchema", async () => {
+    await post({ analysisId: ANALYSIS_ID });
+    expect(state.geminiCalls).toBe(1);
+    expectNewSentenceOnly(state.providerRequests[0]);
+    expect(await sha(restWithSentenceReversed(state.providerRequests[0]))).toBe("dc1234683441d642f163c39022fb33cf1e05ffef99f2e05a0b849fd01a4eeced");
+  });
+
+  it("full swing with client values: only the authorized sentence differs outside systemInstruction and responseSchema", async () => {
+    await post({ analysisId: ANALYSIS_ID, mediapipeMetrics: { spineAngle: 31.5, hipRotation: 40, shoulderRotation: 88, tempoRatio: "3.1:1", setupSpineAngle: 38, impactSpineAngle: 30 } });
+    expect(state.geminiCalls).toBe(1);
+    expectNewSentenceOnly(state.providerRequests[0]);
+    expect(await sha(restWithSentenceReversed(state.providerRequests[0]))).toBe("64e3a15c9e4e39af9de3480a2c25e97b0c5788ada10010920e449435eef71aab");
+  });
+
+  it("the reversal is not vacuous: an unreversed clone does not match the baseline", async () => {
+    await post({ analysisId: ANALYSIS_ID });
+    const body = JSON.parse(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest));
+    delete body.systemInstruction;
+    delete body.generationConfig.responseSchema;
+    expect(await sha(JSON.stringify(body))).not.toBe("dc1234683441d642f163c39022fb33cf1e05ffef99f2e05a0b849fd01a4eeced");
+  });
+
+  it("putting: the whole request body", async () => {
+    puttWithVideo();
+    await post({ analysisId: ANALYSIS_ID });
+    expect(state.geminiCalls).toBe(1);
+    expect(await sha(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest))).toBe("48d246a3e35c512129439c9297c1d6613815557d9986977778ae9f9db3fcca6c");
   });
 });

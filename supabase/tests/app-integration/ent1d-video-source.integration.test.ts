@@ -56,10 +56,37 @@ import { admin, cleanupFixtures, createAnalysis, createGolfer, operatorSql, row,
 import { outboundViolations } from "./ent1d-app-setup";
 import { KEY_VECTORS, OTHER, OWNER } from "./ent1d-video-key-vectors";
 
+// Provider contract fs-provider-v2. Every assessable item is not observed (shoulder 85,
+// hip 42), so the server's arithmetic earns 75; the provider writes no score.
 const PROVIDER_ANSWER = {
-  scoring_breakdown: "75 = 75", score: 75, executive_summary: "ENT1D video-source summary.", fault_tags: ["x"],
-  spine_angle: 40, hip_rotation: 40, shoulder_rotation: 90, tempo_ratio: "3.0:1",
-  highlights: [{ title: "t", description: "d" }], deficiencies: [{ title: "t", description: "d" }],
+  evidence_limits: "Synthetic integration clip; face-on only.",
+  camera_view: "face_on",
+  positions: {
+    address: { visible: "yes", at: "0:00.5" },
+    takeaway_start: { visible: "yes", at: "0:01.0" },
+    top_of_backswing: { visible: "yes", at: "0:02.0" },
+    early_downswing: { visible: "yes", at: "0:02.3" },
+    impact: { visible: "yes", at: "0:02.6" },
+  },
+  detail_visibility: {
+    shoulders: "visible", pelvis: "visible", spine_line: "visible", lead_wrist: "visible",
+    hands_grip: "visible", club_shaft: "visible", clubface: "unclear", target_reference: "not_visible",
+  },
+  threshold_assessments: {
+    shoulder_turn_at_top: { assessable: true, basis: "Shoulder line visible at the top." },
+    hip_turn_at_impact: { assessable: true, basis: "Belt line visible at impact." },
+  },
+  rubric_findings: [
+    { id: "laid_off_p4", status: "not_assessable" },
+    { id: "over_the_top", status: "not_assessable" },
+    { id: "cupped_lead_wrist_top", status: "not_observed" },
+    { id: "reverse_pivot", status: "not_observed" },
+  ],
+  scorable: true,
+  unscored_reason: null,
+  executive_summary: "ENT1D video-source summary.",
+  spine_angle: 40, hip_rotation: 42, shoulder_rotation: 85, tempo_ratio: "3.0:1",
+  highlights: [{ title: "t", description: "d" }], deficiencies: [{ title: "t", description: "d", rubric_id: null }],
   drills: [{ name: "n", the_why: "w", the_how: "h", the_feel: "f" }],
   posture: { rating: "good", observation: "o", correction: "c" },
   swing_plane: { rating: "good", observation: "o", correction: "c" },

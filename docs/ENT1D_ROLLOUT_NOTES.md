@@ -320,6 +320,52 @@ select id, user_id, storage_path, video_url, created_at
     numeric-score eligibility checks, estimates, provenance and putting.
   - Not runtime-validated: whether the model now finishes within budget is
     unknown until a separately authorized live check.
+- **Server-authoritative full-swing scoring (local candidate; uncommitted;
+  policy P1, provisional).** The provider no longer writes the score, the
+  scoring breakdown, fault tags or the coverage map; a response carrying any of
+  them is refused. Provider contract `fs-provider-v2`
+  (`lib/full-swing-analysis-contract.ts`):
+  - the model declares the camera view, whether address, takeaway start, top of
+    the backswing, early downswing and impact are visible (with approximate
+    times), which body and club details are visible, its own estimates, whether
+    the shoulder and hip turns are assessable (with a visible basis), a finding
+    for each qualitative rubric item, the pillars, coaching and whether the
+    rubric can be applied (`scorable`, with `unscored_reason`);
+  - the server derives threshold outcomes, applies the rubric's existing points,
+    "larger of" rule and 55-99 clamp, and writes the breakdown
+    (`lib/full-swing-scoring-rubric.ts`). The model never sees points or
+    numeric cutoffs. 75 is a result only when assessed items earned no
+    adjustment; missing evidence is never scored;
+  - whole-response refusal for mechanical contradictions: an item assessed
+    (observed or not observed) without its declared view, detail or moments; an
+    estimate given while its evidence is declared unclear or unavailable;
+    timestamps malformed or out of order; scorable while positions, a rated
+    pillar or any assessable item is missing; coaching linked to an item that
+    was not observed. No repair, default, partial storage or retry;
+  - quarantined (never assessable, no points, no linked coaching):
+    `x_factor`, `tempo_ratio_ideal`, `spine_maintained`, both early-extension
+    items, `casting_early_release` (D-CAST) and `minor_alignment_or_grip`
+    (D-ALIGN);
+  - stored and served shapes are unchanged (score, breakdown, boolean
+    `metrics.evidence_coverage`, estimates and provenance, pillars, lists);
+    `metrics.fault_tags` on new rows holds rubric IDs of linked deficiencies.
+    A versioned internal `metrics.rubric_assessment` (declarations, outcomes,
+    applied adjustments) is stored and never served (the read authority's
+    allow-list drops it). Legacy rows read unchanged;
+  - the rubric table is an ENGINEERING DRAFT, NOT COACH-REVIEWED, NOT
+    VALIDATED. Declarations, estimates, timestamps and prose remain model
+    statements: the checks enforce consistency, not truth, and do not show
+    which frames the provider sampled. Content evaluation is still required;
+  - user prompt (owner decision D-PROMPT): the one sentence that asked the
+    model to "leave score null" now reads "Follow the response schema. Set
+    scorable to false and explain why in unscored_reason whenever the video
+    does not support applying the rubric. Output the JSON object. No markdown,
+    no preamble."; every other prompt line is unchanged;
+  - unchanged: model, temperature, budgets, default thinking, transport,
+    deadline, response limit, one call, STOP-only acceptance, the rest of the
+    user prompt and the whole putting request (byte comparisons in the
+    authority suite, with exactly that one sentence reversed for full swing).
+    Not runtime-validated.
 
 ## 3. Activation sequence (each step separately authorized)
 

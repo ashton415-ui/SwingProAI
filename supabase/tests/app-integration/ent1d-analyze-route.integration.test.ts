@@ -73,17 +73,44 @@ import { outboundViolations } from "./ent1d-app-setup";
 
 // ── Deterministic provider answers ───────────────────────────────────────────
 
+// Provider contract fs-provider-v2: the provider never writes the score, the
+// breakdown or fault tags. Shoulder turn 88 is assessable but meets no item;
+// hip turn 45 is assessable (+5); the server's score is 80.
+const SERVER_SCORE = 80;
+const SERVER_BREAKDOWN = "75 + 5 (Hip rotation at impact) = 80";
 const FULL_SWING_REPORT = {
-  scoring_breakdown: "75 + 5 (Shoulders) - 3 (Early extension) = 77",
-  score: 77,
+  evidence_limits: "Synthetic integration clip; face-on only.",
+  camera_view: "face_on",
+  positions: {
+    address: { visible: "yes", at: "0:00.5" },
+    takeaway_start: { visible: "yes", at: "0:01.0" },
+    top_of_backswing: { visible: "yes", at: "0:02.0" },
+    early_downswing: { visible: "yes", at: "0:02.3" },
+    impact: { visible: "yes", at: "0:02.6" },
+  },
+  detail_visibility: {
+    shoulders: "visible", pelvis: "visible", spine_line: "visible", lead_wrist: "visible",
+    hands_grip: "visible", club_shaft: "visible", clubface: "unclear", target_reference: "not_visible",
+  },
+  threshold_assessments: {
+    shoulder_turn_at_top: { assessable: true, basis: "Shoulder line visible at the top." },
+    hip_turn_at_impact: { assessable: true, basis: "Belt line visible at impact." },
+  },
+  rubric_findings: [
+    { id: "laid_off_p4", status: "not_assessable" },
+    { id: "over_the_top", status: "not_assessable" },
+    { id: "cupped_lead_wrist_top", status: "not_observed" },
+    { id: "reverse_pivot", status: "not_observed" },
+  ],
+  scorable: true,
+  unscored_reason: null,
   executive_summary: "ENT1D synthetic summary citing the measured 42 degree spine angle.",
-  fault_tags: ["early_extension", "restricted_backswing"],
   spine_angle: 42,
   hip_rotation: 45,
   shoulder_rotation: 88,
   tempo_ratio: "3.0:1",
   highlights: [{ title: "Stable address posture", description: "Spine angle held near 42 degrees." }],
-  deficiencies: [{ title: "Early extension", description: "Hips move toward the ball before impact." }],
+  deficiencies: [{ title: "Early extension", description: "Hips move toward the ball before impact.", rubric_id: null }],
   drills: [{ name: "Wall Hip Drill", the_why: "Keeps depth.", the_how: "Hips on the wall.", the_feel: "Seat stays back." }],
   posture: { rating: "good", observation: "Balanced.", correction: "Keep it." },
   swing_plane: { rating: "needs_work", observation: "Slightly steep.", correction: "Shallow the shaft." },
@@ -195,29 +222,31 @@ describe("analyze-swing route, full swing", () => {
 
     const r = await row(id);
     expect(r.status).toBe("complete");
-    expect(r.score).toBe(77);
+    expect(r.score).toBe(SERVER_SCORE);
     expect(r.feedback).toBe(FULL_SWING_REPORT.executive_summary);
     expect(r.spine_angle).toBe(42);
     expect(r.hip_rotation).toBe(45);
     expect(r.shoulder_rotation).toBe(88);
     expect(Number(r.tempo_ratio)).toBe(3);
     const metrics = r.metrics as Record<string, unknown>;
-    expect(metrics.scoring_breakdown).toBe(FULL_SWING_REPORT.scoring_breakdown);
-    expect(metrics.fault_tags).toEqual(FULL_SWING_REPORT.fault_tags);
+    expect(metrics.scoring_breakdown).toBe(SERVER_BREAKDOWN);
+    expect(metrics.fault_tags).toEqual([]);
+    expect(metrics.evidence_coverage).toEqual({ address: true, top_of_backswing: true, impact: true });
+    expect(metrics.rubric_assessment).toMatchObject({ version: 1, provider_contract: "fs-provider-v2", outcome: "scored", raw_total: SERVER_SCORE });
     expect(metrics.drills).toEqual([{ name: "Wall Hip Drill", the_why: "Keeps depth.", the_how: "Hips on the wall.", the_feel: "Seat stays back." }]);
     expect(metrics.posture).toEqual(FULL_SWING_REPORT.posture);
     expect(metrics.swing_plane).toEqual(FULL_SWING_REPORT.swing_plane);
     expect(metrics.impact).toEqual(FULL_SWING_REPORT.impact);
     expect(metrics.practice_focus).toBe(FULL_SWING_REPORT.practice_focus);
     expect(metrics.pro_cue).toBe(FULL_SWING_REPORT.pro_cue);
-    expect(r.swing_highlights).toEqual([{ checkpoint: "impact", positive_movement: "Stable address posture", mechanical_benefit: "Spine angle held near 42 degrees." }]);
+    expect(r.swing_highlights).toEqual([{ checkpoint: null, positive_movement: "Stable address posture", mechanical_benefit: "Spine angle held near 42 degrees." }]);
     expect((r.mechanical_deficiencies as unknown[])[0]).toMatchObject({ fault_description: "Early extension" });
     expect(r.processing_claim_id).not.toBeNull();
     expect(r.provider_dispatched_at).not.toBeNull();
 
     // The route's response is the authorized view, never the raw row.
     const data = res.body.data as Record<string, unknown>;
-    expect(data.score).toBe(77);
+    expect(data.score).toBe(SERVER_SCORE);
     for (const key of ["processing_claim_id", "provider_dispatched_at", "processing_heartbeat_at"]) {
       expect(data, key).not.toHaveProperty(key);
     }
@@ -225,9 +254,13 @@ describe("analyze-swing route, full swing", () => {
     // The application's own result path for web and native clients.
     const v1 = await readResultV1(owner, id);
     expect(v1.status).toBe(200);
-    expect(v1.body.data).toMatchObject({ analysisId: id, status: "complete", score: 77, feedback: FULL_SWING_REPORT.executive_summary });
+    expect(v1.body.data).toMatchObject({ analysisId: id, status: "complete", score: SERVER_SCORE, feedback: FULL_SWING_REPORT.executive_summary });
     const coaching = v1.body.data?.coaching as Record<string, unknown>;
-    expect(coaching.scoringBreakdown).toBe(FULL_SWING_REPORT.scoring_breakdown);
+    expect(coaching.scoringBreakdown).toBe(SERVER_BREAKDOWN);
+    for (const marker of ["rubric_assessment", "camera_view", "detail_visibility", "threshold_assessments", "fs-provider-v2"]) {
+      expect(JSON.stringify(v1.body), marker).not.toContain(marker);
+      expect(JSON.stringify(res.body), marker).not.toContain(marker);
+    }
     expect(coaching.drills).toEqual([{ name: "Wall Hip Drill", why: "Keeps depth.", how: "Hips on the wall.", feel: "Seat stays back." }]);
     expect(JSON.stringify(v1.body)).not.toContain("processing_claim_id");
     expect((await readResultV1(stranger, id)).status).toBe(404);
@@ -236,7 +269,7 @@ describe("analyze-swing route, full swing", () => {
     const replay = await analyze(owner, id);
     expect(replay.status).toBe(200);
     expect(provider.calls).toBe(1);
-    expect((replay.body.data as Record<string, unknown>).score).toBe(77);
+    expect((replay.body.data as Record<string, unknown>).score).toBe(SERVER_SCORE);
     expect((await row(id)).processing_claim_id).toBe(r.processing_claim_id);
   });
 

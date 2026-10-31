@@ -603,3 +603,21 @@ describe("analyze-swing functional anchors", () => {
     expect(apiSource).not.toContain("analysis_family:");
   });
 });
+
+describe("analyze-swing server-authoritative scoring keeps declarations and the assessment out of logs", () => {
+  it("no console call in the route or the scoring modules mentions the assessment, declarations or findings", () => {
+    const sources = {
+      route: apiSource,
+      contract: readSource("lib/full-swing-analysis-contract.ts"),
+      rubric: readSource("lib/full-swing-scoring-rubric.ts"),
+    };
+    for (const [name, source] of Object.entries(sources)) {
+      const consoleLines = source.split("\n").filter((line) => /console\.(log|info|warn|error|debug)\(/.test(line));
+      for (const line of consoleLines) {
+        expect(line, name).not.toMatch(/assessment|camera_view|detail_visibility|positions|rubric|finding|scorable|declar/i);
+      }
+    }
+    expect(readSource("lib/full-swing-analysis-contract.ts")).not.toMatch(/console\./);
+    expect(readSource("lib/full-swing-scoring-rubric.ts")).not.toMatch(/console\./);
+  });
+});

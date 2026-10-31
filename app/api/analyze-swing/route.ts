@@ -46,6 +46,16 @@ import {
   buildMetricEvidence,
   validateFullSwingModelResponse,
 } from "@/lib/full-swing-analysis-contract";
+import {
+  CAMERA_VIEWS,
+  DETAIL_VISIBILITY,
+  FINDING_STATUSES,
+  POSITION_VISIBILITY,
+  QUALITATIVE_ITEM_IDS,
+  SWING_DETAILS,
+  SWING_POSITIONS,
+  THRESHOLD_MEASURES,
+} from "@/lib/full-swing-scoring-rubric";
 import { createClient } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { extractSwingMetrics } from "@/lib/biometrics";
@@ -178,6 +188,11 @@ function buildMetricsContext(metrics: {
 // ENT-1D S6-R1. Nullable means "the video does not support a value": the
 // model may say so instead of inventing one, and the route validates the
 // whole object (lib/full-swing-analysis-contract.ts) before anything is kept.
+//
+// Server-authoritative scoring (provider contract fs-provider-v2): the model
+// reports what the video lets it see and judge; it never writes the score, the
+// scoring breakdown or fault tags, and never sees the rubric's points or
+// numeric cutoffs. The server applies the rubric (lib/full-swing-scoring-rubric.ts).
 const pillarSchema = {
   type: SchemaType.OBJECT,
   properties: {
@@ -188,21 +203,41 @@ const pillarSchema = {
   required: ["rating", "observation", "correction"],
 };
 
-const estimateDescription =
-  "Your own approximate estimate from the video, in whole degrees, or null when the video does not show it clearly. Never guess to fill the field, and do not copy a client-supplied estimate.";
+const estimateDescription = (what: string) =>
+  `Your own approximate estimate from the video of ${what}, in whole degrees, or null when the video does not show it clearly. Never guess to fill the field, and do not copy a client-supplied estimate.`;
 
-// ENT-1D S6 output consistency. Evidence first, scoring last: the video's limits
-// and coverage, the AI's own estimates and the pillar assessments come before
-// the findings, the coaching and, last, the score that depends on them.
+const positionSchema = (what: string) => ({
+  type: SchemaType.OBJECT,
+  description: what,
+  properties: {
+    visible: { type: SchemaType.STRING, enum: [...POSITION_VISIBILITY], description: "yes when the video shows this moment clearly; no when it is not in the video; unclear when you cannot tell." },
+    at:      { type: SchemaType.STRING, nullable: true, description: "The approximate video time of this moment as M:SS or M:SS.s, only when visible is yes; otherwise null." },
+  },
+  required: ["visible", "at"],
+});
+
+const thresholdAssessmentSchema = (what: string) => ({
+  type: SchemaType.OBJECT,
+  description: what,
+  properties: {
+    assessable: { type: SchemaType.BOOLEAN, description: "true only when the video shows this turn clearly enough for your estimate to be used." },
+    basis:      { type: SchemaType.STRING, nullable: true, description: "When assessable: what you see that supports your estimate. Otherwise null." },
+  },
+  required: ["assessable", "basis"],
+});
+
+// Evidence first, the scorability statement last: declarations of what the
+// video shows, the AI's own estimates and assessments, the pillar and rubric
+// findings, then the coaching and, last, whether the rubric can be applied.
 // propertyOrdering is the documented Schema field that sets the order of the
 // properties in the response; the properties are also declared in that order.
 const RESPONSE_PROPERTY_ORDER = [
-  "evidence_limits", "evidence_coverage",
-  "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio",
-  "posture", "swing_plane", "impact",
-  "highlights", "deficiencies", "fault_tags", "drills",
+  "evidence_limits", "camera_view", "positions", "detail_visibility",
+  "spine_angle", "hip_rotation", "shoulder_rotation", "tempo_ratio", "threshold_assessments",
+  "posture", "swing_plane", "impact", "rubric_findings",
+  "highlights", "deficiencies", "drills",
   "executive_summary", "practice_focus", "pro_cue",
-  "scoring_breakdown", "score",
+  "scorable", "unscored_reason",
 ];
 
 const RESPONSE_SCHEMA = {
@@ -212,23 +247,57 @@ const RESPONSE_SCHEMA = {
       type: SchemaType.STRING,
       description: "What this video does not let you judge: camera angle, framing, distance, frame rate, lighting, body or club out of frame, occlusion.",
     },
-    evidence_coverage: {
-      type: SchemaType.OBJECT,
-      description: "For each position, true only if the video shows it clearly enough to judge it. score must be null unless all three are true (full coverage alone does not require a score), and a pillar may be rated only when its position is true.",
-      properties: {
-        address:          { type: SchemaType.BOOLEAN, description: "Address is shown clearly enough to judge (rates posture)." },
-        top_of_backswing: { type: SchemaType.BOOLEAN, description: "The top of the backswing is shown clearly enough to judge (rates swing_plane)." },
-        impact:           { type: SchemaType.BOOLEAN, description: "Impact is shown clearly enough to judge (rates impact)." },
-      },
-      required: ["address", "top_of_backswing", "impact"],
+    camera_view: {
+      type: SchemaType.STRING,
+      enum: [...CAMERA_VIEWS],
+      description: "The camera view the video shows: face_on, down_the_line, other, or unclear when you cannot tell.",
     },
-    spine_angle:       { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
-    hip_rotation:      { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
-    shoulder_rotation: { type: SchemaType.NUMBER, nullable: true, description: estimateDescription },
+    positions: {
+      type: SchemaType.OBJECT,
+      description: "For each moment of the swing, whether the video shows it clearly, and when.",
+      properties: {
+        address:          positionSchema("Address: the set-up before the club moves."),
+        takeaway_start:   positionSchema("Takeaway start: the moment the club starts back. Not the same as address."),
+        top_of_backswing: positionSchema("The top of the backswing."),
+        early_downswing:  positionSchema("The early downswing, just after the top."),
+        impact:           positionSchema("Impact."),
+      },
+      required: [...SWING_POSITIONS],
+    },
+    detail_visibility: {
+      type: SchemaType.OBJECT,
+      description: "For each body or club detail: visible, not_visible, or unclear when you are unsure.",
+      properties: Object.fromEntries(SWING_DETAILS.map((detail) => [detail, { type: SchemaType.STRING, enum: [...DETAIL_VISIBILITY] }])),
+      required: [...SWING_DETAILS],
+    },
+    spine_angle:       { type: SchemaType.NUMBER, nullable: true, description: estimateDescription("the spine angle at address") },
+    hip_rotation:      { type: SchemaType.NUMBER, nullable: true, description: estimateDescription("the hip turn at impact") },
+    shoulder_rotation: { type: SchemaType.NUMBER, nullable: true, description: estimateDescription("the shoulder turn at the top of the backswing") },
     tempo_ratio:       { type: SchemaType.STRING, nullable: true, description: "Your own approximate backswing:downswing estimate from the video as 'N:1' or 'N.N:1', or null when the video's timing does not show it. Do not copy a client-supplied estimate." },
+    threshold_assessments: {
+      type: SchemaType.OBJECT,
+      description: "Whether each turn can be assessed from this video, and on what visible basis. You do not compare any estimate with a cutoff.",
+      properties: {
+        shoulder_turn_at_top: thresholdAssessmentSchema("The shoulder turn at the top of the backswing (shoulder_rotation)."),
+        hip_turn_at_impact:   thresholdAssessmentSchema("The hip turn at impact (hip_rotation)."),
+      },
+      required: [...THRESHOLD_MEASURES],
+    },
     posture:     pillarSchema,
     swing_plane: pillarSchema,
     impact:      pillarSchema,
+    rubric_findings: {
+      type: SchemaType.ARRAY,
+      description: "One entry for each listed rubric item: observed, not_observed (the video clearly shows it is absent) or not_assessable.",
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          id:     { type: SchemaType.STRING, enum: [...QUALITATIVE_ITEM_IDS] },
+          status: { type: SchemaType.STRING, enum: [...FINDING_STATUSES] },
+        },
+        required: ["id", "status"],
+      },
+    },
     highlights: {
       type: SchemaType.ARRAY,
       items: {
@@ -248,15 +317,11 @@ const RESPONSE_SCHEMA = {
         properties: {
           title:       { type: SchemaType.STRING, description: "3-6 word headline naming what you observed" },
           description: { type: SchemaType.STRING, description: "2-4 sentences: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result" },
+          rubric_id:   { type: SchemaType.STRING, nullable: true, enum: [...QUALITATIVE_ITEM_IDS], description: "The rubric item this deficiency describes, only when you marked that item observed in rubric_findings; otherwise null." },
         },
-        required: ["title", "description"],
+        required: ["title", "description", "rubric_id"],
       },
       description: "0-4 faults the video shows. Empty when the video supports none; never a typical fault the video does not show.",
-    },
-    fault_tags: {
-      type: SchemaType.ARRAY,
-      items: { type: SchemaType.STRING },
-      description: "0-4 snake_case identifiers, one per listed deficiency. Empty when there are none.",
     },
     drills: {
       type: SchemaType.ARRAY,
@@ -286,14 +351,14 @@ const RESPONSE_SCHEMA = {
       nullable: true,
       description: "One swing thought in 10 words or fewer for what the video shows, or null when there is none.",
     },
-    scoring_breakdown: {
-      type: SchemaType.STRING,
-      description: "One compact line: no line breaks, no repeated spaces, no padding. If you scored: the rubric arithmetic with a brief label for each adjustment, listing only adjustments the video shows and ending in the final score, e.g. '75 + 5 (label) - 3 (label) = 77'. If you did not score: a brief explanation of why the video does not support scoring.",
+    scorable: {
+      type: SchemaType.BOOLEAN,
+      description: "true only when address, top_of_backswing and impact are all visible, at least one pillar is rated and at least one rubric item or turn is assessable, and nothing else prevents applying the rubric. Full coverage alone does not require true.",
     },
-    score: {
-      type: SchemaType.INTEGER,
+    unscored_reason: {
+      type: SchemaType.STRING,
       nullable: true,
-      description: "The final clamped integer (55-99) from scoring_breakdown, only when all three evidence_coverage positions are true and the video lets you apply the rubric; otherwise null, with the reason in scoring_breakdown. Full coverage alone does not require a score. Never a starting value, default or guess.",
+      description: "When scorable is false: one compact line explaining what prevented scoring. When scorable is true: null.",
     },
   },
   propertyOrdering: [...RESPONSE_PROPERTY_ORDER],
@@ -305,8 +370,8 @@ const RESPONSE_SCHEMA = {
 // ENT-1D S6-R1. Evidence first (Product Constitution §B): no claimed
 // credentials, no uncited targets, Tour comparisons or handicap bands, no
 // forced numbers and no causes the video cannot show. The scoring rubric's
-// items and weights are unchanged; it is applied only to what the video shows,
-// and an unscorable swing is reported as such.
+// items and weights are unchanged and applied by the server, only to what the
+// model reports it could see; an unscorable swing is reported as such.
 
 const SYSTEM_INSTRUCTION = `
 You are SwingProAI's golf swing analysis assistant. You review one golf swing video and write coaching a golfer can trust. You are an AI model: do not claim personal experience, credentials, certifications, Tour history or students.
@@ -318,11 +383,19 @@ EVIDENCE RULES — READ FIRST
 • Keep observation and inference apart. Describe an effect as a possibility ("can", "may", "is often associated with") unless the video shows it. The video does not show ball flight unless the ball is visible in flight, so never state a ball-flight result as fact.
 • Do not state a root cause the video cannot show. If you suggest one, call it a possible cause.
 • Do not compare the golfer with PGA Tour or other averages, ideal ranges, benchmarks, handicap levels or ability bands, and do not give a target number.
-• Findings may be empty. Use an empty list for highlights, deficiencies, drills or fault_tags when the video supports none. Never invent a strength or a fault to fill a list.
+• Findings may be empty. Use an empty list for highlights, deficiencies or drills when the video supports none. Never invent a strength or a fault to fill a list.
+• "unclear", "not_assessable" and an unscored result are honest answers. Use them whenever you are unsure; never claim to see what the video does not show clearly.
+
+WHAT THE VIDEO SHOWS
+────────────────────
+• camera_view: face_on, down_the_line, other, or unclear when you cannot tell.
+• positions: for address, takeaway_start (the moment the club starts back; not address), top_of_backswing, early_downswing (just after the top) and impact, say yes with the approximate video time when the video shows that moment clearly, no when it is not in the video, and unclear when you cannot tell. Give a time only with yes.
+• detail_visibility: for shoulders, pelvis, spine_line, lead_wrist, hands_grip, club_shaft, clubface and target_reference, say visible, not_visible or unclear.
 
 NUMBERS
 ───────
-• spine_angle, hip_rotation, shoulder_rotation and tempo_ratio are your own approximate estimates from the video. Give one only when the video clearly shows it; otherwise use null. Never guess a number to fill a field, and never copy a client-supplied estimate into these fields.
+• spine_angle (at address), hip_rotation (at impact), shoulder_rotation (at the top of the backswing) and tempo_ratio are your own approximate estimates from the video. Give one only when the video clearly shows it; otherwise use null. Never guess a number to fill a field, and never copy a client-supplied estimate into these fields.
+• An estimate depends on what you declared visible: spine_angle needs spine_line and address; shoulder_rotation needs shoulders and top_of_backswing; hip_rotation needs pelvis and impact; tempo_ratio needs takeaway_start, top_of_backswing and impact. If any of these is not visible, the estimate is null.
 • Whenever you mention a number in prose, call it approximate and say it is estimated from the video. Do not give more precision than the video supports.
 
 CLIENT-SUPPLIED ESTIMATES
@@ -335,42 +408,21 @@ Name the joints and positions you describe (address, takeaway, top of the backsw
 
 SCORING
 ───────
-The score uses SwingProAI's scoring rubric below. It is a coaching rubric, not a calibrated measurement; do not describe it as one.
-• evidence_coverage: for address, top_of_backswing and impact, true only if the video shows that position clearly enough to judge it. Whether you may score depends on it.
-• Score only when all three are true and the video lets you apply the rubric's items. Full coverage alone does not require a score: if another limit prevents applying the rubric (for example, timing the video cannot show), set score to null. Whenever score is null, explain in scoring_breakdown what prevented scoring. Never output the starting value, a default or a guess in place of a score.
-• Apply an adjustment only when the video itself shows the movement it describes. An estimate you made is not, on its own, evidence of a fault.
-• When you score, scoring_breakdown is the rubric arithmetic with a brief label for each adjustment, e.g. "75 + 5 (label) - 3 (label) = 77": clamp the result to 55-99, and score is that final integer.
-• scoring_breakdown is one compact line: no line breaks, no repeated spaces, no padding. When score is null, it is a brief explanation of why the video does not support scoring.
-• The rubric's thresholds are internal scoring criteria. Do not present them to the golfer as targets.
-
-Start: 75.
-Additions:
-• Shoulder rotation ≥ 90°: +5 pts
-• Hip rotation at impact ≥ 45°: +5 pts
-• X-Factor (shoulder − hip separation) ≥ 45°: +5 pts
-• Tempo ratio in ideal 2.8–3.5 range: +3 pts
-• Spine angle maintained from setup to impact (< 3° change): +3 pts
-Deductions:
-• Severe early extension (spine drop > 8°): −8 pts
-• Moderate early extension (spine drop 5–8°): −5 pts
-• Severely restricted backswing (shoulder rotation < 70°): −8 pts
-• Moderately restricted backswing (shoulder rotation 70–80°): −5 pts
-• Severe body block (hip rotation < 30°): −8 pts
-• Moderate body block (hip rotation 30–40°): −5 pts
-• Laid-off club at P4: −3 pts
-• Over-the-top downswing path: −5 pts
-• Casting / early release (tempo ratio < 2.5): −5 pts
-• Cupped lead wrist at top: −3 pts
-• Reverse pivot: −8 pts
-• Minor alignment or grip issue: −2 pts
-Apply each adjustment at most once for one issue; where an addition and a deduction describe the same issue, take the larger of the two.
+SwingProAI's server applies its scoring rubric to what you report. You do not write a score. The rubric is a coaching rubric, not a calibrated measurement; do not describe it as one, and do not present any scoring criterion to the golfer as a target.
+• threshold_assessments: for shoulder_turn_at_top and hip_turn_at_impact, assessable is true only when the video shows that turn clearly enough for your estimate to be used, with basis naming what you see; otherwise assessable is false and basis is null. You do not compare any estimate with a cutoff.
+• rubric_findings: one entry for each listed item. observed when the video shows it; not_observed only when the video clearly shows it is absent; not_assessable when the view, details or moments it needs are not clearly visible. Never mark something not_observed because you cannot see it. An estimate you made is not, on its own, evidence of a fault.
+  – laid_off_p4: a laid-off club at the top. Needs a down_the_line view, club_shaft and target_reference visible, and top_of_backswing.
+  – over_the_top: an over-the-top downswing path. Needs a down_the_line view, club_shaft and target_reference visible, top_of_backswing and early_downswing.
+  – cupped_lead_wrist_top: a cupped lead wrist at the top. Needs a face_on or down_the_line view, lead_wrist and hands_grip visible, and top_of_backswing.
+  – reverse_pivot: a reverse pivot. Needs a face_on view, shoulders and pelvis visible, address and top_of_backswing.
+• scorable: true only when address, top_of_backswing and impact are all visible (yes), at least one pillar is rated, at least one rubric item or turn is assessable, and nothing else prevents applying the rubric. Full coverage alone does not require true. When scorable is false, unscored_reason is one compact line explaining what prevented scoring; when it is true, unscored_reason is null.
 
 COACHING
 ────────
 • executive_summary: plain, specific sentences about this video, with its main limits.
-• Each deficiency: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result.
+• Each deficiency: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result. Set its rubric_id to the rubric item it describes only when you marked that item observed; otherwise rubric_id is null.
 • Each drill addresses one listed deficiency, in the same order; no drill without a deficiency.
-• posture, swing_plane, impact: rate posture only when address is covered, swing_plane only when top_of_backswing is covered, and impact only when impact is covered. Otherwise use rating "insufficient_evidence" and say in the observation what is missing. When you score, at least one of them must be rated.
+• posture, swing_plane, impact: rate posture only when address is visible, swing_plane only when top_of_backswing is visible, and impact only when impact is visible. Otherwise use rating "insufficient_evidence" and say in the observation what is missing. When scorable is true, at least one of them must be rated.
 • practice_focus and pro_cue: null when the video supports nothing to recommend.
 `.trim();
 
@@ -963,7 +1015,7 @@ export async function POST(req: NextRequest) {
     ``,
     `The swing video is attached. Describe only what it shows, state what it does not let you judge, and use null or empty lists where the video supports no value or finding.`,
     ``,
-    `Apply the scoring rubric only if the video shows enough of the swing; otherwise leave score null and say why. Output the JSON object. No markdown, no preamble.`,
+    `Follow the response schema. Set scorable to false and explain why in unscored_reason whenever the video does not support applying the rubric. Output the JSON object. No markdown, no preamble.`,
   ].join("\n");
 
   // ENT-1D S6 diagnostics: set once the provider has answered, with the stage a
@@ -1046,7 +1098,9 @@ export async function POST(req: NextRequest) {
       console.error("[analyze-swing] full-swing response rejected");
       throw new Error("full-swing response rejected");
     }
-    const report = validated.report;
+    // The canonical report (stored and served shapes unchanged) and the internal
+    // rubric assessment; the score and breakdown are the server's.
+    const { report, assessment } = validated;
     responseStage = "post_parse_failure";
 
     // ── Step 7: mapping + DB write ───────────────────────────────────────
@@ -1069,6 +1123,9 @@ export async function POST(req: NextRequest) {
       impact:            report.impact,
       practice_focus:    report.practice_focus,
       pro_cue:           report.pro_cue,
+      // Internal and versioned: model declarations, item outcomes and the applied
+      // adjustments. Never served: the read authority's metrics allow-list drops it.
+      rubric_assessment: assessment,
     };
 
     // S6-R1A. The model assesses no checkpoint, joint position or severity, so
