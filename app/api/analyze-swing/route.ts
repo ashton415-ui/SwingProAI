@@ -199,7 +199,7 @@ const pillarSchema = {
   properties: {
     rating:      { type: SchemaType.STRING, enum: [...PILLAR_RATINGS] },
     observation: { type: SchemaType.STRING, description: "What the video shows for this area, or what it does not let you see when the rating is insufficient_evidence." },
-    correction:  { type: SchemaType.STRING, description: "One supportable adjustment for what you observed. Empty when the rating is insufficient_evidence." },
+    correction:  { type: SchemaType.STRING, description: "One supportable adjustment for what you observed. Required when the rating is needs_work or poor. May be empty when the rating is good, excellent or insufficient_evidence; never invent an adjustment to fill it." },
   },
   required: ["rating", "observation", "correction"],
 };
@@ -430,6 +430,7 @@ COACHING
 • Each rubric item may be linked by at most one deficiency. When several observations describe the same observed item, combine them into that one linked deficiency. Coaching that does not describe a rubric item stays its own deficiency with rubric_id null. Do not drop or unlink a deficiency that describes an observed item just to avoid a repeated link; combine it instead.
 • Each drill addresses one listed deficiency, in the same order; no drill without a deficiency.
 • posture, swing_plane, impact: rate posture only when address is visible, swing_plane only when top_of_backswing is visible, and impact only when impact is visible. Otherwise use rating "insufficient_evidence" and say in the observation what is missing. When scorable is true, at least one of them must be rated.
+• Every pillar needs an observation. A needs_work or poor rating needs a correction: one supportable adjustment. A good, excellent or insufficient_evidence rating may have an empty correction. Never invent an adjustment, fault or observation, and never change a rating just to fill or empty the correction.
 • practice_focus and pro_cue: null when the video supports nothing to recommend.
 `.trim();
 

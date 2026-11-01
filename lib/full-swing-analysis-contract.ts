@@ -83,6 +83,17 @@ export type FullSwingMetricKey = (typeof FULL_SWING_METRIC_KEYS)[number];
 export const PILLAR_RATINGS = ["excellent", "good", "needs_work", "poor", "insufficient_evidence"] as const;
 export type PillarRating = (typeof PILLAR_RATINGS)[number];
 
+/**
+ * Owner decision D-PILLAR: a rating that names something to fix (needs_work,
+ * poor) needs a non-empty correction. good, excellent and insufficient_evidence
+ * may have none; the correction is still a string, and any text given is kept
+ * as written.
+ */
+export const PILLAR_RATINGS_REQUIRING_CORRECTION = ["needs_work", "poor"] as const satisfies readonly PillarRating[];
+
+export const PILLAR_KEYS = ["posture", "swing_plane", "impact"] as const;
+export type PillarKey = (typeof PILLAR_KEYS)[number];
+
 /** Upper bound on each finding list, as the response schema describes it. */
 export const MAX_FINDINGS = 4;
 
@@ -212,7 +223,22 @@ export type FullSwingRejection =
   | "bad_angle"
   | "bad_tempo"
   | "bad_list"
-  | "bad_pillar"
+  // A pillar refusal names the pillar and the first part that failed:
+  // object (not an object), rating (outside PILLAR_RATINGS), observation
+  // (missing or blank), correction (not a string, or blank where the rating
+  // requires one). Checked in that order, for posture, then swing_plane, then impact.
+  | "bad_pillar_posture_object"
+  | "bad_pillar_posture_rating"
+  | "bad_pillar_posture_observation"
+  | "bad_pillar_posture_correction"
+  | "bad_pillar_swing_plane_object"
+  | "bad_pillar_swing_plane_rating"
+  | "bad_pillar_swing_plane_observation"
+  | "bad_pillar_swing_plane_correction"
+  | "bad_pillar_impact_object"
+  | "bad_pillar_impact_rating"
+  | "bad_pillar_impact_observation"
+  | "bad_pillar_impact_correction"
   | "drill_without_deficiency"
   | "bad_declaration"
   | "bad_position_time"
@@ -298,16 +324,21 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], reason: 
   return value as T;
 }
 
-function pillar(value: unknown): FullSwingPillar {
-  if (!isRecord(value)) throw new Rejected("bad_pillar");
+function pillar(key: PillarKey, value: unknown): FullSwingPillar {
+  if (!isRecord(value)) throw new Rejected(`bad_pillar_${key}_object`);
   const rating = value.rating;
   if (typeof rating !== "string" || !(PILLAR_RATINGS as readonly string[]).includes(rating)) {
-    throw new Rejected("bad_pillar");
+    throw new Rejected(`bad_pillar_${key}_rating`);
   }
-  if (!nonEmpty(value.observation) || typeof value.correction !== "string") throw new Rejected("bad_pillar");
-  // A rated area needs a correction; an area the video cannot show may have none.
-  if (rating !== "insufficient_evidence" && !nonEmpty(value.correction)) throw new Rejected("bad_pillar");
-  return { rating: rating as PillarRating, observation: value.observation, correction: value.correction };
+  if (!nonEmpty(value.observation)) throw new Rejected(`bad_pillar_${key}_observation`);
+  const correction = value.correction;
+  if (typeof correction !== "string") throw new Rejected(`bad_pillar_${key}_correction`);
+  // D-PILLAR: needs_work and poor need a correction; good, excellent and an area
+  // the video cannot show may have none. Nothing is filled in or trimmed.
+  if ((PILLAR_RATINGS_REQUIRING_CORRECTION as readonly string[]).includes(rating) && !nonEmpty(correction)) {
+    throw new Rejected(`bad_pillar_${key}_correction`);
+  }
+  return { rating: rating as PillarRating, observation: value.observation, correction };
 }
 
 const seconds = (at: string): number => {
@@ -462,9 +493,9 @@ export function validateFullSwingProviderResponse(value: unknown): FullSwingProv
       if (gap !== null) throw new Rejected(GAP_REASON[gap]);
     }
 
-    const posture = pillar(value.posture);
-    const swingPlane = pillar(value.swing_plane);
-    const impact = pillar(value.impact);
+    const posture = pillar("posture", value.posture);
+    const swingPlane = pillar("swing_plane", value.swing_plane);
+    const impact = pillar("impact", value.impact);
     const coverage = coverageOf(declarations);
     for (const [key, p] of [["posture", posture], ["swing_plane", swingPlane], ["impact", impact]] as const) {
       if (p.rating !== "insufficient_evidence" && !coverage[PILLAR_POSITION[key]]) throw new Rejected("pillar_without_coverage");

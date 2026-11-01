@@ -3105,6 +3105,13 @@ describe("AA3. full-swing validation_rejected names the contract's fixed rejecti
     ["estimate_without_declared_evidence", (r: Record<string, any>) => { r.detail_visibility.spine_line = "unclear"; }],
     ["provider_authored_scoring", (r: Record<string, any>) => { r.score = 72; }],
     ["bad_list", (r: Record<string, any>) => { r.highlights = Array.from({ length: 5 }, () => ({ title: "t", description: "d" })); }],
+    // D-PILLAR: each pillar and part has its own fixed code.
+    ...(["posture", "swing_plane", "impact"] as const).flatMap((key) => [
+      [`bad_pillar_${key}_object`, (r: Record<string, any>) => { r[key] = [r[key]]; }],
+      [`bad_pillar_${key}_rating`, (r: Record<string, any>) => { r[key] = { ...r[key], rating: "elite" }; }],
+      [`bad_pillar_${key}_observation`, (r: Record<string, any>) => { r[key] = { ...r[key], observation: " " }; }],
+      [`bad_pillar_${key}_correction`, (r: Record<string, any>) => { r[key] = { ...r[key], rating: "needs_work", correction: "" }; }],
+    ] as [string, (r: Record<string, any>) => void][]),
   ])("%s: the real route refuses with 500 and a failed row, and logs only that code", async (code, mutate) => {
     state.geminiUsage = DIAG_USAGE;
     const report = validReport() as Record<string, any>;
@@ -4250,5 +4257,96 @@ describe("AF. the serialized request states the contract's timestamp, assessabil
       ];
       r.drills = [];
     })).toBe("duplicate_rubric_link");
+  });
+});
+
+// ─── AG. D-PILLAR through the real route (owner decision; local candidate) ───
+//
+// good, excellent and insufficient_evidence pillars may carry an empty correction;
+// needs_work and poor still need one. A refused pillar names its pillar and part in
+// the diagnostics line only; the HTTP answer stays generic. The request changes only
+// in the pillar wording of the system instruction and the correction description.
+// Synthetic provider answers: these tests do not show what a real model returns.
+describe("AG. D-PILLAR: empty corrections where allowed, precise pillar codes, request otherwise unchanged", () => {
+  const refusedLine = (code: string, textChars: number) =>
+    `${DIAG} family=full_swing outcome=validation_rejected finish_reason=stop ${DIAG_COUNTS} text_chars=${textChars} rejection=${code}`;
+
+  it("a scored answer with good and excellent pillars and empty corrections completes; the empty strings are stored as given", async () => {
+    state.geminiUsage = DIAG_USAGE;
+    const report = {
+      ...validReport(),
+      posture: { rating: "excellent", observation: "Balanced at address.", correction: "" },
+      swing_plane: { rating: "good", observation: "On plane at the top.", correction: "" },
+    };
+    state.geminiImpl = async () => JSON.stringify(report);
+    const response = await post({ analysisId: ANALYSIS_ID });
+    expect(response.status).toBe(200);
+    const row = storedRow();
+    expect(row.status).toBe("complete");
+    expect(row.score).toBe(72);
+    const metrics = row.metrics as Record<string, any>;
+    expect(metrics.posture).toEqual({ rating: "excellent", observation: "Balanced at address.", correction: "" });
+    expect(metrics.swing_plane).toEqual({ rating: "good", observation: "On plane at the top.", correction: "" });
+    expect(metrics.impact).toEqual({ rating: "needs_work", observation: "o", correction: "c" });
+    expect(diagnosticLines().map((entry) => entry.line)).toEqual([
+      `${DIAG} family=full_swing outcome=completed finish_reason=stop ${DIAG_COUNTS} text_chars=${JSON.stringify(report).length}`,
+    ]);
+    const { data } = await json(await getResult(ANALYSIS_ID));
+    expect(data.coaching.posture).toEqual({ rating: "excellent", observation: "Balanced at address.", correction: "" });
+  });
+
+  it("an explained unscored answer with a good pillar and an empty correction completes unscored", async () => {
+    const report = {
+      ...validReport(),
+      scorable: false,
+      unscored_reason: "Not scored: the transition cannot be timed from this clip.",
+      impact: { rating: "good", observation: "Hands lead at impact.", correction: "" },
+    };
+    state.geminiImpl = async () => JSON.stringify(report);
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    const row = storedRow();
+    expect(row.status).toBe("complete");
+    expect(row.score).toBeNull();
+    expect((row.metrics as Record<string, any>).scoring_breakdown).toBe("Not scored: the transition cannot be timed from this clip.");
+    expect((row.metrics as Record<string, any>).impact.correction).toBe("");
+  });
+
+  it.each([
+    ["needs_work", "bad_pillar_impact_correction"],
+    ["poor", "bad_pillar_impact_correction"],
+  ])("a %s pillar with an empty correction is refused as a whole: 500, failed row, one provider call, code in the diagnostics line only", async (rating, code) => {
+    state.geminiUsage = DIAG_USAGE;
+    const report = { ...validReport(), executive_summary: `${TEXT_SENTINEL} summary`, impact: { rating, observation: "Hands trail at impact.", correction: "" } };
+    const body = JSON.stringify(report);
+    state.geminiImpl = async () => body;
+    const response = await post({ analysisId: ANALYSIS_ID });
+    const text = await response.text();
+    expect(response.status).toBe(500);
+    expect(JSON.parse(text)).toEqual({ error: "Analysis failed. Please try again." });
+    expect(text).not.toContain("bad_pillar");
+    expect(storedRow().status).toBe("failed");
+    expect(JSON.stringify(storedRow())).not.toContain("bad_pillar");
+    expect(state.geminiCalls).toBe(1);
+    expect(diagnosticLines()).toEqual([{ method: "error", line: refusedLine(code, body.length) }]);
+    expectNoTextInLogs("Hands trail at impact.");
+  });
+
+  it("the system instruction and correction description state D-PILLAR without inviting invented content", async () => {
+    await post({ analysisId: ANALYSIS_ID });
+    const body = JSON.parse(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest));
+    const system = body.systemInstruction.parts[0].text as string;
+    expect(system).toContain(
+      "• Every pillar needs an observation. A needs_work or poor rating needs a correction: one supportable adjustment. A good, excellent or insufficient_evidence rating may have an empty correction. Never invent an adjustment, fault or observation, and never change a rating just to fill or empty the correction.",
+    );
+    const schema = body.generationConfig.responseSchema;
+    for (const key of ["posture", "swing_plane", "impact"]) {
+      const pillar = schema.properties[key];
+      expect(pillar.required, key).toEqual(["rating", "observation", "correction"]);
+      expect(pillar.properties.rating.enum, key).toEqual(["excellent", "good", "needs_work", "poor", "insufficient_evidence"]);
+      expect(pillar.properties.correction.description, key).toBe(
+        "One supportable adjustment for what you observed. Required when the rating is needs_work or poor. May be empty when the rating is good, excellent or insufficient_evidence; never invent an adjustment to fill it.",
+      );
+      expect(pillar.properties.correction.description, key).not.toContain("Empty when the rating is insufficient_evidence.");
+    }
   });
 });

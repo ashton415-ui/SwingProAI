@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // ============================================================================
@@ -11,6 +13,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_FINDINGS,
+  PILLAR_KEYS,
+  PILLAR_RATINGS_REQUIRING_CORRECTION,
   PROVIDER_FORBIDDEN_KEYS,
   buildMetricEvidence,
   readMetricEvidence,
@@ -211,8 +215,8 @@ describe("F4. structural refusals", () => {
     ["empty practice focus string", { practice_focus: "" }, "bad_text"],
     ["too many highlights", { highlights: Array.from({ length: MAX_FINDINGS + 1 }, () => ({ title: "t", description: "d" })) }, "bad_list"],
     ["a non-object deficiency", { deficiencies: ["fault"] }, "bad_list"],
-    ["unknown pillar rating", { posture: pillar("elite") }, "bad_pillar"],
-    ["rated pillar without a correction", { posture: { rating: "good", observation: "o", correction: "" } }, "bad_pillar"],
+    ["unknown pillar rating", { posture: pillar("elite") }, "bad_pillar_posture_rating"],
+    ["needs_work pillar without a correction", { posture: { rating: "needs_work", observation: "o", correction: "" } }, "bad_pillar_posture_correction"],
     ["a drill without a deficiency", { deficiencies: [], drills: [{ name: "n", the_why: "w", the_how: "h", the_feel: "f" }] }, "drill_without_deficiency"],
     ["unknown camera view", { camera_view: "overhead" }, "bad_declaration"],
     ["missing a position", { positions: { address: seen("0:00") } }, "bad_declaration"],
@@ -355,6 +359,136 @@ describe("F10. pillars, scorability and coaching links", () => {
     const { report } = accepted({ deficiencies: [{ title: "Grip looks weak", description: "d", rubric_id: null }] });
     expect(report.fault_tags).toEqual([]);
     expect(report.deficiencies).toEqual([{ title: "Grip looks weak", description: "d" }]);
+  });
+});
+
+describe("F10a. D-PILLAR: the correction policy and a precise code for every pillar refusal", () => {
+  // Synthetic pillars only. These tests show which shapes the contract accepts and which
+  // fixed code a refusal carries; they do not show which branch refused any real answer.
+  const KEYS = ["posture", "swing_plane", "impact"] as const;
+  const RATINGS = ["excellent", "good", "needs_work", "poor", "insufficient_evidence"] as const;
+  const OPTIONAL = new Set(["excellent", "good", "insufficient_evidence"]);
+  const withPillar = (key: string, value: unknown) => provider({ [key]: value });
+
+  it("the twelve pillar codes are exactly pillar × part, and the generic bad_pillar is gone", () => {
+    const source = readFileSync(join(process.cwd(), "lib/full-swing-analysis-contract.ts"), "utf8");
+    const union = source.match(/export type FullSwingRejection =([\s\S]*?);/);
+    const codes = Array.from(union![1].matchAll(/"([a-z_]+)"/g), (m) => m[1]);
+    const pillarCodes = codes.filter((c) => c.startsWith("bad_pillar"));
+    expect(pillarCodes.sort()).toEqual(KEYS.flatMap((k) => ["object", "rating", "observation", "correction"].map((p) => `bad_pillar_${k}_${p}`)).sort());
+    expect(codes).not.toContain("bad_pillar");
+    expect([...PILLAR_KEYS]).toEqual([...KEYS]);
+    expect([...PILLAR_RATINGS_REQUIRING_CORRECTION]).toEqual(["needs_work", "poor"]);
+  });
+
+  describe.each(KEYS)("%s", (key) => {
+    it.each([
+      ["null", null],
+      ["an array", [{ rating: "good", observation: "o", correction: "c" }]],
+      ["a string", "good"],
+      ["a number", 3],
+      ["missing", undefined],
+    ])("not an object (%s) → object", (_label, value) => {
+      expect(rejection(withPillar(key, value))).toBe(`bad_pillar_${key}_object`);
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["null", null],
+      ["unknown", "elite"],
+      ["another case", "Good"],
+      ["padded", " good"],
+      ["a number", 4],
+    ])("rating %s → rating", (_label, rating) => {
+      expect(rejection(withPillar(key, { rating, observation: "o", correction: "c" }))).toBe(`bad_pillar_${key}_rating`);
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["null", null],
+      ["empty", ""],
+      ["blank", "   "],
+      ["a number", 1],
+      ["an object", { text: "o" }],
+    ])("observation %s → observation, for every rating", (_label, observation) => {
+      for (const rating of RATINGS) {
+        expect(rejection(withPillar(key, { rating, observation, correction: "c" })), rating).toBe(`bad_pillar_${key}_observation`);
+      }
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["null", null],
+      ["a number", 0],
+      ["a boolean", false],
+      ["an array", ["c"]],
+    ])("correction %s → correction, for every rating", (_label, correction) => {
+      for (const rating of RATINGS) {
+        expect(rejection(withPillar(key, { rating, observation: "o", correction })), rating).toBe(`bad_pillar_${key}_correction`);
+      }
+    });
+
+    it.each(RATINGS.flatMap((rating) => ["", "   ", "Hold the angle."].map((correction) => [rating, correction] as const)))(
+      "rating %s with correction %j",
+      (rating, correction) => {
+        const value = withPillar(key, { rating, observation: "Seen in the video.", correction });
+        const required = !OPTIONAL.has(rating);
+        if (required && correction.trim() === "") {
+          expect(rejection(value)).toBe(`bad_pillar_${key}_correction`);
+          return;
+        }
+        // Accepted as written: the correction is neither filled in nor trimmed, and the rating is kept.
+        const { report } = accepted({ [key]: { rating, observation: "Seen in the video.", correction } });
+        expect(report[key]).toEqual({ rating, observation: "Seen in the video.", correction });
+      },
+    );
+  });
+
+  it("parts are checked in order: object, rating, observation, correction", () => {
+    expect(rejection(withPillar("impact", { rating: "elite", observation: "", correction: 1 }))).toBe("bad_pillar_impact_rating");
+    expect(rejection(withPillar("impact", { rating: "poor", observation: " ", correction: 1 }))).toBe("bad_pillar_impact_observation");
+    expect(rejection(withPillar("impact", { rating: "poor", observation: "o", correction: "" }))).toBe("bad_pillar_impact_correction");
+  });
+
+  it("pillars are checked in order: the first failing pillar is named", () => {
+    const bad = { rating: "poor", observation: "o", correction: "" };
+    expect(rejection(provider({ posture: bad, swing_plane: null, impact: "x" }))).toBe("bad_pillar_posture_correction");
+    expect(rejection(provider({ swing_plane: null, impact: "x" }))).toBe("bad_pillar_swing_plane_object");
+    expect(rejection(provider({ impact: { rating: "fine", observation: "o", correction: "c" } }))).toBe("bad_pillar_impact_rating");
+  });
+
+  it("an empty correction on good or excellent changes nothing else: same score, coverage and assessment", () => {
+    const withCorrections = accepted();
+    const without = accepted({ posture: { rating: "excellent", observation: "Balanced at address.", correction: "" }, impact: { rating: "good", observation: "Hands lead.", correction: "" } });
+    expect(without.report.score).toBe(withCorrections.report.score);
+    expect(without.report.scoring_breakdown).toBe(withCorrections.report.scoring_breakdown);
+    expect(without.report.evidence_coverage).toEqual(withCorrections.report.evidence_coverage);
+    expect(without.assessment).toEqual(withCorrections.assessment);
+    expect(without.report.posture.correction).toBe("");
+  });
+
+  it("an explained unscored result with an empty good correction is accepted and stays unscored", () => {
+    const { report } = accepted({ scorable: false, unscored_reason: "The transition cannot be timed from this clip.", impact: { rating: "good", observation: "Hands lead.", correction: "" } });
+    expect(report.score).toBeNull();
+    expect(report.scoring_breakdown).toBe("The transition cannot be timed from this clip.");
+    expect(report.impact.correction).toBe("");
+  });
+
+  it("coverage still binds: a good pillar with an empty correction is refused when its position is not visible", () => {
+    expect(rejection(provider({
+      positions: { ...(provider().positions as object), address: unseen() }, spine_angle: null, scorable: false, unscored_reason: "r",
+      rubric_findings: FINDINGS({ reverse_pivot: "not_assessable" }), deficiencies: [], drills: [],
+      posture: { rating: "good", observation: "o", correction: "" },
+    }))).toBe("pillar_without_coverage");
+    expect(rejection(provider({ posture: INSUFFICIENT("a"), swing_plane: INSUFFICIENT("b"), impact: INSUFFICIENT("c") }))).toBe("scorable_without_assessed_pillar");
+  });
+
+  it("unrelated refusals are unchanged by a valid empty correction", () => {
+    const empty = { posture: { rating: "good", observation: "o", correction: "" } };
+    expect(rejection(provider({ ...empty, score: 72 }))).toBe("provider_authored_scoring");
+    expect(rejection(provider({ ...empty, executive_summary: " " }))).toBe("bad_text");
+    expect(rejection(provider({ ...empty, deficiencies: [], drills: [{ name: "n", the_why: "w", the_how: "h", the_feel: "f" }] }))).toBe("drill_without_deficiency");
+    expect(rejection(provider({ ...empty, scorable: true, unscored_reason: "x" }))).toBe("bad_scorable");
   });
 });
 

@@ -338,6 +338,14 @@ describe("D6. full swing validation_rejected carries only the contract's fixed r
     expect(new Set(FULL_SWING_REJECTION_CODES).size).toBe(FULL_SWING_REJECTION_CODES.length);
   });
 
+  it("the pillar codes name only the pillar and the part: twelve, each exactly once", () => {
+    const pillarCodes = FULL_SWING_REJECTION_CODES.filter((code) => code.startsWith("bad_pillar"));
+    const expected = ["posture", "swing_plane", "impact"].flatMap((key) =>
+      ["object", "rating", "observation", "correction"].map((part) => `bad_pillar_${key}_${part}`),
+    );
+    expect([...pillarCodes].sort()).toEqual(expected.sort());
+  });
+
   it.each([...FULL_SWING_REJECTION_CODES])("%s is logged as itself", (code) => {
     const line = formatGeminiResponseDiagnostics("full_swing", "validation_rejected", withRejectionCode(BASE, code));
     expect(line).toBe(`${REJECTED_PREFIX} rejection=${code}`);
@@ -361,6 +369,10 @@ describe("D6. full swing validation_rejected carries only the contract's fixed r
     ["null", null],
     ["undefined", undefined],
     ["a symbol", Symbol("bad_text")],
+    // D-PILLAR: the former generic pillar code is no longer a contract code.
+    ["the retired generic pillar code", "bad_pillar"],
+    ["a pillar outside the three", "bad_pillar_grip_rating"],
+    ["a part outside the four", "bad_pillar_posture_value"],
   ])("%s becomes unrecognized and is never echoed", (_label, value) => {
     expect(classifyRejectionCode(value)).toBe("unrecognized");
     const line = formatGeminiResponseDiagnostics("full_swing", "validation_rejected", withRejectionCode(BASE, value));

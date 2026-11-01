@@ -409,6 +409,37 @@ select id, user_id, storage_path, video_url, created_at
     validator, rubric, diagnostics, putting, model, temperature, budgets,
     thinking and transport. This does not identify R8's cause and does not
     show that a live model complies. Not runtime-validated.
+- **Pillar contract alignment and precise pillar codes (after S6 R9; local
+  candidate, uncommitted).**
+  - Basis: in S6 R9 the full-swing call ended `outcome=validation_rejected
+    finish_reason=stop rejection=bad_pillar` (prompt 4418, candidate 1211,
+    thinking 1989 tokens, 4204 characters). `bad_pillar` covered four checks
+    on three pillars, so which pillar and which check refused the answer is
+    unknown. This change does not claim to fix that failure.
+  - Offline finding (not R9 evidence): the contract required a non-empty
+    correction for every rated pillar, while the schema described the
+    correction only as "one supportable adjustment for what you observed",
+    and the instruction did not state the rule. A good or excellent area may
+    honestly have nothing to adjust.
+  - Owner decision D-PILLAR: every pillar stays an object with a known
+    rating, a non-empty observation and a string correction. needs_work and
+    poor still need a non-empty correction; good, excellent and
+    insufficient_evidence may have an empty one. Any correction text is kept
+    as written: nothing is filled in, trimmed, coerced or re-rated. Coverage,
+    scorability, scoring and every other rejection are unchanged.
+  - The pillar schema's correction description and one instruction line
+    state the rule and forbid inventing an adjustment, fault or observation
+    or changing a rating to fit. Schema structure, types, enums, required
+    fields, the user prompt, model, temperature, budgets, thinking, transport
+    and the whole putting request are unchanged (AE and AF byte and
+    structure checks).
+  - `bad_pillar` is replaced by twelve fixed codes
+    `bad_pillar_<posture|swing_plane|impact>_<object|rating|observation|correction>`,
+    checked in that part order, posture first. They are added to the
+    diagnostics allowlist; the retired `bad_pillar` and any other value log as
+    `unrecognized`. The HTTP answer, failed row and every other line are
+    unchanged. Stored and served pillar shapes are unchanged; readers already
+    accept an empty correction. Not runtime-validated.
 
 ## 3. Activation sequence (each step separately authorized)
 
