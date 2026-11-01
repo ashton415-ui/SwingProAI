@@ -3012,6 +3012,8 @@ describe("AA. provider response diagnostics (full swing)", () => {
     await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
     expect(diagnosticLines()).toHaveLength(1);
     expect(diagnosticLines()[0].line).toContain("outcome=validation_rejected finish_reason=stop");
+    // Approved code-only exception: the contract's fixed code (a missing pro_cue is bad_text), nothing else.
+    expect(diagnosticLines()[0].line).toMatch(/ rejection=bad_text$/);
     expect(consoleLines().map((entry) => entry.line)).toContain("[analyze-swing] full-swing response rejected");
     expectNoTextInLogs();
   });
@@ -3085,6 +3087,102 @@ describe("AA. provider response diagnostics (full swing)", () => {
   });
 });
 
+// ─── AA3. the full-swing rejection code reaches the diagnostics line only ─────
+//
+// Approved code-only exception to "the rejection reason is never logged": a
+// full-swing answer the content contract refuses adds the contract's fixed
+// rejection code to its diagnostics line. The HTTP answer, the failed row, the
+// single provider call and every other line are unchanged, and no rejected
+// value or model text is logged.
+
+describe("AA3. full-swing validation_rejected names the contract's fixed rejection code", () => {
+  const rejected = (code: string, textChars: number) =>
+    `${DIAG} family=full_swing outcome=validation_rejected finish_reason=stop ${DIAG_COUNTS} text_chars=${textChars} rejection=${code}`;
+
+  it.each([
+    ["position_order", (r: Record<string, any>) => { r.positions.early_downswing.at = r.positions.top_of_backswing.at; }],
+    ["finding_view_mismatch", (r: Record<string, any>) => { r.rubric_findings[0].status = "not_observed"; }],
+    ["estimate_without_declared_evidence", (r: Record<string, any>) => { r.detail_visibility.spine_line = "unclear"; }],
+    ["provider_authored_scoring", (r: Record<string, any>) => { r.score = 72; }],
+    ["bad_list", (r: Record<string, any>) => { r.highlights = Array.from({ length: 5 }, () => ({ title: "t", description: "d" })); }],
+  ])("%s: the real route refuses with 500 and a failed row, and logs only that code", async (code, mutate) => {
+    state.geminiUsage = DIAG_USAGE;
+    const report = validReport() as Record<string, any>;
+    report.evidence_limits = `${TEXT_SENTINEL} limits`;
+    report.executive_summary = `${TEXT_SENTINEL} summary`;
+    mutate(report);
+    const body = JSON.stringify(report);
+    state.geminiImpl = async () => body;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    expect(diagnosticLines()).toEqual([{ method: "error", line: rejected(code, body.length) }]);
+    const lines = consoleLines().map((entry) => entry.line);
+    expect(lines).toContain("[analyze-swing] full-swing response rejected");
+    expect(lines).toContain("[analyze-swing] analysis pipeline failed");
+    // The code is a log-only diagnostic: no line but the diagnostics line names it.
+    expect(lines.filter((line) => line.includes(code))).toEqual([rejected(code, body.length)]);
+    expectNoTextInLogs("0:02.0", "unclear");
+  });
+
+  it("the HTTP answer and the stored row never carry the code", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), score: 72 });
+    const response = await post({ analysisId: ANALYSIS_ID });
+    const text = await response.text();
+    expect(response.status).toBe(500);
+    expect(JSON.parse(text)).toEqual({ error: "Analysis failed. Please try again." });
+    expect(text).not.toContain("provider_authored_scoring");
+    expect(JSON.stringify(storedRow())).not.toContain("provider_authored_scoring");
+  });
+
+  it("valid scored and unscored answers log their completed lines unchanged, with no rejection field", async () => {
+    state.geminiUsage = DIAG_USAGE;
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(storedRow().score).toBe(72);
+    const unscored = { ...validReport(), scorable: false, unscored_reason: "Not scored: the transition cannot be timed from this clip." };
+    state.analyses = [pendingRow()];
+    state.geminiImpl = async () => JSON.stringify(unscored);
+    expect((await post({ analysisId: ANALYSIS_ID })).status).toBe(200);
+    expect(storedRow().score).toBeNull();
+    expect(diagnosticLines().map((entry) => entry.line)).toEqual([
+      `${DIAG} family=full_swing outcome=completed finish_reason=stop ${DIAG_COUNTS} text_chars=${JSON.stringify(validReport()).length}`,
+      `${DIAG} family=full_swing outcome=completed finish_reason=stop ${DIAG_COUNTS} text_chars=${JSON.stringify(unscored).length}`,
+    ]);
+  });
+
+  it("the other refused outcomes keep their lines without a rejection field", async () => {
+    state.geminiImpl = async () => `{"score": 72,, "${TEXT_SENTINEL}"}`;
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+    state.analyses = [pendingRow()];
+    state.geminiFinishReason = "MAX_TOKENS";
+    state.geminiImpl = async () => truncatedReport();
+    await post({ analysisId: ANALYSIS_ID });
+    const lines = diagnosticLines().map((entry) => entry.line);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("outcome=json_parse_failed");
+    expect(lines[1]).toContain("outcome=incomplete_generation");
+    for (const line of lines) expect(line).not.toContain("rejection=");
+  });
+
+  it("a logger that throws on the rejected diagnostics line changes nothing: 500, failed row, one provider call", async () => {
+    // Only the diagnostics line throws; the route's other console calls are outside the helper.
+    vi.mocked(console.error).mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).startsWith(DIAG)) throw new Error("sink down");
+    });
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), score: 72 });
+    await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
+  });
+
+  it("the generation request is unchanged by the diagnostics change", async () => {
+    state.geminiImpl = async () => JSON.stringify({ ...validReport(), score: 72 });
+    await post({ analysisId: ANALYSIS_ID });
+    expect(state.geminiCalls).toBe(1);
+    expect(state.modelConfigs[0].model).toBe("gemini-2.5-flash");
+    const config = state.providerRequests[0].generationConfig;
+    expect(Object.keys(config).sort()).toEqual(["maxOutputTokens", "responseMimeType", "responseSchema", "temperature"]);
+    expect(config.temperature).toBe(0.0);
+    expect(config.maxOutputTokens).toBe(16384);
+  });
+});
+
 describe("AA2. provider response diagnostics (putting)", () => {
   it("a valid STOP putt completes and logs one completed line", async () => {
     puttWithVideo();
@@ -3123,6 +3221,9 @@ describe("AA2. provider response diagnostics (putting)", () => {
     expect(storedRow().status).toBe("failed");
     expect(diagnosticLines()).toHaveLength(1);
     expect(diagnosticLines()[0].line).toContain("family=putting outcome=validation_rejected finish_reason=stop");
+    // The approved rejection field is full swing only; the putting line is unchanged.
+    expect(diagnosticLines()[0].line).not.toContain("rejection=");
+    expect(diagnosticLines()[0].line).toMatch(/ text_chars=(\d+|unavailable)$/);
     expectNoTextInLogs();
   });
 
@@ -3945,11 +4046,16 @@ describe("AD. the canonical report is stored in the existing shapes; the assessm
     expect((storedRow().metrics as Record<string, any>).rubric_assessment.outcome).toBe("unscored");
   });
 
-  it("the rejection reason is never logged or returned, and no declaration reaches the logs", async () => {
+  it("the rejection reason is never returned and is logged only as its fixed code on the diagnostics line; no declaration reaches the logs", async () => {
     state.geminiImpl = async () => JSON.stringify({ ...validReport(), score: 72 });
     await expectRefusedAnswer(await post({ analysisId: ANALYSIS_ID }));
-    const logged = consoleLines().map((entry) => entry.line).join("\n");
-    for (const marker of ["provider_authored_scoring", "camera_view", "face_on", "reverse_pivot"]) expect(logged, marker).not.toContain(marker);
+    const lines = consoleLines().map((entry) => entry.line);
+    // Approved code-only exception: the fixed code, at the end of the diagnostics line, and nowhere else.
+    const naming = lines.filter((line) => line.includes("provider_authored_scoring"));
+    expect(naming).toHaveLength(1);
+    expect(naming[0]).toMatch(/^\[analyze-swing\] provider response diagnostics family=full_swing outcome=validation_rejected .* rejection=provider_authored_scoring$/);
+    const logged = lines.join("\n");
+    for (const marker of ["camera_view", "face_on", "reverse_pivot"]) expect(logged, marker).not.toContain(marker);
   });
 });
 
@@ -4020,5 +4126,129 @@ describe("AE. request bodies are byte-identical to b2af7ae outside the intention
     await post({ analysisId: ANALYSIS_ID });
     expect(state.geminiCalls).toBe(1);
     expect(await sha(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest))).toBe("48d246a3e35c512129439c9297c1d6613815557d9986977778ae9f9db3fcca6c");
+  });
+});
+
+// ─── AF. instructions aligned with existing contract rules (A1–A3; wording only) ───
+//
+// The serialized request states three rules the contract already enforces: timestamp order, each
+// turn's assessability requirements and one link per rubric item. Only instruction text and schema
+// descriptions change: the schema with every description removed must equal the c93c4c2 structure,
+// and the rest of the request is covered by AE. These tests prove request construction only, not
+// what a real model does with it.
+describe("AF. the serialized request states the contract's timestamp, assessability and link rules", () => {
+  // Measured on the route before this alignment (the c93c4c2 schema, unchanged by the diagnostics candidate).
+  const STRUCTURE_SHA256 = "5975c0636bb1c103faf8e0f43468465378dbac1d2e06737355a90b7cff8c1a83";
+  const serialized = async () => {
+    await post({ analysisId: ANALYSIS_ID });
+    expect(state.geminiCalls).toBe(1);
+    const body = JSON.parse(buildGenerateContentBody(state.providerRequests[0] as GeminiGenerateRequest));
+    return { body, system: body.systemInstruction.parts[0].text as string, schema: body.generationConfig.responseSchema };
+  };
+  const withoutDescriptions = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(withoutDescriptions)
+      : value !== null && typeof value === "object"
+        ? Object.fromEntries(Object.entries(value).filter(([k]) => k !== "description").map(([k, v]) => [k, withoutDescriptions(v)]))
+        : value;
+
+  it("only descriptions changed: the schema without descriptions equals the c93c4c2 structure", async () => {
+    const { schema } = await serialized();
+    const digest = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(withoutDescriptions(schema))).digest("hex");
+    expect(digest).toBe(STRUCTURE_SHA256);
+  });
+
+  it("A1: event order, strict increase with the one address/takeaway exception, the accepted formats, and no adjusting", async () => {
+    const { system, schema } = await serialized();
+    expect(system).toContain("write a time as M:SS, M:SS.s or M:SS.ss (one or two minute digits; seconds 00 to 59).");
+    expect(system).toContain("The moments happen in this order: address, takeaway_start, top_of_backswing, early_downswing, impact.");
+    expect(system).toContain("Each time you give must be later than the time of every earlier moment you timed.");
+    expect(system).toContain("The one exception: takeaway_start may share the time of address, although they are different moments.");
+    expect(system).toContain("mark that moment unclear with no time. Never change a time, add precision or claim a moment is visible just to keep the order.");
+    expect(system).toContain("its estimate is null, its rubric items are not_assessable, its pillar is insufficient_evidence, and the swing may be unscored.");
+    expect(system).toContain("takeaway_start (the moment the club starts back; not address)");
+    expect(schema.properties.positions.description).toContain("The moments happen in the order listed.");
+    for (const position of ["address", "takeaway_start", "top_of_backswing", "early_downswing", "impact"]) {
+      const at = schema.properties.positions.properties[position].properties.at.description as string;
+      expect(at, position).toContain("M:SS, M:SS.s or M:SS.ss (one or two minute digits; seconds 00 to 59), only when visible is yes; otherwise null.");
+      expect(at, position).toContain("only takeaway_start may share the time of address.");
+    }
+  });
+
+  it("A1 matches the committed rule: the stated order and formats are exactly what the contract accepts", async () => {
+    const { system } = await serialized();
+    const { SWING_POSITIONS } = await import("@/lib/full-swing-scoring-rubric");
+    const { POSITION_TIME_PATTERN } = await import("@/lib/full-swing-analysis-contract");
+    expect(system).toContain(`The moments happen in this order: ${SWING_POSITIONS.join(", ")}.`);
+    for (const ok of ["0:05", "1:05.5", "1:05.55", "12:05"]) expect(POSITION_TIME_PATTERN.test(ok), ok).toBe(true);
+    for (const bad of ["0:60", "1:05.555", "123:05", "5"]) expect(POSITION_TIME_PATTERN.test(bad), bad).toBe(false);
+  });
+
+  it("A2: each turn's committed requirements, including face_on only for the hip turn, without points or cutoffs", async () => {
+    const { system, schema } = await serialized();
+    expect(system).toContain("– shoulder_turn_at_top: a face_on or down_the_line view, shoulders visible, top_of_backswing yes, and a shoulder_rotation estimate.");
+    expect(system).toContain("– hip_turn_at_impact: a face_on view only (down_the_line does not qualify), pelvis visible, impact yes, and a hip_rotation estimate.");
+    expect(system).toContain("An estimate and its turn's assessability are separate: give the estimate whenever the video supports it, even when its turn is not assessable");
+    expect(system).toContain("You do not compare any estimate with a cutoff.");
+    const props = schema.properties.threshold_assessments.properties;
+    expect(props.shoulder_turn_at_top.description).toContain("Requires a face_on or down_the_line view, shoulders visible, top_of_backswing yes and a shoulder_rotation estimate.");
+    expect(props.hip_turn_at_impact.description).toContain("Requires a face_on view (down_the_line does not qualify), pelvis visible, impact yes and a hip_rotation estimate.");
+    for (const measure of ["shoulder_turn_at_top", "hip_turn_at_impact"]) {
+      expect(props[measure].properties.assessable.description).toContain("every requirement listed for this turn is met; otherwise false.");
+    }
+  });
+
+  it("A2 matches the committed MEASURES table exactly (views, details, positions, estimate)", async () => {
+    const { system } = await serialized();
+    const { MEASURES, CAMERA_VIEWS } = await import("@/lib/full-swing-scoring-rubric");
+    for (const [measure, need] of Object.entries(MEASURES)) {
+      const line = system.split("\n").find((l) => l.startsWith(`  – ${measure}:`));
+      expect(line, measure).toBeDefined();
+      for (const view of CAMERA_VIEWS) expect(line!.includes(`${view} view`) || line!.includes(`${view} or `), `${measure} ${view}`).toBe((need.views as readonly string[]).includes(view));
+      for (const detail of need.details) expect(line, `${measure} ${detail}`).toContain(`${detail} visible`);
+      for (const position of need.positions) expect(line, `${measure} ${position}`).toContain(`${position} yes`);
+      expect(line, `${measure} estimate`).toContain(`a ${need.estimate} estimate`);
+    }
+  });
+
+  it("A3: at most one link per item, combine related observations, keep unlinked coaching, never unlink to evade", async () => {
+    const { system, schema } = await serialized();
+    expect(system).toContain("• Each rubric item may be linked by at most one deficiency. When several observations describe the same observed item, combine them into that one linked deficiency.");
+    expect(system).toContain("Coaching that does not describe a rubric item stays its own deficiency with rubric_id null.");
+    expect(system).toContain("Do not drop or unlink a deficiency that describes an observed item just to avoid a repeated link; combine it instead.");
+    expect(system).toContain("Set its rubric_id to the rubric item it describes only when you marked that item observed; otherwise rubric_id is null.");
+    expect(schema.properties.deficiencies.items.properties.rubric_id.description).toContain(
+      "Each item may be linked by at most one deficiency: put every observation about the same item into that one deficiency.",
+    );
+  });
+
+  it("honest unscored results stay stated as valid with full or partial coverage", async () => {
+    const { system } = await serialized();
+    expect(system).toContain("\"unclear\", \"not_assessable\" and an unscored result are honest answers.");
+    expect(system).toContain("Full coverage alone does not require true.");
+  });
+
+  it("the contract still refuses each aligned rule (rejections unchanged)", async () => {
+    const { validateFullSwingProviderResponse } = await import("@/lib/full-swing-analysis-contract");
+    const reason = (patch: (r: Record<string, any>) => void) => {
+      const r = validReport() as Record<string, any>;
+      patch(r);
+      const v = validateFullSwingProviderResponse(r);
+      return v.ok ? "accepted" : v.reason;
+    };
+    expect(reason((r) => { r.positions.early_downswing.at = r.positions.top_of_backswing.at; })).toBe("position_order");
+    expect(reason((r) => { r.positions.takeaway_start.at = r.positions.address.at; })).toBe("accepted");
+    expect(reason((r) => {
+      r.camera_view = "down_the_line";
+      r.rubric_findings = r.rubric_findings.map((f: { id: string }) => ({ ...f, status: "not_assessable" }));
+      r.deficiencies = [{ ...r.deficiencies[0], rubric_id: null }];
+    })).toBe("threshold_assessable_without_evidence");
+    expect(reason((r) => {
+      r.deficiencies = [
+        { title: "a", description: "d", rubric_id: "reverse_pivot" },
+        { title: "b", description: "d", rubric_id: "reverse_pivot" },
+      ];
+      r.drills = [];
+    })).toBe("duplicate_rubric_link");
   });
 });

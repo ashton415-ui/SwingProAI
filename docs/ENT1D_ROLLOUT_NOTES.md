@@ -366,6 +366,49 @@ select id, user_id, storage_path, video_url, created_at
     user prompt and the whole putting request (byte comparisons in the
     authority suite, with exactly that one sentence reversed for full swing).
     Not runtime-validated.
+- **Full-swing rejection diagnostics (after S6 R8; local candidate,
+  uncommitted).**
+  - Basis: in S6 R8 the full-swing call ended `outcome=validation_rejected
+    finish_reason=stop` (prompt 4003, candidate 1170, thinking 2142 tokens,
+    4062 characters). The contract refused the parsed answer, and which rule
+    refused it was not logged by design, so the cause is unknown.
+  - Approved narrow exception to "the rejection reason is never logged": the
+    provider-diagnostics line for `family=full_swing outcome=validation_rejected`
+    ends with `rejection=<code>`. The code is the contract's fixed
+    `FullSwingRejection` value, checked against an exhaustive allowlist
+    (`lib/gemini-response-diagnostics.ts`, type-only coupling to the contract
+    with a compile-time exhaustiveness check). Anything else is
+    `unrecognized`; a missing code is `unavailable`. The code is re-validated
+    when the line is formatted.
+  - Only the enum code is logged: never the rejected value, model text,
+    declarations, estimates or an error message. The HTTP answer (500 with
+    fixed copy), the failed row, the single provider call, putting lines and
+    every other outcome are unchanged. Validator predicates, rejection codes,
+    acceptance, scoring and persistence are unchanged.
+  - This cannot recover R8's missing code. It improves the evidence from a
+    future, separately authorized attempt. Not runtime-validated.
+- **Full-swing contract instruction alignment (local delta on the
+  diagnostics candidate, uncommitted).** The system instruction and schema
+  descriptions now state three rules the contract already enforced. Only the
+  wording changes, not the rules:
+  - A1 timestamps: the event order; each time later than every earlier timed
+    moment, except that takeaway_start may share the time of address; the
+    accepted forms `M:SS`, `M:SS.s` and `M:SS.ss`. A moment that cannot be
+    placed clearly is unclear with no time, and its dependants follow the
+    existing rules. Times are never adjusted to fit;
+  - A2 turn assessability, stated as the committed requirements: shoulder turn
+    from face_on or down_the_line with shoulders visible, top_of_backswing yes
+    and an estimate; hip turn from face_on only with pelvis visible, impact yes
+    and an estimate. An estimate stays separate from its turn's assessability.
+    No points or cutoffs are stated;
+  - A3 deficiency links: each rubric item linked at most once, with related
+    observations combined into that one deficiency. Unlinked coaching stays,
+    and links are never dropped just to avoid a duplicate.
+  - Unchanged: schema structure (checked by a description-free fingerprint),
+    property order, types, enums, required fields, nullability, user prompt,
+    validator, rubric, diagnostics, putting, model, temperature, budgets,
+    thinking and transport. This does not identify R8's cause and does not
+    show that a live model complies. Not runtime-validated.
 
 ## 3. Activation sequence (each step separately authorized)
 

@@ -21,8 +21,13 @@ import {
   formatGeminiResponseDiagnostics,
   logGeminiResponseDiagnostics,
   withTextLength,
+  FULL_SWING_REJECTION_CODES,
+  classifyRejectionCode,
+  withRejectionCode,
   type GeminiResponseDiagnostics,
 } from "@/lib/gemini-response-diagnostics";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const SECRETS = {
   text: "RESPONSE-TEXT-SENTINEL",
@@ -248,9 +253,11 @@ describe("D4. privacy: nothing outside the allowlist can reach a line", () => {
   it("every line has the fixed key set and only codes or integers as values", () => {
     const d = withTextLength(describeGeminiResponse(richResponse()), 7978);
     for (const line of allLines(d)) {
+      // The approved rejection field is the one addition, on the full-swing validation_rejected line only.
       expect(line).toMatch(
-        /^\[analyze-swing\] provider response diagnostics family=(full_swing|putting) outcome=[a-z_]+ finish_reason=[a-z_]+ prompt_tokens=(\d+|unavailable) candidate_tokens=(\d+|unavailable) thinking_tokens=(\d+|unavailable) total_tokens=(\d+|unavailable) text_chars=(\d+|unavailable)$/,
+        /^\[analyze-swing\] provider response diagnostics family=(full_swing|putting) outcome=[a-z_]+ finish_reason=[a-z_]+ prompt_tokens=(\d+|unavailable) candidate_tokens=(\d+|unavailable) thinking_tokens=(\d+|unavailable) total_tokens=(\d+|unavailable) text_chars=(\d+|unavailable)( rejection=[a-z_]+)?$/,
       );
+      expect(line.includes(" rejection=")).toBe(line.includes("family=full_swing outcome=validation_rejected "));
     }
   });
 
@@ -307,5 +314,110 @@ describe("D5. logging is best effort and never changes the caller's outcome", ()
     const d = describeGeminiResponse(richResponse());
     expect(logGeminiResponseDiagnostics("full_swing", "completed", d)).toBeUndefined();
     expect(logGeminiResponseDiagnostics("full_swing", "json_parse_failed", d)).toBeUndefined();
+  });
+});
+
+// ─── D6. the full-swing rejection code (approved code-only exception) ────────
+
+/** The FullSwingRejection union as written in the contract source, for a runtime cross-check of the allowlist. */
+function contractRejectionCodes(): string[] {
+  const source = readFileSync(join(process.cwd(), "lib/full-swing-analysis-contract.ts"), "utf8");
+  const union = source.match(/export type FullSwingRejection =([\s\S]*?);/);
+  if (!union) throw new Error("FullSwingRejection union not found");
+  return Array.from(union[1].matchAll(/"([a-z_]+)"/g), (m) => m[1]);
+}
+
+const BASE = withTextLength(describeGeminiResponse({ candidates: [{ finishReason: "STOP" }], usageMetadata: USAGE }), 4062);
+const REJECTED_PREFIX =
+  "[analyze-swing] provider response diagnostics family=full_swing outcome=validation_rejected finish_reason=stop " +
+  "prompt_tokens=2140 candidate_tokens=1987 thinking_tokens=6205 total_tokens=10332 text_chars=4062";
+
+describe("D6. full swing validation_rejected carries only the contract's fixed rejection code", () => {
+  it("the allowlist is exactly the contract's rejection codes, each once", () => {
+    expect([...FULL_SWING_REJECTION_CODES].sort()).toEqual(contractRejectionCodes().sort());
+    expect(new Set(FULL_SWING_REJECTION_CODES).size).toBe(FULL_SWING_REJECTION_CODES.length);
+  });
+
+  it.each([...FULL_SWING_REJECTION_CODES])("%s is logged as itself", (code) => {
+    const line = formatGeminiResponseDiagnostics("full_swing", "validation_rejected", withRejectionCode(BASE, code));
+    expect(line).toBe(`${REJECTED_PREFIX} rejection=${code}`);
+  });
+
+  it.each([
+    ["a near match", "bad_text_extra"],
+    ["a prefix", "bad_"],
+    ["surrounding space", " bad_text"],
+    ["upper case", "BAD_TEXT"],
+    ["an injected suffix", "bad_text finish_reason=stop RESPONSE-TEXT-SENTINEL"],
+    ["a newline", "bad_text\nINJECTED"],
+    ["the empty string", ""],
+    ["the sentinel itself", "unrecognized"],
+    ["an object-prototype name", "constructor"],
+    ["another prototype name", "__proto__"],
+    ["a String object", new String("bad_text")],
+    ["an array", ["bad_text"]],
+    ["an object with toString", { toString: () => "bad_text" }],
+    ["a number", 7],
+    ["null", null],
+    ["undefined", undefined],
+    ["a symbol", Symbol("bad_text")],
+  ])("%s becomes unrecognized and is never echoed", (_label, value) => {
+    expect(classifyRejectionCode(value)).toBe("unrecognized");
+    const line = formatGeminiResponseDiagnostics("full_swing", "validation_rejected", withRejectionCode(BASE, value));
+    expect(line).toBe(`${REJECTED_PREFIX} rejection=unrecognized`);
+    expect(line).not.toContain("RESPONSE-TEXT-SENTINEL");
+    expect(line).not.toContain("INJECTED");
+  });
+
+  it("an accessor that throws while the code is read leaves the record unchanged", () => {
+    const hostile = { get toString(): never { throw new Error("trap"); } };
+    expect(() => withRejectionCode(BASE, hostile)).not.toThrow();
+    expect(withRejectionCode(BASE, hostile).rejectionCode).toBe("unrecognized");
+  });
+
+  it("a code smuggled into the record past the types is re-validated when formatted", () => {
+    const forged = { ...BASE, rejectionCode: "bad_text RESPONSE-TEXT-SENTINEL" } as GeminiResponseDiagnostics;
+    expect(formatGeminiResponseDiagnostics("full_swing", "validation_rejected", forged)).toBe(`${REJECTED_PREFIX} rejection=unrecognized`);
+  });
+
+  it("a validation_rejected line with no code says unavailable, never a guessed code", () => {
+    expect(formatGeminiResponseDiagnostics("full_swing", "validation_rejected", BASE)).toBe(`${REJECTED_PREFIX} rejection=unavailable`);
+  });
+
+  it("every other family and outcome line is unchanged, even when a code is attached", () => {
+    const coded = withRejectionCode(BASE, "position_order");
+    for (const outcome of RESPONSE_OUTCOMES) {
+      for (const family of ["full_swing", "putting"] as const) {
+        if (family === "full_swing" && outcome === "validation_rejected") continue;
+        expect(formatGeminiResponseDiagnostics(family, outcome, coded)).toBe(formatGeminiResponseDiagnostics(family, outcome, BASE));
+        expect(formatGeminiResponseDiagnostics(family, outcome, coded)).not.toContain("rejection=");
+      }
+    }
+  });
+
+  it("a family or outcome smuggled past the types never unlocks the field", () => {
+    const coded = withRejectionCode(BASE, "bad_text");
+    expect(formatGeminiResponseDiagnostics("full_swing " as never, "validation_rejected", coded)).not.toContain("rejection=");
+    expect(formatGeminiResponseDiagnostics("full_swing", "validation_rejected " as never, coded)).not.toContain("rejection=");
+  });
+
+  it("logging the rejected line is best effort: a throwing sink changes nothing", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {
+      throw new Error("sink down");
+    });
+    expect(logGeminiResponseDiagnostics("full_swing", "validation_rejected", withRejectionCode(BASE, "bad_text"))).toBeUndefined();
+  });
+
+  it("the rejected line is logged once, to console.error, with its code", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    logGeminiResponseDiagnostics("full_swing", "validation_rejected", withRejectionCode(BASE, "finding_view_mismatch"));
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]).toEqual([`${REJECTED_PREFIX} rejection=finding_view_mismatch`]);
+  });
+
+  it("withRejectionCode adds only the classified code and keeps every other field", () => {
+    const coded = withRejectionCode(BASE, "bad_list");
+    expect(coded).toEqual({ ...BASE, rejectionCode: "bad_list" });
+    expect(BASE).not.toHaveProperty("rejectionCode");
   });
 });

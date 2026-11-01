@@ -367,8 +367,9 @@ describe("analyze-swing log hygiene", () => {
     expect(apiSource).toContain(
       'console.log("[analyze-swing] Gemini response length (chars):", rawText.length)',
     );
-    // S6-R1: the full-swing contract rejection is fixed copy; its reason code is
-    // internal and never logged (it replaced the missing-required-fields line).
+    // S6-R1: the full-swing contract rejection is fixed copy (it replaced the
+    // missing-required-fields line). Its fixed reason code reaches only the
+    // allowlisted diagnostics line (approved code-only exception), never this line.
     expect(apiSource).toContain('console.error("[analyze-swing] full-swing response rejected")');
   });
 });
@@ -478,6 +479,26 @@ describe("analyze-swing provider response diagnostics stay allowlisted", () => {
       "puttingDiagnostics, puttingRawText.length",
       "responseDiagnostics, rawText.length",
     ]);
+  });
+
+  it("the only rejection detail the route adds is the full-swing validator's fixed code", () => {
+    // Approved code-only exception: one call, full swing, the validator's own reason field.
+    expect(callArguments(routeCode, "withRejectionCode")).toEqual(["responseDiagnostics, validated.reason"]);
+    expect(routeCode).not.toMatch(/puttingDiagnostics\s*=\s*withRejectionCode/);
+    // The reason reaches no console call and no response directly.
+    for (const call of extractConsoleCalls(routeCode)) expect(call).not.toContain("reason");
+    expect(routeCode).not.toMatch(/NextResponse\.json\([^)]*validated\.reason/);
+  });
+
+  it("the helper classifies the rejection code by exact allowlist membership only", () => {
+    expect(helperSource).toContain("export const FULL_SWING_REJECTION_CODES = [");
+    expect(helperSource).toContain('typeof value === "string" && REJECTION_CODES.has(value) ? value : "unrecognized"');
+    expect(helperSource).toContain('import type { FullSwingRejection } from "./full-swing-analysis-contract";');
+    // Type-only coupling: no runtime import of the contract.
+    expect(helperSource).not.toMatch(/^import\s+(?!type\b).*full-swing-analysis-contract/m);
+    for (const banned of ["String(value", "String(code", "`${value}`", "`${code}`", ".includes(value", ".startsWith(", ".indexOf("]) {
+      expect(helperSource, `rejection classification must not use ${banned}`).not.toContain(banned);
+    }
   });
 
   it("completion is decided by the completion policy before any text is read, never by the diagnostics", () => {

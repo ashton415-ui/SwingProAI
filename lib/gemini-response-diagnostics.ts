@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { FullSwingRejection } from "./full-swing-analysis-contract";
+
 // ============================================================================
 // ENT-1D S6 — safe diagnostics for one Gemini response
 // ============================================================================
@@ -16,7 +18,12 @@ import "server-only";
 //     outside the known set is "unrecognized", never echoed;
 //   - the supplied prompt, candidate, thinking and total token counts;
 //   - the length of the extracted response text;
-//   - a fixed outcome code naming the pipeline stage.
+//   - a fixed outcome code naming the pipeline stage;
+//   - for a full-swing answer the content contract refused (outcome
+//     validation_rejected) only, the contract's fixed rejection code. This is
+//     an approved, narrow exception to "the reason is never logged": the enum
+//     code alone, from an exhaustive allowlist, never the rejected value, the
+//     model's text or an error message.
 //
 // Response text, prompts, thought text and signatures, safety ratings,
 // credentials, headers and error messages never enter the record, so they
@@ -79,6 +86,55 @@ export type DiagnosticFamily = "full_swing" | "putting";
 const FAMILIES: ReadonlySet<string> = new Set(["full_swing", "putting"]);
 const OUTCOMES: ReadonlySet<string> = new Set(RESPONSE_OUTCOMES);
 
+/**
+ * The full-swing content contract's rejection codes (FullSwingRejection in
+ * lib/full-swing-analysis-contract.ts). Coupled by type only: the list must name
+ * every code (checked below at compile time) and nothing else, and it is the
+ * runtime allowlist, so any other value, a near match included, is
+ * "unrecognized".
+ */
+export const FULL_SWING_REJECTION_CODES = [
+  "not_object",
+  "provider_authored_scoring",
+  "bad_text",
+  "bad_angle",
+  "bad_tempo",
+  "bad_list",
+  "bad_pillar",
+  "drill_without_deficiency",
+  "bad_declaration",
+  "bad_position_time",
+  "position_order",
+  "estimate_without_declared_evidence",
+  "bad_threshold_assessment",
+  "threshold_assessable_without_evidence",
+  "threshold_assessable_without_estimate",
+  "bad_rubric_finding",
+  "threshold_item_classified",
+  "quarantined_item_claimed",
+  "finding_view_mismatch",
+  "finding_detail_unavailable",
+  "finding_position_unavailable",
+  "pillar_without_coverage",
+  "bad_scorable",
+  "scorable_without_coverage",
+  "scorable_without_assessed_pillar",
+  "scorable_without_assessable_item",
+  "bad_rubric_link",
+  "deficiency_rubric_mismatch",
+  "duplicate_rubric_link",
+] as const satisfies readonly FullSwingRejection[];
+
+// Compile-time exhaustiveness: a contract code missing from the list is a type error here.
+type UnlistedRejection = Exclude<FullSwingRejection, (typeof FULL_SWING_REJECTION_CODES)[number]>;
+const REJECTION_LIST_IS_EXHAUSTIVE: [UnlistedRejection] extends [never] ? true : never = true;
+void REJECTION_LIST_IS_EXHAUSTIVE;
+
+const REJECTION_CODES: ReadonlySet<string> = new Set(FULL_SWING_REJECTION_CODES);
+const REJECTION_VALUES: ReadonlySet<string> = new Set(
+  Array.from(REJECTION_CODES).concat(["unrecognized", DIAGNOSTIC_UNAVAILABLE]),
+);
+
 export interface GeminiResponseDiagnostics {
   readonly finishReason: string;
   readonly promptTokens: DiagnosticCount;
@@ -86,6 +142,8 @@ export interface GeminiResponseDiagnostics {
   readonly thinkingTokens: DiagnosticCount;
   readonly totalTokens: DiagnosticCount;
   readonly textChars: DiagnosticCount;
+  /** Full swing, validation_rejected only: the contract's rejection code, set by withRejectionCode. */
+  readonly rejectionCode?: string;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -139,6 +197,20 @@ export function withTextLength(diagnostics: GeminiResponseDiagnostics, length: u
   return { ...diagnostics, textChars: diagnosticCount(length) };
 }
 
+/** The rejection code for a supplied value: an exact allowlisted code, otherwise "unrecognized"; never the value itself. */
+export function classifyRejectionCode(value: unknown): string {
+  return typeof value === "string" && REJECTION_CODES.has(value) ? value : "unrecognized";
+}
+
+/** The same record with the content contract's rejection code, classified; nothing else is taken. */
+export function withRejectionCode(diagnostics: GeminiResponseDiagnostics, code: unknown): GeminiResponseDiagnostics {
+  try {
+    return { ...diagnostics, rejectionCode: classifyRejectionCode(code) };
+  } catch {
+    return diagnostics;
+  }
+}
+
 const safeCode = (value: unknown, allowed: ReadonlySet<string>): string =>
   typeof value === "string" && allowed.has(value) ? value : "unrecognized";
 
@@ -151,17 +223,26 @@ export function formatGeminiResponseDiagnostics(
   outcome: ResponseOutcome,
   diagnostics: GeminiResponseDiagnostics,
 ): string {
-  return [
+  const familyCode = safeCode(family, FAMILIES);
+  const outcomeCode = safeCode(outcome, OUTCOMES);
+  const fields = [
     "[analyze-swing] provider response diagnostics",
-    `family=${safeCode(family, FAMILIES)}`,
-    `outcome=${safeCode(outcome, OUTCOMES)}`,
+    `family=${familyCode}`,
+    `outcome=${outcomeCode}`,
     `finish_reason=${safeCode(diagnostics.finishReason, FINISH_REASON_VALUES)}`,
     `prompt_tokens=${diagnosticCount(diagnostics.promptTokens)}`,
     `candidate_tokens=${diagnosticCount(diagnostics.candidateTokens)}`,
     `thinking_tokens=${diagnosticCount(diagnostics.thinkingTokens)}`,
     `total_tokens=${diagnosticCount(diagnostics.totalTokens)}`,
     `text_chars=${diagnosticCount(diagnostics.textChars)}`,
-  ].join(" ");
+  ];
+  // The rejection code is added for a full-swing validation_rejected line only,
+  // decided from the re-validated codes; every other line is unchanged.
+  if (familyCode === "full_swing" && outcomeCode === "validation_rejected") {
+    const code = diagnostics.rejectionCode;
+    fields.push(`rejection=${code === undefined ? DIAGNOSTIC_UNAVAILABLE : safeCode(code, REJECTION_VALUES)}`);
+  }
+  return fields.join(" ");
 }
 
 /**

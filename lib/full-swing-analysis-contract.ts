@@ -29,8 +29,10 @@
 // unavailable, an estimate given while its evidence is declared unclear,
 // timestamps out of order, coaching linked to an item that was not observed).
 // Nothing is repaired, defaulted, partly stored or retried. The reason is a
-// fixed code for the caller's own use and is never logged or returned to the
-// golfer.
+// fixed code for the caller's own use and is never returned to the golfer. The
+// route adds that code alone, checked against an exhaustive allowlist, to its
+// internal provider-diagnostics line (lib/gemini-response-diagnostics.ts); no
+// rejected value or text is ever logged.
 //
 // What these checks do not establish: whether any declaration, estimate,
 // finding, timestamp or piece of prose is true. The declarations are the

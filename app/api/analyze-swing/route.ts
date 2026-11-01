@@ -36,6 +36,7 @@ import { GeminiHttpError, generateContentOnce, responseText } from "@/lib/gemini
 import {
   describeGeminiResponse,
   logGeminiResponseDiagnostics,
+  withRejectionCode,
   withTextLength,
   type GeminiResponseDiagnostics,
   type ResponseOutcome,
@@ -211,7 +212,7 @@ const positionSchema = (what: string) => ({
   description: what,
   properties: {
     visible: { type: SchemaType.STRING, enum: [...POSITION_VISIBILITY], description: "yes when the video shows this moment clearly; no when it is not in the video; unclear when you cannot tell." },
-    at:      { type: SchemaType.STRING, nullable: true, description: "The approximate video time of this moment as M:SS or M:SS.s, only when visible is yes; otherwise null." },
+    at:      { type: SchemaType.STRING, nullable: true, description: "The approximate video time of this moment as M:SS, M:SS.s or M:SS.ss (one or two minute digits; seconds 00 to 59), only when visible is yes; otherwise null. It must be later than the time of every earlier moment you timed; only takeaway_start may share the time of address." },
   },
   required: ["visible", "at"],
 });
@@ -220,7 +221,7 @@ const thresholdAssessmentSchema = (what: string) => ({
   type: SchemaType.OBJECT,
   description: what,
   properties: {
-    assessable: { type: SchemaType.BOOLEAN, description: "true only when the video shows this turn clearly enough for your estimate to be used." },
+    assessable: { type: SchemaType.BOOLEAN, description: "true only when the video shows this turn clearly enough for your estimate to be used and every requirement listed for this turn is met; otherwise false." },
     basis:      { type: SchemaType.STRING, nullable: true, description: "When assessable: what you see that supports your estimate. Otherwise null." },
   },
   required: ["assessable", "basis"],
@@ -254,7 +255,7 @@ const RESPONSE_SCHEMA = {
     },
     positions: {
       type: SchemaType.OBJECT,
-      description: "For each moment of the swing, whether the video shows it clearly, and when.",
+      description: "For each moment of the swing, whether the video shows it clearly, and when. The moments happen in the order listed.",
       properties: {
         address:          positionSchema("Address: the set-up before the club moves."),
         takeaway_start:   positionSchema("Takeaway start: the moment the club starts back. Not the same as address."),
@@ -278,8 +279,8 @@ const RESPONSE_SCHEMA = {
       type: SchemaType.OBJECT,
       description: "Whether each turn can be assessed from this video, and on what visible basis. You do not compare any estimate with a cutoff.",
       properties: {
-        shoulder_turn_at_top: thresholdAssessmentSchema("The shoulder turn at the top of the backswing (shoulder_rotation)."),
-        hip_turn_at_impact:   thresholdAssessmentSchema("The hip turn at impact (hip_rotation)."),
+        shoulder_turn_at_top: thresholdAssessmentSchema("The shoulder turn at the top of the backswing (shoulder_rotation). Requires a face_on or down_the_line view, shoulders visible, top_of_backswing yes and a shoulder_rotation estimate."),
+        hip_turn_at_impact:   thresholdAssessmentSchema("The hip turn at impact (hip_rotation). Requires a face_on view (down_the_line does not qualify), pelvis visible, impact yes and a hip_rotation estimate."),
       },
       required: [...THRESHOLD_MEASURES],
     },
@@ -317,7 +318,7 @@ const RESPONSE_SCHEMA = {
         properties: {
           title:       { type: SchemaType.STRING, description: "3-6 word headline naming what you observed" },
           description: { type: SchemaType.STRING, description: "2-4 sentences: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result" },
-          rubric_id:   { type: SchemaType.STRING, nullable: true, enum: [...QUALITATIVE_ITEM_IDS], description: "The rubric item this deficiency describes, only when you marked that item observed in rubric_findings; otherwise null." },
+          rubric_id:   { type: SchemaType.STRING, nullable: true, enum: [...QUALITATIVE_ITEM_IDS], description: "The rubric item this deficiency describes, only when you marked that item observed in rubric_findings; otherwise null. Each item may be linked by at most one deficiency: put every observation about the same item into that one deficiency." },
         },
         required: ["title", "description", "rubric_id"],
       },
@@ -390,6 +391,8 @@ WHAT THE VIDEO SHOWS
 ────────────────────
 • camera_view: face_on, down_the_line, other, or unclear when you cannot tell.
 • positions: for address, takeaway_start (the moment the club starts back; not address), top_of_backswing, early_downswing (just after the top) and impact, say yes with the approximate video time when the video shows that moment clearly, no when it is not in the video, and unclear when you cannot tell. Give a time only with yes.
+• Times: write a time as M:SS, M:SS.s or M:SS.ss (one or two minute digits; seconds 00 to 59). The moments happen in this order: address, takeaway_start, top_of_backswing, early_downswing, impact. Each time you give must be later than the time of every earlier moment you timed. The one exception: takeaway_start may share the time of address, although they are different moments.
+• If the video does not let you place a moment clearly after the earlier ones, mark that moment unclear with no time. Never change a time, add precision or claim a moment is visible just to keep the order. Whatever depends on a moment you marked unclear follows the rules below: its estimate is null, its rubric items are not_assessable, its pillar is insufficient_evidence, and the swing may be unscored.
 • detail_visibility: for shoulders, pelvis, spine_line, lead_wrist, hands_grip, club_shaft, clubface and target_reference, say visible, not_visible or unclear.
 
 NUMBERS
@@ -409,7 +412,10 @@ Name the joints and positions you describe (address, takeaway, top of the backsw
 SCORING
 ───────
 SwingProAI's server applies its scoring rubric to what you report. You do not write a score. The rubric is a coaching rubric, not a calibrated measurement; do not describe it as one, and do not present any scoring criterion to the golfer as a target.
-• threshold_assessments: for shoulder_turn_at_top and hip_turn_at_impact, assessable is true only when the video shows that turn clearly enough for your estimate to be used, with basis naming what you see; otherwise assessable is false and basis is null. You do not compare any estimate with a cutoff.
+• threshold_assessments: for shoulder_turn_at_top and hip_turn_at_impact, assessable is true only when the video shows that turn clearly enough for your estimate to be used, with basis naming what you see; otherwise assessable is false and basis is null. You do not compare any estimate with a cutoff. Each turn also has fixed requirements; when any is missing, assessable is false:
+  – shoulder_turn_at_top: a face_on or down_the_line view, shoulders visible, top_of_backswing yes, and a shoulder_rotation estimate.
+  – hip_turn_at_impact: a face_on view only (down_the_line does not qualify), pelvis visible, impact yes, and a hip_rotation estimate.
+  An estimate and its turn's assessability are separate: give the estimate whenever the video supports it, even when its turn is not assessable (for example a hip_rotation estimate from a down_the_line view), and set assessable to false.
 • rubric_findings: one entry for each listed item. observed when the video shows it; not_observed only when the video clearly shows it is absent; not_assessable when the view, details or moments it needs are not clearly visible. Never mark something not_observed because you cannot see it. An estimate you made is not, on its own, evidence of a fault.
   – laid_off_p4: a laid-off club at the top. Needs a down_the_line view, club_shaft and target_reference visible, and top_of_backswing.
   – over_the_top: an over-the-top downswing path. Needs a down_the_line view, club_shaft and target_reference visible, top_of_backswing and early_downswing.
@@ -421,6 +427,7 @@ COACHING
 ────────
 • executive_summary: plain, specific sentences about this video, with its main limits.
 • Each deficiency: what the video shows and where in the swing, then why it may matter, stated as a possibility unless the video shows the result. Set its rubric_id to the rubric item it describes only when you marked that item observed; otherwise rubric_id is null.
+• Each rubric item may be linked by at most one deficiency. When several observations describe the same observed item, combine them into that one linked deficiency. Coaching that does not describe a rubric item stays its own deficiency with rubric_id null. Do not drop or unlink a deficiency that describes an observed item just to avoid a repeated link; combine it instead.
 • Each drill addresses one listed deficiency, in the same order; no drill without a deficiency.
 • posture, swing_plane, impact: rate posture only when address is visible, swing_plane only when top_of_backswing is visible, and impact only when impact is visible. Otherwise use rating "insufficient_evidence" and say in the observation what is missing. When scorable is true, at least one of them must be rated.
 • practice_focus and pro_cue: null when the video supports nothing to recommend.
@@ -1094,7 +1101,10 @@ export async function POST(req: NextRequest) {
     responseStage = "validation_rejected";
     const validated = validateFullSwingModelResponse(parsed);
     if (!validated.ok) {
-      // The rejection reason is an internal diagnostic: never logged, never returned.
+      // The rejection reason is never returned. Approved exception: its fixed
+      // code, classified against an exhaustive allowlist, is added to the
+      // diagnostics line logged below; no rejected value or text is taken.
+      responseDiagnostics = withRejectionCode(responseDiagnostics, validated.reason);
       console.error("[analyze-swing] full-swing response rejected");
       throw new Error("full-swing response rejected");
     }
