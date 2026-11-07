@@ -227,6 +227,12 @@ async function bodyOf(response: Response): Promise<Record<string, never>> {
   return (await response.json()) as Record<string, never>;
 }
 
+type ErrorBody = { error: { code: string; message: string } };
+
+async function errorBodyOf(response: Response): Promise<ErrorBody> {
+  return (await response.json()) as ErrorBody;
+}
+
 function storageCalls(client: FakeClient): RecordedCall[] {
   return client.calls.filter(([m]) => m === "storage.from" || m === "info");
 }
@@ -814,22 +820,18 @@ describe("D2 finalize — concurrency", () => {
     });
     setAuthenticated(foreign);
     const foreignResponse = await finalizePOST(post(validBody()));
-    const foreignBody = await bodyOf(foreignResponse);
+    const foreignBody = await errorBodyOf(foreignResponse);
 
     const mismatched = makeFakeClient({
       selects: [{ data: canonicalRow({ mime_type: "video/webm" }), error: null }],
     });
     setAuthenticated(mismatched);
     const ownResponse = await finalizePOST(post(validBody()));
-    const ownBody = await bodyOf(ownResponse);
+    const ownBody = await errorBodyOf(ownResponse);
 
     expect(foreignResponse.status).toBe(ownResponse.status);
-    expect((foreignBody as { error: { code: string; message: string } }).error.code).toBe(
-      (ownBody as { error: { code: string; message: string } }).error.code,
-    );
-    expect((foreignBody as { error: { message: string } }).error.message).toBe(
-      (ownBody as { error: { message: string } }).error.message,
-    );
+    expect(foreignBody.error.code).toBe(ownBody.error.code);
+    expect(foreignBody.error.message).toBe(ownBody.error.message);
   });
 
   it("95. a conflict never triggers a second insert or a retry loop", async () => {

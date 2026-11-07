@@ -1,2 +1,3 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+/supabase/migrations/20260928124321_sec_coach1_coach_write_authority.sql text eol=lf

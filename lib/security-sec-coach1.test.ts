@@ -98,7 +98,7 @@ function parse(raw: string): Parsed {
       }
     }
   };
-  for (const m of code.matchAll(doRe)) {
+  for (const m of Array.from(code.matchAll(doRe))) {
     pushTop(code.slice(cursor, m.index));
     doBlocks[m[1].toLowerCase()] = collapse(m[2]);
     sequence.push(`do:${m[1].toLowerCase()}`);
@@ -336,7 +336,7 @@ describe("SEC-COACH1 — scope and no broadening", () => {
 
   it("references only the five target tables in the public schema", () => {
     const refs = new Set(Array.from(P.executable.matchAll(/\bpublic\.([a-z_]+)/g), (m) => m[1]));
-    expect([...refs].sort()).toEqual([...TARGETS].sort());
+    expect(Array.from(refs).sort()).toEqual([...TARGETS].sort());
   });
 });
 

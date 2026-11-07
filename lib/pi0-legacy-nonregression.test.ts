@@ -127,7 +127,7 @@ describe("PI-0 containment — only the practice surface knows about practice", 
   });
 
   it("practice code never writes drills or the legacy user_drills table", () => {
-    for (const f of PRACTICE_SOURCES) {
+    for (const f of Array.from(PRACTICE_SOURCES)) {
       const code = stripComments(read(f));
       expect(code, f).not.toMatch(/from\("drills"\)|from\("user_drills"\)|user_drills/);
     }
