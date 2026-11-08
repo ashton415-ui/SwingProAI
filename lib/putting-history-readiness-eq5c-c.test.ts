@@ -622,13 +622,13 @@ describe("EQ5C-C — the Telemetry query is otherwise unchanged", () => {
       "spine_angle",
       "hip_rotation",
       "shoulder_rotation",
-      "metrics",
-      "swing_highlights",
-      "mechanical_deficiencies",
       "swing_video:swing_videos(club, original_filename)",
     ]) {
       expect(select, `${TELEMETRY}: select lost "${field}"`).toContain(field);
     }
+    // ENT-1C: metrics, swing_highlights and mechanical_deficiencies moved from
+    // this session read to the unified result-read authority.
+    expect(telemetry).toContain("authorizeOwnedAnalysisRows(");
   });
 
   it("retains ownership, ordering and the row ceiling", () => {

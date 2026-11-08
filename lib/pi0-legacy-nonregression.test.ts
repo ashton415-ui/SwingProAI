@@ -293,7 +293,9 @@ describe("PI-0 — V1 vocabulary and configuration", () => {
   });
 
   it("adds exactly the seven PI-0 codes", () => {
-    expect(codes.slice(13)).toEqual([
+    // ENT-1C appends ANALYSIS_NOT_FOUND after them (GET /api/v1/analyses/{id}).
+    expect(codes.slice(20)).toEqual(["ANALYSIS_NOT_FOUND"]);
+    expect(codes.slice(13, 20)).toEqual([
       "FEATURE_UNAVAILABLE",
       "PRACTICE_PLAN_NOT_FOUND",
       "PRACTICE_SESSION_NOT_FOUND",

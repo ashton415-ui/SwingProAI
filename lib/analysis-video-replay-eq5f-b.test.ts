@@ -108,8 +108,10 @@ const fullSwingRegion = (source: string = pageSource): string =>
 
 // ─── Exact contract strings ───────────────────────────────────────────────────
 
+// ENT-1C: the owned-row read names its columns instead of `*`; the result
+// payload is read by the unified result-read authority, not this query.
 const VIDEO_SELECT =
-  '.select("*, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")';
+  '.select("id, user_id, status, analysis_family, equipment_snapshot, created_at, score, feedback, tempo_ratio, swing_speed_mph, swing_video:swing_videos(club, title, recorded_at, created_at, status, original_filename, storage_path, video_url)")';
 const OWNER_FILTER_ID = '.eq("id", params.id)';
 const OWNER_FILTER_USER = '.eq("user_id", user.id)';
 const OWNED_ROW_BOUNDARY = "if (!swing) notFound();";

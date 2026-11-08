@@ -176,12 +176,13 @@ describe("EQ5A analysis-family router — Analyze API source contract", () => {
   });
 
   /**
-   * A completed putting row must not emit a warning claiming Gemini is being
-   * re-run while the router is in fact refusing it before Gemini.
+   * A completed putting row must never be answered by the full-swing replay,
+   * which serves a stored full-swing result. ENT-1A replaced the old rerun
+   * warning with that replay, so the routing order is asserted against it.
    */
-  it("routes before the complete-row rerun warning", () => {
+  it("routes before the full-swing completed-row replay", () => {
     expect(anchor("classifyAnalysisFamilyRoute(analysisRow.analysis_family)")).toBeLessThan(
-      anchor("re-running Gemini to refresh"),
+      anchor("completed analysis served from the stored row"),
     );
   });
 

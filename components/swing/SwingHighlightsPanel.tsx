@@ -3,11 +3,13 @@
 import Link from "next/link";
 import { CheckCircle2, Lock, Sparkles, Trophy } from "lucide-react";
 import type { HighlightItem } from "@/types/database";
-import type { SubscriptionTier } from "@/lib/entitlements";
-import { canUseLaunchMonitor } from "@/lib/entitlements";
 
 interface SwingHighlightsPanelProps {
-  tier: SubscriptionTier;
+  /**
+   * Decided on the server by the analysis result authority (ENT-1C), never from
+   * a tier here. Highlights are core feedback today, so callers pass nothing.
+   */
+  locked?: boolean;
   highlights?: HighlightItem[] | null;
   isLoading?: boolean;
 }
@@ -36,12 +38,11 @@ function SuccessRing() {
 }
 
 export function SwingHighlightsPanel({
-  tier,
+  locked = false,
   highlights,
   isLoading = false,
 }: SwingHighlightsPanelProps) {
-  // Highlights reinforce good habits — unlocked for Birdie+ (same gate as launch monitor).
-  const hasAccess = canUseLaunchMonitor(tier);
+  const hasAccess = !locked;
 
   if (!hasAccess) {
     return (

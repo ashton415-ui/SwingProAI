@@ -10,14 +10,14 @@ import {
   Wrench,
 } from "lucide-react";
 import type { DeficiencyItem, DeficiencySeverity } from "@/types/database";
-import type { SubscriptionTier } from "@/lib/entitlements";
-import {
-  canUseLaunchMonitor,
-  canUseUltraDeepAnalysis,
-} from "@/lib/entitlements";
 
 interface MechanicalDeficienciesPanelProps {
-  tier: SubscriptionTier;
+  /**
+   * Decided on the server by the analysis result authority (ENT-1C), never from
+   * a tier here. Faults and their explanations are core feedback today, so
+   * callers pass nothing.
+   */
+  locked?: boolean;
   deficiencies?: DeficiencyItem[] | null;
   isLoading?: boolean;
 }
@@ -97,14 +97,16 @@ function FixDrillCallout({
 }
 
 export function MechanicalDeficienciesPanel({
-  tier,
+  locked = false,
   deficiencies,
   isLoading = false,
 }: MechanicalDeficienciesPanelProps) {
-  // The deficiency audit is a Birdie+ feature; the guided fix drills are
-  // reserved for the ultra-deep tier (Eagle / Coach Pro).
-  const hasAccess = canUseLaunchMonitor(tier);
-  const canSeeDrills = canUseUltraDeepAnalysis(tier);
+  // The stored "fix drill" fields hold each fault's explanation (the producer
+  // writes the description there), which is core improvement feedback. No
+  // separate guided-drill content is produced, so nothing here is held back
+  // behind a tier.
+  const hasAccess = !locked;
+  const canSeeDrills = hasAccess;
 
   if (!hasAccess) {
     return (

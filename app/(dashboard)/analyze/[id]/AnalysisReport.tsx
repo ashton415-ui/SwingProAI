@@ -137,7 +137,12 @@ function PillarCard({ title, pillar, openDefault }: { title: string; pillar: Pil
 function ProcessingState({ analysisId, onComplete }: { analysisId: string; onComplete: (data: AnalysisData) => void }) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const triggered = useRef(false);
+  // ENT-1C. A 409 "already in progress" is not a failure: another request holds
+  // this analysis, and the server will not start a second model call for it.
+  const [inProgressNotice, setInProgressNotice] = useState<string | null>(null);
+  // Each Retry / Check again bumps the attempt, which is what re-runs the effect.
+  const [attempt, setAttempt] = useState(0);
+  const triggeredFor = useRef<number | null>(null);
 
   const STEPS = [
     "Connecting to AI coach…",
@@ -149,8 +154,8 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
   ];
 
   useEffect(() => {
-    if (triggered.current) return;
-    triggered.current = true;
+    if (triggeredFor.current === attempt) return;
+    triggeredFor.current = attempt;
 
     // Advance label every ~2s for UX — actual processing can take 10-20s
     const interval = setInterval(() => {
@@ -171,10 +176,12 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ analysisId, ...(mediapipeMetrics ? { mediapipeMetrics } : {}) }),
     })
-      .then((r) => r.json())
-      .then((res) => {
+      .then(async (r) => ({ httpStatus: r.status, res: await r.json() }))
+      .then(({ httpStatus, res }) => {
         clearInterval(interval);
-        if (res.error) {
+        if (httpStatus === 409 && res.status === "processing") {
+          setInProgressNotice(res.error ?? "This analysis is already in progress.");
+        } else if (res.error) {
           setError(res.error);
         } else {
           // Clean up sessionStorage entry now that the API has consumed it
@@ -188,7 +195,25 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
       });
 
     return () => clearInterval(interval);
-  }, [analysisId, onComplete]);
+  }, [analysisId, onComplete, attempt]);
+
+  if (inProgressNotice) {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mx-auto mb-4">
+          <Loader2 className="w-7 h-7 text-amber-400 animate-spin" />
+        </div>
+        <p className="text-white font-bold mb-2">Still Analysing</p>
+        <p className="text-sm text-gray-400 mb-6">{inProgressNotice}</p>
+        <button
+          onClick={() => { setInProgressNotice(null); setStep(0); setAttempt((a) => a + 1); }}
+          className="flex items-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+        >
+          <RotateCcw className="w-3.5 h-3.5" /> Check again
+        </button>
+      </div>
+    );
+  }
 
   if (error) {
     return (
@@ -199,7 +224,7 @@ function ProcessingState({ analysisId, onComplete }: { analysisId: string; onCom
         <p className="text-white font-bold mb-2">Analysis Failed</p>
         <p className="text-sm text-red-400 mb-6">{error}</p>
         <button
-          onClick={() => { triggered.current = false; setError(null); setStep(0); }}
+          onClick={() => { setError(null); setStep(0); setAttempt((a) => a + 1); }}
           className="flex items-center gap-2 mx-auto px-5 py-2.5 rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
         >
           <RotateCcw className="w-3.5 h-3.5" /> Retry
@@ -372,7 +397,7 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
                         {isMajor ? "Major" : "Minor"}
                       </span>
                       <div className="min-w-0">
-                        <p className="text-sm font-bold text-white">{d.joint_coordinate?.joint ?? d.checkpoint}</p>
+                        <p className="text-sm font-bold text-white">{d.joint_coordinate?.joint || d.checkpoint}</p>
                         <p className="text-[11px] text-gray-500 truncate">{d.fault_description}</p>
                       </div>
                     </div>
@@ -518,16 +543,8 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
           </div>
         </div>
 
-        {/* Re-analyze button — lets the user force a fresh Gemini run on any complete row */}
-        {isComplete && !forceReanalyze && (
-          <button
-            onClick={() => setForceReanalyze(true)}
-            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] text-xs font-bold text-gray-500 hover:text-white hover:bg-white/[0.06] hover:border-white/[0.14] transition-colors"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Re-analyze with AI
-          </button>
-        )}
+        {/* ENT-1A/1C: a completed analysis is never re-run by the server, so no
+            re-analyze action is offered for one. */}
       </div>
 
       {/* ── Right: report ── */}

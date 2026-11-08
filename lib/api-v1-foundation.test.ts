@@ -20,13 +20,13 @@ import {
 } from "@/lib/api/me-dto";
 import {
   canUseFrameComparison,
-  canUseLaunchMonitor,
   canUsePracticeIntelligence,
   canUsePuttingAnalysis,
   canUsePuttingRecommendations,
-  canUseUltraDeepAnalysis,
-  getAnalysisModeForTier,
+  canViewLaunchMonitorIntelligence,
+  canViewUltraDeepAnalysis,
   getSwingLimitForTier,
+  resolvePaidAnalysisMode,
   getTierDisplayName,
   getUpsellTier,
   type SubscriptionTier,
@@ -386,9 +386,11 @@ describe("/me DTO mapping", () => {
       expect(dto.entitlement.capabilities).toEqual({
         puttingAnalysis: canUsePuttingAnalysis(tier),
         puttingRecommendations: canUsePuttingRecommendations(tier),
-        ultraDeepAnalysis: canUseUltraDeepAnalysis(tier),
+        // ENT-1C: paid analysis capabilities need a paying status as well as
+        // the tier; profileRow() carries status "active".
+        ultraDeepAnalysis: canViewUltraDeepAnalysis(tier, "active"),
         frameComparison: canUseFrameComparison(tier),
-        launchMonitor: canUseLaunchMonitor(tier),
+        launchMonitor: canViewLaunchMonitorIntelligence(tier, "active"),
         // No server feature state supplied → off, whatever the membership.
         practiceIntelligence: false,
       });
@@ -463,10 +465,15 @@ describe("/me DTO mapping", () => {
     }
   });
 
+  // ENT-1C: the mode is the paid depth the membership actually grants.
   it("29. takes the analysis mode from the entitlement helper", () => {
     for (const tier of ALL_TIERS) {
-      const dto = toMeResponse(CALLER, profileRow({ subscription_tier: tier }));
-      expect(dto.entitlement.analysisMode).toBe(getAnalysisModeForTier(tier));
+      for (const status of ["active", "trialing", "past_due", "canceled", "none"]) {
+        const dto = toMeResponse(CALLER, profileRow({ subscription_tier: tier, subscription_status: status }));
+        expect(dto.entitlement.analysisMode).toBe(resolvePaidAnalysisMode(tier, status));
+        expect(dto.entitlement.capabilities.launchMonitor).toBe(canViewLaunchMonitorIntelligence(tier, status));
+        expect(dto.entitlement.capabilities.ultraDeepAnalysis).toBe(canViewUltraDeepAnalysis(tier, status));
+      }
     }
   });
 
@@ -717,7 +724,8 @@ describe("frozen read-only dependencies", () => {
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
     ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
     // PI-1A: canUsePracticeIntelligence added.
-    ["lib/entitlements.ts", "e211f663ff7863f9ffb82a10ed397f7eb9e9b9bf39abe932d1bdc48de0e833e1"],
+    // ENT-1C: analysis-result capability helpers added.
+    ["lib/entitlements.ts", "65a12b41924b7f7590b22f44639aeb2a8246f7fcdda154c99185f9b281f45865"],
     ["types/database.ts", "661d2f072f7e3b0531352350b67b80c3c9432e86dab1c0850d44a349f28f577e"],
   ];
 

@@ -4,7 +4,8 @@ import { createClient } from "@/utils/supabase/server";
 
 export const maxDuration = 120;
 
-import { type SubscriptionTier } from "@/lib/entitlements";
+import { resolveAnalysisAccess } from "@/lib/analysis-entitlement-authority";
+import { sanitizeDeficiencies, sanitizeHighlights } from "@/lib/analysis-result-read-authority";
 import { sanitizeAnalysisHtml } from "@/lib/sanitize-html";
 import type { DeficiencyItem, HighlightItem } from "@/types/database";
 
@@ -34,12 +35,6 @@ interface BackendResponse {
   prose_summary?: { headline?: string; html?: string };
 }
 
-function resolveMode(tier: SubscriptionTier): string {
-  if (tier === "eagle" || tier === "coach_pro") return "ultra";
-  if (tier === "birdie" || tier === "coach_starter") return "advanced";
-  return "basic";
-}
-
 const RATING_SCORE: Record<string, number> = {
   beginner:     42,
   intermediate: 63,
@@ -58,9 +53,17 @@ export async function POST(req: NextRequest) {
   if (estimatedMB > 18) return NextResponse.json({ error: `Clip too large (${estimatedMB.toFixed(1)} MB). Trim to under 10 seconds.` }, { status: 413 });
 
   const supabase = await createClient();
-  const { data: profile } = await supabase.from("users").select("subscription_tier").eq("id", session.user.id).single();
-  const tier = (profile?.subscription_tier ?? "par") as SubscriptionTier;
-  const analysisMode = resolveMode(tier);
+
+  // ENT-1A / ENT-1C. The paid analysis depth is decided by the shared analysis
+  // access authority from the caller's own tier AND subscription status. An
+  // unreadable or unrecognised profile runs nothing; it is never defaulted to a
+  // tier. Anything other than a paying Birdie or Eagle gets the basic path.
+  const entitlement = await resolveAnalysisAccess(supabase, session.user.id);
+  if (entitlement.status !== "allowed") {
+    return NextResponse.json({ error: "Analysis is temporarily unavailable. Please try again shortly." }, { status: 503 });
+  }
+  const tier = entitlement.tier;
+  const analysisMode = entitlement.access.analysisMode;
 
   if (analysisMode === "basic") {
     const mockResult = {
@@ -89,8 +92,8 @@ export async function POST(req: NextRequest) {
     });
 
     if (!backendRes.ok) {
-      const detail = await backendRes.text().catch(() => "");
-      return NextResponse.json({ error: `AI analysis failed (${backendRes.status})`, detail: detail.slice(0, 200) }, { status: 502 });
+      // The backend's own error text is never relayed to the browser.
+      return NextResponse.json({ error: `AI analysis failed (${backendRes.status})` }, { status: 502 });
     }
 
     const envelope = (await backendRes.json()) as { data: BackendResponse };
@@ -105,7 +108,7 @@ export async function POST(req: NextRequest) {
     };
 
     if (a.score === undefined) {
-      console.warn("[v1/analyze] backend returned no score — full backend response:", JSON.stringify(a));
+      console.warn("[v1/analyze] backend returned no score");
     }
 
     const resolvedScore =
@@ -124,8 +127,9 @@ export async function POST(req: NextRequest) {
       weakSpots: (a.mechanical_deficiencies ?? []).slice(0, 4).map((d) => `${getJointLabel(d)} @ ${d.checkpoint}`),
       drills: (a.mechanical_deficiencies ?? []).slice(0, 3).map((d) => ({ name: d.corrective_drill_title, why: d.fault_description, how: (d as any).corrective_drill_detail ?? "", feel: "", videoUrl: "" })),
       metrics: { swingSpeed: m.swing_speed_mph ?? 0, ballSpeed: m.ball_speed_mph ?? 0, launchAngle: m.launch_angle_deg ?? 0, smashFactor: m.smash_factor ?? 0, spine_angle_deg: m.spine_angle_deg ?? undefined, hip_rotation_deg: m.hip_rotation_deg ?? undefined, shoulder_rotation_deg: m.shoulder_rotation_deg ?? undefined },
-      swing_highlights: a.swing_highlights ?? [],
-      mechanical_deficiencies: a.mechanical_deficiencies ?? [],
+      // Item-level allow-lists: no backend field reaches the browser unnamed.
+      swing_highlights: sanitizeHighlights(a.swing_highlights),
+      mechanical_deficiencies: sanitizeDeficiencies(a.mechanical_deficiencies),
       detailed_summary_html: detailedHtml,
       tempo_ratio: m.tempo_ratio ?? null,
       swing_speed_mph: m.swing_speed_mph ?? null,
@@ -134,8 +138,8 @@ export async function POST(req: NextRequest) {
 
     if (swingVideoId) await supabase.from("swing_videos").update({ analysis_mode: analysisMode, requested_model: a.model_used ?? null }).eq("id", swingVideoId).eq("user_id", session.user.id);
     return NextResponse.json(result);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: `Analysis failed: ${msg}` }, { status: 500 });
+  } catch {
+    console.error("[v1/analyze] analysis failed");
+    return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });
   }
 }

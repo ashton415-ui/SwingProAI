@@ -1,12 +1,12 @@
 import {
   canUseFrameComparison,
-  canUseLaunchMonitor,
   canUsePuttingAnalysis,
   canUsePracticeIntelligence,
   canUsePuttingRecommendations,
-  canUseUltraDeepAnalysis,
-  getAnalysisModeForTier,
+  canViewLaunchMonitorIntelligence,
+  canViewUltraDeepAnalysis,
   getSwingLimitForTier,
+  resolvePaidAnalysisMode,
   getTierDisplayName,
   getUpsellTier,
   type AnalysisMode,
@@ -268,13 +268,16 @@ export function toMeResponse(
       tier,
       tierDisplayName: getTierDisplayName(tier),
       status,
-      analysisMode: getAnalysisModeForTier(tier),
+      // ENT-1C. Paid analysis capabilities are reported exactly as the server
+      // grants them: tier AND a paying status, from the same helpers the
+      // analysis access authority uses. Putting keeps its tier-only contract.
+      analysisMode: resolvePaidAnalysisMode(tier, status),
       capabilities: {
         puttingAnalysis: canUsePuttingAnalysis(tier),
         puttingRecommendations: canUsePuttingRecommendations(tier),
-        ultraDeepAnalysis: canUseUltraDeepAnalysis(tier),
+        ultraDeepAnalysis: canViewUltraDeepAnalysis(tier, status),
         frameComparison: canUseFrameComparison(tier),
-        launchMonitor: canUseLaunchMonitor(tier),
+        launchMonitor: canViewLaunchMonitorIntelligence(tier, status),
         practiceIntelligence: features.practiceIntelligence === true && canUsePracticeIntelligence(tier, status),
       },
       limits: {
