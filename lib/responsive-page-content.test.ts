@@ -1254,6 +1254,141 @@ describe("Progress Hub — phone telemetry renderer and desktop table", () => {
 });
 
 // ============================================================================
+// Progress Hub — 44px touch targets (B1)
+// ============================================================================
+//
+// B1 (staging S3, phone 390): the header "Analyze Swing" link, the "Filter"
+// button and the empty-state "Upload First Swing" link measured below 44px.
+// The Filter button had no behaviour at all and is removed rather than
+// enlarged. The md+ row chevron link is sized and named in the same slice.
+
+interface InteractiveTag {
+  tag: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Every `<Link` / `<button` opening tag in source order, scanned forward while
+ * tracking `{}` depth and string quotes so a `>` inside an expression or class
+ * string never ends the tag early.
+ */
+function interactiveOpeningTags(source: string): InteractiveTag[] {
+  const tags: InteractiveTag[] = [];
+  const re = /<(Link|button)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    let depth = 0;
+    let quote: string | null = null;
+    let i = m.index + m[0].length;
+    for (; i < source.length; i++) {
+      const c = source[i];
+      if (quote) {
+        if (c === quote) quote = null;
+      } else if (c === '"' || c === "'" || c === "`") {
+        quote = c;
+      } else if (c === "{") {
+        depth++;
+      } else if (c === "}") {
+        depth--;
+      } else if (c === ">" && depth === 0) {
+        break;
+      }
+    }
+    tags.push({ tag: source.slice(m.index, i + 1), start: m.index, end: i + 1 });
+  }
+  return tags;
+}
+
+function classTokens(tag: string): string[] {
+  const match = tag.match(/className="([^"]*)"/);
+  expect(match, `no static className on: ${tag}`).not.toBeNull();
+  return match![1].split(/\s+/).filter(Boolean);
+}
+
+/** The unique interactive tag whose element content (up to its close) contains `label`. */
+function interactiveTagLabelled(source: string, label: string, closing: string): InteractiveTag {
+  const matches = interactiveOpeningTags(source).filter((t) => {
+    const close = source.indexOf(closing, t.end);
+    return close > t.end && source.slice(t.end, close).includes(label);
+  });
+  expect(matches.length, `${PROGRESS_HUB_FILE}: expected exactly one control labelled "${label}"`).toBe(1);
+  return matches[0];
+}
+
+function desktopChevronLink(source: string): InteractiveTag {
+  const tableStart = source.indexOf("<table");
+  const tableEnd = source.indexOf("</table>", tableStart);
+  const links = interactiveOpeningTags(source).filter(
+    (t) => t.start > tableStart && t.start < tableEnd && t.tag.includes("href={`/swings/${swing.id}`}"),
+  );
+  expect(links.length, `${PROGRESS_HUB_FILE}: expected exactly one detail link inside the desktop table`).toBe(1);
+  return links[0];
+}
+
+describe("Progress Hub — 44px touch targets (B1)", () => {
+  it("header Analyze Swing link keeps its destination and is at least 44px tall", () => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    const { tag } = interactiveTagLabelled(source, "Analyze Swing", "</Link>");
+    expect(tag).toContain('href="/analyze"');
+    const tokens = classTokens(tag);
+    for (const required of ["min-h-11", "flex", "items-center", "justify-center", "px-6", "py-3", "bg-golf-green", "hover:bg-[#22C55E]"]) {
+      expect(tokens, `Analyze Swing link missing "${required}"`).toContain(required);
+    }
+  });
+
+  it("empty-state Upload First Swing link keeps its destination and is a 44px-tall flex target", () => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    const { tag } = interactiveTagLabelled(source, "Upload First Swing", "</Link>");
+    expect(tag).toContain('href="/analyze"');
+    const tokens = classTokens(tag);
+    for (const required of ["min-h-11", "inline-flex", "items-center", "justify-center", "px-5", "py-2.5", "bg-golf-green"]) {
+      expect(tokens, `Upload First Swing link missing "${required}"`).toContain(required);
+    }
+    expect(source, "empty-state message must remain").toContain("<p>Telemetry Array Empty</p>");
+  });
+
+  it("the non-functional Filter control and its icon import are removed, and no button remains", () => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    expect(source, "Filter icon must not be imported").not.toMatch(/import\s*\{[^}]*\bFilter\b[^}]*\}\s*from\s*"lucide-react"/);
+    expect(source, "Filter icon must not be rendered").not.toContain("<Filter");
+    expect(source, "no Filter label may remain").not.toMatch(/>\s*Filter\s*</);
+    expect(interactiveOpeningTags(source).filter((t) => t.tag.startsWith("<button")), "no button remains on the page").toEqual([]);
+    expect(source, "telemetry log title must remain").toContain("Recent Telemetry Logs");
+  });
+
+  it("desktop row chevron link is a 44×44 target with an accessible name and the same destination", () => {
+    const { tag } = desktopChevronLink(readSource(PROGRESS_HUB_FILE));
+    expect(tag).toContain('aria-label="View swing details"');
+    const tokens = classTokens(tag);
+    for (const required of ["min-h-11", "min-w-11", "inline-flex", "items-center", "justify-center", "group-hover:text-golf-green"]) {
+      expect(tokens, `chevron link missing "${required}"`).toContain(required);
+    }
+    for (const removed of ["p-1", "inline-block"]) {
+      expect(tokens, `chevron link still carries "${removed}"`).not.toContain(removed);
+    }
+  });
+
+  it("every interactive control carries min-h-11, except the full-width phone record link", () => {
+    const source = readSource(PROGRESS_HUB_FILE);
+    const listStart = source.search(/<ul className="[^"]*md:hidden[^"]*"/);
+    const listEnd = source.indexOf("</ul>", listStart);
+    const tags = interactiveOpeningTags(source);
+    expect(tags.length, `${PROGRESS_HUB_FILE}: expected the four interactive controls`).toBe(4);
+    for (const t of tags) {
+      const tokens = classTokens(t.tag);
+      if (t.start > listStart && t.start < listEnd) {
+        // Allow-list: the phone record link is a full-width block wrapping a
+        // multi-line record, so its height comfortably exceeds 44px without a floor.
+        expect(tokens, "phone record link must stay a full-width padded block").toEqual(expect.arrayContaining(["block", "px-5", "py-4"]));
+        continue;
+      }
+      expect(tokens, `control below the 44px floor: ${t.tag}`).toContain("min-h-11");
+    }
+  });
+});
+
+// ============================================================================
 // Telemetry Equipment Optimizer — narrow-screen header containment (RW3-S1)
 // ============================================================================
 
