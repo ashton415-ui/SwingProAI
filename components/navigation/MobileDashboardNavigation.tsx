@@ -74,12 +74,13 @@ export default function MobileDashboardNavigation({
         className="fixed top-0 inset-x-0 z-40 flex items-center justify-between gap-3 bg-golf-header border-b border-white/5 px-4 h-14"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
-        <Link href="/" className="flex items-center gap-2 min-w-0">
+        <Link href="/" className="flex items-center gap-2 min-h-11 shrink-0">
           <div className="w-8 h-8 bg-golf-green/5 border border-golf-green/20 rounded-lg overflow-hidden shrink-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/swingproai_logo.png" alt="SwingProAI" className="w-full h-full object-contain" />
           </div>
-          <span className="text-white font-black italic tracking-tighter uppercase text-sm leading-none truncate">
+          {/* No overflow clipping: the italic final "I" overhangs its advance box; pr-1 keeps that ink inside the link. */}
+          <span className="text-white font-black italic tracking-tighter uppercase text-sm leading-none whitespace-nowrap pr-1">
             Swing<span className="text-golf-green">Pro</span>AI
           </span>
         </Link>
