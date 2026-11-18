@@ -6,6 +6,8 @@ import { Target, TrendingUp, Crosshair, ArrowRight } from "lucide-react";
 import { submitGoals } from "./actions";
 
 const MISS_OPTIONS = ["None", "Slice", "Hook", "Fat", "Thin"] as const;
+const ANSWERS_SAVED = "Your answers were saved.";
+const ANSWERS_UNCONFIRMED = "We couldn't confirm your answers were saved. Open My Goals to check before trying again.";
 
 const STEPS = [
   {
@@ -37,6 +39,9 @@ export default function GoalsForm() {
   const [handicap, setHandicap] = useState("");
   const [primaryMiss, setPrimaryMiss] = useState("None");
   const [targetGoal, setTargetGoal] = useState("");
+  // AG-S1: once the answers are confirmed saved (or their save could not be confirmed), the form is replaced by
+  // the outcome and a link, so the same answers cannot be submitted twice by accident.
+  const [outcome, setOutcome] = useState<{ lines: string[]; href: string; label: string } | null>(null);
 
   function nextStep() {
     setError(null);
@@ -55,17 +60,62 @@ export default function GoalsForm() {
     fd.set("target_goal", targetGoal);
 
     startTransition(async () => {
-      const result = await submitGoals(fd);
-      if (result.error) {
-        setError(result.error);
+      let result: Awaited<ReturnType<typeof submitGoals>> | undefined;
+      try {
+        result = await submitGoals(fd);
+      } catch {
+        result = undefined;
+      }
+      // the action failed (dropped connection) or came back without a result (Next resolves undefined when the
+      // response is not a Server Action response, e.g. a platform timeout page): the insert may have committed
+      if (!result || typeof result.outcome !== "string") {
+        setOutcome({ lines: [ANSWERS_UNCONFIRMED], href: "/goals", label: "Open My Goals" });
         return;
       }
-      router.push("/goals/plan");
+      if (result.outcome === "saved") {
+        router.push("/goals/plan");
+        return;
+      }
+      if (result.goalSaved) {
+        // the goal row exists; its plan was not confirmed (the message says what was observed)
+        const link = result.outcome === "goal_missing"
+          ? { href: "/goals", label: "Open My Goals" }
+          : { href: "/goals/plan", label: result.outcome === "save_unconfirmed" ? "Reload My Plan" : "Open My Plan" };
+        setOutcome({ lines: [ANSWERS_SAVED, result.message ?? ""].filter(Boolean), ...link });
+        return;
+      }
+      if (result.outcome === "goal_save_unconfirmed") {
+        // the insert may have committed: send the golfer to check rather than offering a resubmit
+        setOutcome({ lines: [result.message ?? ""], href: "/goals", label: "Open My Goals" });
+        return;
+      }
+      setError(result.message);
     });
   }
 
   const inputCls =
     "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white text-base lg:text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-golf-green";
+
+  if (outcome) {
+    return (
+      <div className="max-w-lg mx-auto">
+        <div role="status" className="bg-golf-header border border-white/5 rounded-2xl p-7 text-center">
+          {outcome.lines.map((line) => (
+            <p key={line} className="text-sm text-gray-300 mb-2 break-words">
+              {line}
+            </p>
+          ))}
+          {/* a document link on purpose (fresh render of the page, no cached client view) */}
+          <a
+            href={outcome.href}
+            className="mt-4 inline-flex items-center justify-center min-h-11 min-w-11 px-5 rounded-xl bg-golf-green hover:bg-golf-green/90 text-sm font-black uppercase tracking-widest text-white transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+          >
+            {outcome.label}
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-lg mx-auto">
@@ -181,6 +231,7 @@ export default function GoalsForm() {
               </label>
               <textarea
                 rows={3}
+                maxLength={500}
                 placeholder="e.g. Break 90 by end of season, fix my driver slice, improve iron consistency…"
                 value={targetGoal}
                 onChange={(e) => setTargetGoal(e.target.value)}
@@ -196,7 +247,7 @@ export default function GoalsForm() {
 
         {/* Error */}
         {error && (
-          <p className="mt-4 text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-xl px-4 py-3">
+          <p role="alert" className="mt-4 text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-xl px-4 py-3">
             {error}
           </p>
         )}

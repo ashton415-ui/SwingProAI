@@ -1,7 +1,9 @@
 import { redirect } from "next/navigation";
 import { createClient, getServerSession } from "@/utils/supabase/server";
 import BagPageClient from "./BagPageClient";
+import BagLoadError from "@/components/swing/BagLoadError";
 import type { ClubRecord, TelemetryStat } from "@/components/swing/VirtualBag";
+import { cancellable, readBag } from "@/lib/golfer-journey-bag-read-state";
 
 function computeRatings(row: Record<string, unknown>): TelemetryStat {
   const swingSpeed = row.swing_speed_mph as number | null;
@@ -43,41 +45,57 @@ export default async function BagPage() {
   const session = await getServerSession();
   if (!session) redirect("/login");
 
-  const supabase = await createClient();
+  // GJ-PARALLEL-02. Both reads must succeed before any bag data is shown. A
+  // returned error, a thrown/rejected read or a response without rows is
+  // "unavailable": the page then shows a read-only Try again instead of an
+  // empty bag, a zero count or "No data". The first known failure decides at
+  // once and cancels the other read (the queries themselves are unchanged).
+  const bag = await readBag(async (signal) => {
+    const supabase = await createClient();
+    return {
+      equipment: () =>
+        cancellable(
+          // Exactly the ClubRecord fields, never a wildcard. This is a server/client
+          // boundary: whatever the query returns is serialized into the browser
+          // payload, and a TypeScript cast strips nothing at runtime. Naming the
+          // columns is therefore what keeps user_id, the catalog references,
+          // custom_notes, updated_at and the is_archived flag itself out of the page.
+          //
+          // Archived clubs are excluded at the query boundary too, not filtered out
+          // after loading: a removed club must never reach the browser as bag data.
+          // The row itself survives so historical analysis and telemetry references
+          // stay intact — it simply stops being part of the active bag. is_archived is
+          // filtered on and deliberately not selected.
+          supabase
+            .from("user_equipment")
+            .select(
+              "id, club_type, club_designation, brand, model, shaft_flex, shaft_weight, loft_deg, custom_club, custom_brand, custom_model, is_primary, created_at"
+            )
+            .eq("user_id", session.user.id)
+            .eq("is_archived", false)
+            .order("created_at", { ascending: true }),
+          signal,
+        ),
+      telemetry: () =>
+        cancellable(
+          supabase
+            .from("swing_telemetry")
+            .select("*")
+            .eq("user_id", session.user.id)
+            .not("club_id", "is", null)
+            .order("created_at", { ascending: false }),
+          signal,
+        ),
+    };
+  });
 
-  const [{ data: equipmentRows }, { data: telemetryRows }] = await Promise.all([
-    // Exactly the ClubRecord fields, never a wildcard. This is a server/client
-    // boundary: whatever the query returns is serialized into the browser
-    // payload, and a TypeScript cast strips nothing at runtime. Naming the
-    // columns is therefore what keeps user_id, the catalog references,
-    // custom_notes, updated_at and the is_archived flag itself out of the page.
-    //
-    // Archived clubs are excluded at the query boundary too, not filtered out
-    // after loading: a removed club must never reach the browser as bag data.
-    // The row itself survives so historical analysis and telemetry references
-    // stay intact — it simply stops being part of the active bag. is_archived is
-    // filtered on and deliberately not selected.
-    supabase
-      .from("user_equipment")
-      .select(
-        "id, club_type, club_designation, brand, model, shaft_flex, shaft_weight, loft_deg, custom_club, custom_brand, custom_model, is_primary, created_at"
-      )
-      .eq("user_id", session.user.id)
-      .eq("is_archived", false)
-      .order("created_at", { ascending: true }),
-    supabase
-      .from("swing_telemetry")
-      .select("*")
-      .eq("user_id", session.user.id)
-      .not("club_id", "is", null)
-      .order("created_at", { ascending: false }),
-  ]);
+  if (bag.status === "unavailable") return <BagLoadError />;
 
-  const clubs: ClubRecord[] = (equipmentRows ?? []) as ClubRecord[];
+  const clubs: ClubRecord[] = bag.equipment as ClubRecord[];
 
   // Latest telemetry row per club (rows are newest-first)
   const telemetry: Record<string, TelemetryStat> = {};
-  for (const row of telemetryRows ?? []) {
+  for (const row of bag.telemetry) {
     const id = row.club_id as string;
     if (id && !telemetry[id]) {
       telemetry[id] = computeRatings(row as Record<string, unknown>);

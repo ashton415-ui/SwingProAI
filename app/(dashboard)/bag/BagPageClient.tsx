@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import VirtualBag, { type ClubRecord, type TelemetryStat } from "@/components/swing/VirtualBag";
 import { createClient } from "@/utils/supabase/client";
+import { BAG_COPY } from "@/lib/golfer-journey-bag-read-state";
 
 interface BagPageClientProps {
   initialClubs: ClubRecord[];
@@ -93,10 +94,11 @@ export default function BagPageClient({
     <div className="p-6 lg:p-8">
       <div className="max-w-3xl mx-auto">
         <div className="mb-8">
-          <h1 className="text-2xl font-bold text-white tracking-tight">My Bag</h1>
-          <p className="text-sm text-gray-400 mt-1">
-            Track per-club telemetry and get AI shaft fitting recommendations.
-          </p>
+          {/* GJ-PARALLEL-02: takes focus after a successful Try again on the load-error view */}
+          <h1 id="my-bag-heading" tabIndex={-1} className="text-2xl font-bold text-white tracking-tight focus:outline-none">
+            {BAG_COPY.title}
+          </h1>
+          <p className="text-sm text-gray-400 mt-1">{BAG_COPY.description}</p>
         </div>
 
         {removeError && (

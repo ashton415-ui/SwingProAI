@@ -274,13 +274,15 @@ describe("VirtualBag — touch-accessible row actions", () => {
     expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Pencil icon on the edit button`).toContain("<Pencil className=");
   });
 
-  it("the fitting button retains its title, accessible label, icon, visible text, and sm:inline behavior", () => {
+  // GJ-PARALLEL-02: this control opens swing analysis for the club (/analyze?club_id=…) and performs no fitting,
+  // so it is named for what it does; its label is visible at every width (the phone card layout has room for it).
+  it("the analysis button retains its title, accessible label, icon and visible text, named for what it does", () => {
     const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
-    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing fitting title`).toContain('title="AI shaft fitting"');
-    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing exact fitting aria-label`).toContain("aria-label={`Get AI shaft fitting for ${clubDisplayName(club)}`}");
-    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Zap icon on the fitting button`).toContain("<Zap className=");
-    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing visible "Fit" text`).toContain(">Fit<");
-    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing "hidden sm:inline" on the Fit label`).toContain("hidden sm:inline");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing analysis title`).toContain('title="Analyze a swing with this club"');
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing exact analysis aria-label`).toContain("aria-label={`Analyze a swing with ${clubDisplayName(club)}`}");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing Zap icon on the analysis button`).toContain("<Zap className=");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: missing visible "Analyze" text`).toContain("<span>Analyze</span>");
+    expect(clubRow, `${VIRTUAL_BAG_FILE}: the control must not promise a fitting`).not.toMatch(/shaft fitting|>Fit</i);
   });
 
   it("the removal button retains its title, accessible label, and icon", () => {
@@ -756,16 +758,17 @@ describe("VirtualBag — ClubRow action button minimum touch targets", () => {
     }
   });
 
-  it("the Fit button retains its exact title, aria-label, Zap icon size, and hidden sm:inline label", () => {
+  // GJ-PARALLEL-02: renamed for what it does (opens swing analysis); the label is now visible at every width.
+  it("the Fit (analysis) button retains its exact title, aria-label, Zap icon size, and visible Analyze label", () => {
     const clubRow = isolateClubRowSource(readSource(VIRTUAL_BAG_FILE));
     const tag = extractButtonOpeningTag(clubRow, "onClick={onFitting}", VIRTUAL_BAG_FILE);
-    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button title changed`).toContain('title="AI shaft fitting"');
-    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button aria-label changed`).toContain("aria-label={`Get AI shaft fitting for ${clubDisplayName(club)}`}");
+    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button title changed`).toContain('title="Analyze a swing with this club"');
+    expect(tag, `${VIRTUAL_BAG_FILE}: Fit button aria-label changed`).toContain("aria-label={`Analyze a swing with ${clubDisplayName(club)}`}");
 
     const tagEndIdx = clubRow.indexOf(tag) + tag.length;
     const body = clubRow.slice(tagEndIdx, tagEndIdx + 200);
     expect(body, `${VIRTUAL_BAG_FILE}: Zap icon size changed`).toContain('<Zap className="w-3 h-3" />');
-    expect(body, `${VIRTUAL_BAG_FILE}: Fit label lost "hidden sm:inline"`).toContain('<span className="hidden sm:inline">Fit</span>');
+    expect(body, `${VIRTUAL_BAG_FILE}: the visible Analyze label changed`).toContain("<span>Analyze</span>");
   });
 
   it("the Remove button retains its exact title, aria-label, and Trash2 icon size", () => {

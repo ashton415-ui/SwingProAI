@@ -1,4 +1,12 @@
 import { createClient, getServerSession } from "@/utils/supabase/server";
+import ProgressHubLoadError from "@/components/dashboard/ProgressHubLoadError";
+import {
+  PROGRESS_HUB_COUNT_LABEL,
+  PROGRESS_HUB_COUNT_SCOPE,
+  PROGRESS_HUB_RECENT_LIMIT,
+  readList,
+  type ListReadResponse,
+} from "@/lib/golfer-journey-read-state";
 
 export const dynamic = "force-dynamic";
 import { redirect } from "next/navigation";
@@ -82,14 +90,27 @@ export default async function DashboardPage() {
   if (!session) redirect("/login");
   const user = session.user;
 
-  const { data: swings } = await supabase
+  // GJ-PARALLEL-01. A returned error or a thrown read is "unavailable", never
+  // an empty history: the stats and the log are withheld and only a read-only
+  // Try again is offered. Only a successful read with zero rows is empty.
+  const recent = await readList(async () => await supabase
     .from("swing_analysis")
     // ENT-1C. Explicit identity and core columns only: this page renders no
     // result payload, and the payload columns are server-only (ENT-1D).
     .select("id, user_id, status, score, tempo_ratio, created_at, analysis_family, equipment_snapshot, swing_video:swing_videos(club, status, created_at)")
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })
-    .limit(10) as { data: SwingAnalysis[] | null };
+    .limit(PROGRESS_HUB_RECENT_LIMIT) as ListReadResponse<SwingAnalysis>);
+
+  if (recent.status === "unavailable") {
+    return (
+      <div className="max-w-7xl mx-auto px-6 py-10">
+        <ProgressHubHeader />
+        <ProgressHubLoadError />
+      </div>
+    );
+  }
+  const swings = recent.rows;
 
   const totalSwings = swings?.length ?? 0;
 
@@ -114,24 +135,7 @@ export default async function DashboardPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-10">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-10">
-        <div>
-          <h1 className="text-4xl md:text-5xl font-black italic tracking-tighter text-white uppercase">
-            Progress Hub
-          </h1>
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 mt-1">
-            Swing &amp; On-Course Intelligence
-          </p>
-        </div>
-        <Link
-          href="/analyze"
-          className="px-6 py-3 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_20px_rgba(74,222,128,0.15)] text-[10px] uppercase tracking-widest"
-        >
-          <Target size={14} />
-          Analyze Swing
-        </Link>
-      </div>
+      <ProgressHubHeader />
 
       {/* Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
@@ -140,12 +144,12 @@ export default async function DashboardPage() {
             <Trophy className="w-24 h-24 text-golf-green" />
           </div>
           <p className="text-[9px] font-black text-golf-green uppercase tracking-widest mb-4 flex items-center gap-2">
-            <Trophy size={10} /> Total Analyses
+            <Trophy size={10} /> {PROGRESS_HUB_COUNT_LABEL}
           </p>
           <h4 className="text-5xl font-mono font-black italic tracking-tighter text-white">
             {totalSwings}
           </h4>
-          <p className="text-[9px] text-gray-600 font-bold uppercase mt-2 tracking-widest">Lifetime sessions</p>
+          <p className="text-[10px] text-gray-400 font-bold uppercase mt-2 tracking-widest">{PROGRESS_HUB_COUNT_SCOPE}</p>
         </div>
 
         <div className="bg-golf-surface p-6 rounded-4xl border border-white/5">
@@ -325,5 +329,31 @@ export default async function DashboardPage() {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The page heading and the Analyze link, shared by the normal view and the
+ * read-failure view. The heading takes focus after a successful Try again.
+ */
+function ProgressHubHeader() {
+  return (
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-10">
+        <div>
+          <h1 id="progress-hub-heading" tabIndex={-1} className="text-4xl md:text-5xl font-black italic tracking-tighter text-white uppercase focus:outline-none">
+            Progress Hub
+          </h1>
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 mt-1">
+            Swing &amp; On-Course Intelligence
+          </p>
+        </div>
+        <Link
+          href="/analyze"
+          className="px-6 py-3 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_20px_rgba(74,222,128,0.15)] text-[10px] uppercase tracking-widest"
+        >
+          <Target size={14} />
+          Analyze Swing
+        </Link>
+      </div>
   );
 }
