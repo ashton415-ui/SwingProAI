@@ -6,6 +6,9 @@ import {
   ChevronRight, Zap, Target, RotateCcw, Award,
 } from "lucide-react";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import {
+  createDrillHubLoader, readDrillHub, DRILL_HUB_UNAVAILABLE_COPY, type DrillHubLoader,
+} from "@/lib/golfer-journey-read-state";
 
 // ─── Auth helpers (match analyze/page.tsx pattern) ─────────────────────────────
 function getSessionFromCookie(): { access_token: string; user_id: string } | null {
@@ -29,6 +32,11 @@ function getAuthClient() {
       auth: { persistSession: false, autoRefreshToken: false },
     }
   );
+}
+
+/** Attaches a read's cancellation signal (the client's own `.abortSignal`) without changing the query. */
+function cancellable<Q extends { abortSignal(signal: AbortSignal): Q }>(query: Q, signal: AbortSignal): Q {
+  return query.abortSignal(signal);
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
@@ -76,8 +84,13 @@ function StatusBadge({ status }: { status: string }) {
 export default function DrillsPage() {
   const [drills, setDrills]         = useState<Drill[]>([]);
   const [userDrills, setUserDrills] = useState<UserDrill[]>([]);
-  const [loading, setLoading]       = useState(true);
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  // Catalog + progress read state. "unavailable" shows no drills, statuses or
+  // counts: unknown progress is never presented as pending or zero verified.
+  const [hubPhase, setHubPhase]       = useState<"loading" | "ready" | "unavailable">("loading");
+  const [failedLoads, setFailedLoads] = useState(0);
+  const [retryRefused, setRetryRefused] = useState(false);
+  const hubLoaderRef = useRef<DrillHubLoader | null>(null);
+  const headingRef   = useRef<HTMLHeadingElement>(null);
 
   const [selectedId, setSelectedId]       = useState<string | null>(null);
   const [videoFile, setVideoFile]         = useState<File | null>(null);
@@ -88,31 +101,57 @@ export default function DrillsPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // ── Fetch data on mount ────────────────────────────────────────────────────
+  // ── Fetch data on mount; "Try again" reuses this loader (reads only) ───────
   useEffect(() => {
-    async function load() {
-      const supabase = getAuthClient();
-
-      const [drillsRes, userDrillsRes] = await Promise.all([
-        supabase.from("drills").select("id, name, target_metric, the_why, the_how, the_feel").eq("drill_family", "full_swing").order("name"),
-        supabase.from("user_drills").select("drill_id, status, latest_ai_feedback"),
-      ]);
-
-      if (drillsRes.error) {
-        setFetchError(drillsRes.error.message);
-      } else {
-        setDrills((drillsRes.data ?? []) as Drill[]);
-        if (drillsRes.data && drillsRes.data.length > 0) {
-          setSelectedId(drillsRes.data[0].id);
+    const loader = createDrillHubLoader<Drill, UserDrill>(
+      (signal) => readDrillHub((readSignal) => {
+        // Progress belongs to a signed-in golfer. Without a readable session the
+        // progress read would run anonymously and return no rows — every drill
+        // "pending", 0 verified — so that is treated as unavailable instead.
+        if (!getSessionFromCookie()) throw new Error("no readable session");
+        const supabase = getAuthClient();
+        // readSignal cancels a read once its companion has failed (or on unmount).
+        return {
+          catalog: () => cancellable(supabase.from("drills").select("id, name, target_metric, the_why, the_how, the_feel").eq("drill_family", "full_swing").order("name"), readSignal),
+          progress: () => cancellable(supabase.from("user_drills").select("drill_id, status, latest_ai_feedback"), readSignal),
+        };
+      }, signal),
+      (state) => {
+        if (state.phase === "ready") {
+          setDrills(state.drills);
+          setUserDrills(state.progress);
+          if (state.drills.length > 0) {
+            setSelectedId(state.drills[0].id);
+          }
+        } else if (state.phase === "unavailable") {
+          setFailedLoads((count) => count + 1);
+        } else {
+          setRetryRefused(false);
         }
-      }
-
-      setUserDrills((userDrillsRes.data ?? []) as UserDrill[]);
-      setLoading(false);
-    }
-
-    load();
+        setHubPhase(state.phase);
+      },
+    );
+    hubLoaderRef.current = loader;
+    loader.load();
+    return () => {
+      loader.dispose();
+      hubLoaderRef.current = null;
+    };
   }, []);
+
+  // After a successful retry the Try again button is gone; if focus went with
+  // it, put it on the heading (never pull focus from where the golfer moved it).
+  useEffect(() => {
+    if (hubPhase === "ready" && failedLoads > 0 && (!document.activeElement || document.activeElement === document.body)) {
+      headingRef.current?.focus();
+    }
+  }, [hubPhase, failedLoads]);
+
+  function handleRetryLoad() {
+    const started = hubLoaderRef.current?.load() ?? false;
+    // While "unavailable" a refusal can only mean earlier cancelled reads are still finishing (bounded): say so.
+    setRetryRefused(!started && hubPhase === "unavailable");
+  }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function getUserDrillStatus(drillId: string): UserDrill["status"] {
@@ -205,7 +244,7 @@ export default function DrillsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h1 className="text-4xl font-black italic tracking-tighter text-white uppercase">
+          <h1 ref={headingRef} tabIndex={-1} className="text-4xl font-black italic tracking-tighter text-white uppercase focus:outline-none">
             Drill Verification Hub
           </h1>
           <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-gray-500 mt-1">
@@ -214,7 +253,7 @@ export default function DrillsPage() {
         </div>
 
         {/* Progress summary */}
-        {!loading && drills.length > 0 && (
+        {hubPhase === "ready" && drills.length > 0 && (
           <div className="flex items-center gap-3 shrink-0">
             <div className="flex items-center gap-1.5 px-3 py-1.5 bg-golf-green/10 border border-golf-green/20 rounded-xl">
               <CheckCircle2 size={11} className="text-golf-green" />
@@ -234,24 +273,53 @@ export default function DrillsPage() {
         )}
       </div>
 
-      {/* Loading */}
-      {loading && (
-        <div className="flex items-center justify-center py-24">
-          <Loader2 size={22} className="animate-spin text-golf-green mr-3" />
+      {/* Loading (first load; a retry keeps the error panel below with its button busy) */}
+      {hubPhase === "loading" && failedLoads === 0 && (
+        <div role="status" aria-live="polite" className="flex items-center justify-center py-24">
+          <Loader2 size={22} className="animate-spin text-golf-green mr-3" aria-hidden="true" />
           <p className="text-sm text-gray-500 font-bold uppercase tracking-widest">Loading drills…</p>
         </div>
       )}
 
-      {/* Fetch error */}
-      {fetchError && (
-        <div className="flex items-center gap-3 bg-red-500/10 border border-red-500/20 rounded-2xl px-5 py-4">
-          <AlertTriangle size={16} className="text-red-400 shrink-0" />
-          <p className="text-sm text-red-400">{fetchError}</p>
+      {/* Load failure: no drills, statuses or counts — only what happened and Try again (reads only) */}
+      {(hubPhase === "unavailable" || (hubPhase === "loading" && failedLoads > 0)) && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4 bg-red-500/10 border border-red-500/20 rounded-2xl px-5 py-4">
+          {/* keyed on the failure count so each new failure is announced again */}
+          <div key={failedLoads} role="alert" className="flex items-start gap-3 flex-1 min-w-0">
+            <AlertTriangle size={16} className="text-red-400 shrink-0 mt-0.5" aria-hidden="true" />
+            <div className="min-w-0">
+              <h2 className="text-sm font-black text-red-300">{DRILL_HUB_UNAVAILABLE_COPY.title}</h2>
+              <p className="text-xs text-gray-300 mt-1 leading-relaxed">
+                {failedLoads > 1 ? DRILL_HUB_UNAVAILABLE_COPY.stillUnavailable : DRILL_HUB_UNAVAILABLE_COPY.body}
+              </p>
+              {retryRefused && hubPhase === "unavailable" && (
+                <p role="status" className="text-xs text-gray-400 mt-1 leading-relaxed">{DRILL_HUB_UNAVAILABLE_COPY.stillFinishing}</p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleRetryLoad}
+            aria-disabled={hubPhase === "loading"}
+            className="shrink-0 inline-flex items-center justify-center gap-2 min-h-11 min-w-11 px-5 rounded-2xl border border-white/15 bg-white/5 text-white font-black text-[10px] uppercase tracking-widest transition-colors hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green aria-disabled:cursor-wait aria-disabled:opacity-60"
+          >
+            {hubPhase === "loading" ? (
+              <>
+                <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                {DRILL_HUB_UNAVAILABLE_COPY.retrying}
+              </>
+            ) : (
+              <>
+                <RotateCcw size={14} aria-hidden="true" />
+                {DRILL_HUB_UNAVAILABLE_COPY.retry}
+              </>
+            )}
+          </button>
         </div>
       )}
 
-      {/* Empty state */}
-      {!loading && !fetchError && drills.length === 0 && (
+      {/* Empty state (both reads succeeded and the catalog is genuinely empty) */}
+      {hubPhase === "ready" && drills.length === 0 && (
         <div className="flex flex-col items-center justify-center py-24 text-center">
           <Award size={32} className="text-gray-700 mb-4" />
           <p className="text-white font-black uppercase tracking-widest text-sm mb-1">No Drills Available Yet</p>
@@ -260,7 +328,7 @@ export default function DrillsPage() {
       )}
 
       {/* Main layout — drill list + detail */}
-      {!loading && drills.length > 0 && (
+      {hubPhase === "ready" && drills.length > 0 && (
         <div className="flex flex-col lg:flex-row gap-4">
 
           {/* ── LEFT: Drill list ── */}
