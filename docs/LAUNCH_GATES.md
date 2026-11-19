@@ -82,11 +82,21 @@ document authorizes that work by itself.
 
 ## Authorization Boundary
 
-Recording a requirement in this document is not an authorization to perform
-it. Every implementation slice, commit, push, pull request, merge, Supabase
-schema or data action, domain/DNS change, app-store release, iGolf
-activation, and production rollout remains its own separately authorized
-action, requested and approved independently of this document.
+Recording a requirement does not authorize execution. Every implementation
+slice and consequential operation still needs an explicit owner grant.
+
+After reviewing a concrete candidate, the owner may approve a single bounded
+publication package that separately enumerates staging, one local commit,
+one push and one draft-PR creation, with each action's scope, prerequisites,
+attempt limits and verification. Local implementation or workflow adoption
+alone authorizes none of those Git/publication actions.
+
+Merge, ready-for-review transition, auto-merge, branch deletion, deployment,
+database/schema/data changes, native release, vendor/licensing activation,
+physical-product actions, billing, DNS, paid/provider calls and firewall/OS changes retain separate
+explicit owner authorization. All launch requirements and current holds
+remain unchanged. See `docs/DEV_PROTOCOL_V2_CANDIDATE.md` for the scoped
+delivery contract; its existing filename is retained for stable references.
 
 ## Sequencing
 

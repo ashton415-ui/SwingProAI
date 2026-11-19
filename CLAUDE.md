@@ -24,7 +24,9 @@
 * Web Build: `npm run build`
 * Native/Mobile Build: No canonical native build/sync command is currently locked. Do not assume `npx cap sync`; follow separately verified architecture and build documentation when native implementation is explicitly authorized.
 
-## Development Protocol v2 (Candidate Reference)
-* `docs/DEV_PROTOCOL_V2_CANDIDATE.md`, `docs/AGENT_PLAYBOOK.md`, the read-only review agents in `.claude/agents/` and the workflow skills in `.claude/skills/` provide development workflow guidance only. The protocol is a CANDIDATE and is not yet adopted governance.
-* It is not blanket authorization. The Product Constitution, Launch Gates and the directives above remain authoritative and prevail on any conflict; all twelve hard launch requirements remain binding.
-* Implementation stays within owner-approved work-order boundaries. Commit, push, pull request, merge, vendor, database, firewall and production actions each remain separately authorized.
+## Development Protocol v2 — Scoped Delivery
+* `docs/DEV_PROTOCOL_V2_CANDIDATE.md` defines the scoped delivery policy for owner-approved work orders explicitly referencing this adopted revision; its filename is retained for stable links. `docs/AGENT_PLAYBOOK.md` defines execution roles and `docs/DELIVERY_STATUS.md` summarizes observed delivery state.
+* The Product Constitution, all twelve Launch Gates, subsystem contracts and actual owner grants remain binding. Workflow adoption itself grants no implementation, Git/publication, hosted or paid operation. Default-branch governance changes only through separately authorized publication and merge.
+* Complete approved local implementation, in-scope corrections, relevant verification and reviews without unnecessary approval pauses. Sensitive scope must be named explicitly.
+* After reviewing exact candidate bytes and parameters, the owner may approve one bounded publication package separately enumerating stage, one commit, one push and one draft PR, with action-specific checks and attempt limits. Generic local implementation authority grants none of those operations.
+* Merge, ready-for-review, auto-merge, branch deletion, hosted/database changes, deployment, vendor/licensing, physical-product actions, billing, DNS, paid/provider calls, native publication and firewall/OS changes retain separate explicit owner approval. No existing hold or consumed grant is changed.
