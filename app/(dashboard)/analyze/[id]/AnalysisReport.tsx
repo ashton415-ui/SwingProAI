@@ -15,9 +15,31 @@ import {
   UNSCORED_LABEL,
   presentScore,
 } from "@/lib/swing-metric-presentation";
+import { createClient } from "@/utils/supabase/client";
+import { watchLineageEnd, type OwnerRefusal } from "@/utils/supabase/session-publication";
+import { confirmOwnerSession, drillHubIdentityEndFromEvent, ownerBearer } from "@/lib/drill-hub-session";
+import { useRenderedSession } from "@/components/navigation/SessionKeeper";
 
 const NETWORK_FAILURE_COPY = "We couldn't reach SwingProAI. Check your connection, then tap Retry.";
 const SERVICE_FAILURE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
+
+// A4 (C1). This report's analysis call is sent only as the account the dashboard layout rendered the page for: with that
+// account's token, confirmed immediately before the request (lib/drill-hub-session.ts confirmOwnerSession; never a
+// session the browser adopted first, never anonymous) as a Bearer, and with no cookie (`credentials: "omit"`): the route
+// verifies the Bearer itself (utils/supabase/server.ts resolveRouteAuth). When that account cannot be confirmed now,
+// nothing is sent and the golfer gets fixed copy. An answer that arrives after the report was left, or after this
+// browser's sign-in changed, changes nothing here (it belongs to the earlier sign-in).
+const OWNER_REFUSAL_COPY: Readonly<Record<OwnerRefusal, string>> = {
+  signed_out: "Your session has expired. Please sign in again.",
+  ended: "This sign-in was ended, so this analysis wasn't started. Sign in again to continue.",
+  unconfirmed: "We couldn't confirm which account is signed in on this device, so this analysis wasn't started. Try again, or sign in again.",
+  unavailable: "We couldn't check your sign-in just now, so this analysis wasn't started. Try again in a moment.",
+  account_changed: "This browser is now signed in to a different account, so this analysis wasn't started. Refresh the page to continue with the account that's signed in now.",
+};
+const IDENTITY_CHANGED_COPY =
+  "This browser's sign-in changed while your swing was being analyzed, so the result isn't shown here. Refresh the page to continue with the account that's signed in now.";
+/** The request's session read is given this long before it is reported as unavailable (as on the Analyze page). */
+const SESSION_READ_DEADLINE_MS = 12_000;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -159,11 +181,20 @@ function PillarCard({ title, pillar, openDefault }: { title: string; pillar: Pil
 
 function ProcessingState({
   analysisId,
+  ownerId,
+  lineage,
+  renderedOwner,
   onComplete,
   onStalled,
   onFailed,
 }: {
   analysisId: string;
+  /** A4: the account this report was rendered for (taken once), or null outside the dashboard layout: nothing is sent */
+  ownerId: string | null;
+  /** A4: the session lineage the report was rendered for; its End Session ends this report's view */
+  lineage: string | null;
+  /** A4: the account the enclosing layout is rendered for now (a re-render for another account ends this view) */
+  renderedOwner: string | null;
   onComplete: (data: AnalysisData) => void;
   onStalled?: () => void;
   // Set while the failure panel is shown, cleared on Retry, so the status pill
@@ -172,6 +203,14 @@ function ProcessingState({
 }) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // A4 (C1). Shown instead of an answer that arrived after this browser's sign-in changed.
+  const [identityNotice, setIdentityNotice] = useState(false);
+  // A4 (C1). False once the report has been left: an answer arriving afterwards changes nothing.
+  const mountedRef = useRef(true);
+  // A4 (C1). Set once this browser's sign-in is no longer the one the report was rendered for (a sign-out, another
+  // account's session, or End Session of the rendered sign-in, here or in another tab), with why: nothing more is sent
+  // and no later answer is shown.
+  const identityEndedRef = useRef<null | "signed_out" | "account_changed">(null);
   // ENT-1C. A 409 "already in progress" is not a failure: another request holds
   // this analysis, and the server will not start a second model call for it.
   const [inProgressNotice, setInProgressNotice] = useState<string | null>(null);
@@ -195,6 +234,37 @@ function ProcessingState({
   ];
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // A4 (C1). Watches for this browser's sign-in to stop being the one the report was rendered for: the managed client's
+  // identity events (which also bring other tabs' sign-ins and sign-outs) and End Session of the rendered lineage.
+  useEffect(() => {
+    const end = (why: "signed_out" | "account_changed") => {
+      identityEndedRef.current ??= why;
+    };
+    if (renderedOwner !== ownerId) end("account_changed"); // the layout was rendered again for another account
+    let unsubscribe = () => {};
+    try {
+      const { data } = createClient().auth.onAuthStateChange((event, session) => {
+        const why = drillHubIdentityEndFromEvent(ownerId, event, session);
+        if (why !== null) end(why);
+      });
+      unsubscribe = () => data.subscription.unsubscribe();
+    } catch {
+      // no events: the confirmation before each request still decides
+    }
+    const stopLineageWatch = watchLineageEnd(lineage, () => end("signed_out"));
+    return () => {
+      unsubscribe();
+      stopLineageWatch();
+    };
+  }, [ownerId, lineage, renderedOwner]);
+
+  useEffect(() => {
     if (triggeredFor.current === attempt) return;
     triggeredFor.current = attempt;
 
@@ -212,11 +282,41 @@ function ProcessingState({
       // sessionStorage unavailable — proceed without metrics
     }
 
-    fetch("/api/analyze-swing", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ analysisId, ...(mediapipeMetrics ? { mediapipeMetrics } : {}) }),
-    })
+    // A4 (C1). An answer is acted on only while the report is still shown and still belongs to this browser's sign-in.
+    const obsolete = (): boolean => {
+      if (!mountedRef.current) return true;
+      if (identityEndedRef.current === null) return false;
+      clearInterval(interval);
+      setIdentityNotice(true);
+      return true;
+    };
+
+    void (async () => {
+      // A4 (C1). The token of the account the report was rendered for, confirmed now — or nothing is sent.
+      let confirmed: Awaited<ReturnType<typeof confirmOwnerSession>>;
+      try {
+        const managed = createClient();
+        confirmed = await confirmOwnerSession(() => managed, ownerId, SESSION_READ_DEADLINE_MS);
+      } catch {
+        confirmed = { status: "unavailable" };
+      }
+      if (!mountedRef.current) return;
+      // the browser's sign-in already ended or changed before anything was sent: nothing is sent, and the refusal says so
+      const ended = identityEndedRef.current;
+      if (ended !== null && confirmed.status === "ready") confirmed = { status: ended };
+      if (confirmed.status !== "ready") {
+        clearInterval(interval);
+        setError(OWNER_REFUSAL_COPY[confirmed.status]);
+        onFailed?.(true);
+        return;
+      }
+      await fetch("/api/analyze-swing", {
+        method: "POST",
+        // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
+        credentials: "omit",
+        headers: { "Content-Type": "application/json", ...ownerBearer(confirmed.session) },
+        body: JSON.stringify({ analysisId, ...(mediapipeMetrics ? { mediapipeMetrics } : {}) }),
+      })
       // A response that is not JSON (a gateway error page) is the service's
       // failure, not the golfer's connection.
       .then(async (r) => ({
@@ -224,6 +324,8 @@ function ProcessingState({
         res: await r.json().catch(() => ({ error: SERVICE_FAILURE_COPY })),
       }))
       .then(({ httpStatus, res }) => {
+        // A4 (C1): checked after the whole answer has been read
+        if (obsolete()) return;
         clearInterval(interval);
         if (httpStatus === 409 && res.status === "processing") {
           setInProgressNotice(res.error ?? "This analysis is already in progress.");
@@ -240,16 +342,36 @@ function ProcessingState({
           onComplete(res.data as AnalysisData);
         }
       })
-      .catch((e) => {
+      .catch(() => {
+        if (obsolete()) return;
         clearInterval(interval);
         // A network failure surfaces as the browser's own text ("Failed to
         // fetch"), which tells a golfer nothing; the copy says what to do.
         setError(NETWORK_FAILURE_COPY);
         onFailed?.(true);
       });
+    })();
 
     return () => clearInterval(interval);
-  }, [analysisId, onComplete, onStalled, onFailed, attempt]);
+  }, [analysisId, ownerId, onComplete, onStalled, onFailed, attempt]);
+
+  if (identityNotice) {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-amber-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Your sign-in changed</p>
+        <p className="text-sm text-gray-400 mb-6" role="status">{IDENTITY_CHANGED_COPY}</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="flex items-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+        >
+          <RotateCcw className="w-3.5 h-3.5" /> Refresh page
+        </button>
+      </div>
+    );
+  }
 
   if (stalledNotice) {
     return (
@@ -606,6 +728,12 @@ function VideoPlayer({ signedUrl, filename }: { signedUrl: string | null; filena
 
 export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl, clubDisplayName, failedReason = null }: Props) {
   const [analysis, setAnalysis] = useState<AnalysisData>(initialAnalysis);
+  // A4 (C1). The account (and session lineage) this report was rendered for, as the dashboard layout verified it —
+  // taken once, when the report first renders, and never replaced by a session the browser holds
+  // (components/navigation/SessionKeeper.tsx RenderedSessionProvider). No account: nothing is sent.
+  const rendered = useRenderedSession();
+  const ownerRef = useRef<string | null>(rendered?.ownerId ?? null);
+  const lineageRef = useRef<string | null>(rendered?.lineage ?? null);
   // When true, force the ProcessingState even if the DB row is already "complete"
   const [forceReanalyze, setForceReanalyze] = useState(false);
 
@@ -660,6 +788,9 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
           <ProcessingState
             key={forceReanalyze ? "reanalyze" : "initial"}
             analysisId={analysis.id}
+            ownerId={ownerRef.current}
+            lineage={lineageRef.current}
+            renderedOwner={rendered?.ownerId ?? null}
             onComplete={(data) => { setForceReanalyze(false); setFailedNow(false); setAnalysis(data); }}
             onStalled={() => setIsStalled(true)}
             onFailed={setFailedNow}

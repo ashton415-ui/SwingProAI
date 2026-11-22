@@ -576,10 +576,54 @@ describe("analyze-swing failure responses", () => {
 
 describe("analyze-swing functional anchors", () => {
   it("keeps the server auth and ownership flow", () => {
-    expect(apiSource).toContain("await createClient()");
-    expect(apiSource).toContain("supabase.auth.getUser()");
+    // AG-WEB-READY-03-R1-A4 (C1) replaced the cookie-only `createClient()` +
+    // `supabase.auth.getUser()` pair with the shared verified route ingress. One
+    // `resolveRouteAuth()` call verifies the caller (a presented Bearer never
+    // falls back to a cookie), and that verified caller supplies both the
+    // caller-scoped client and the user id. No second cookie client is built.
+    expect(apiSource).toContain(
+      'import { resolveRouteAuth, type AuthenticatedCaller } from "@/utils/supabase/server";',
+    );
+    // The POST handler's code alone (comments removed), so prose cannot satisfy or mask an anchor.
+    const postStart = apiSource.indexOf("export async function POST(req: NextRequest) {");
+    expect(postStart).toBeGreaterThan(0);
+    const post = stripComments(apiSource.slice(postStart, apiSource.indexOf("\n}\n", postStart) + 2));
+    expect(post).toContain("const auth = await resolveRouteAuth();");
+    expect(post).toContain("const supabase = auth.client;");
+    expect(post).toContain("const user = { id: auth.userId } as const;");
+    // No second, cookie-scoped client anywhere in the route, and no cookie-only identity lookup.
+    expect(stripComments(apiSource)).not.toMatch(/\bcreateClient\(|createServerClient\(|from "next\/headers"/);
+    expect(stripComments(apiSource)).not.toMatch(/\.auth\.getUser\(|\.auth\.getSession\(/);
+    // An Auth outage is answered honestly; any other unverified caller is refused.
+    expect(post).toContain('if (auth.status === "verification_unavailable") {');
+    expect(post).toContain('if (auth.status !== "authenticated") {');
+    // Authentication, the outage answer, the refusal and the caller-scoped client all come before the request body
+    // is read.
+    const authAt = post.indexOf("const auth = await resolveRouteAuth();");
+    const outageAt = post.indexOf('if (auth.status === "verification_unavailable") {');
+    const refusedAt = post.indexOf('if (auth.status !== "authenticated") {');
+    const clientAt = post.indexOf("const supabase = auth.client;");
+    const bodyAt = post.indexOf("await req.json()");
+    // no other read of the request body (or of the stream itself) comes earlier either
+    const firstBodyRead = post.search(/\breq\.(json|text|formData|arrayBuffer|blob)\(|\breq\.body\b/);
+    expect(firstBodyRead).toBe(post.indexOf("req.json()"));
+    expect(firstBodyRead).toBeGreaterThan(bodyAt);
+    expect(authAt).toBeGreaterThan(0);
+    expect(outageAt).toBeGreaterThan(authAt);
+    expect(refusedAt).toBeGreaterThan(outageAt);
+    expect(clientAt).toBeGreaterThan(refusedAt);
+    expect(bodyAt).toBeGreaterThan(clientAt);
+    // Ownership stays bound to the verified user: the owned-row read runs on the caller's own client, filtered by the
+    // verified user id.
     expect(apiSource).toContain("analysisId: string;");
-    expect(apiSource).toContain('.eq("user_id", user.id)');
+    const rowRead = post.indexOf("const { data: analysisRow, error: fetchErr } = await supabase");
+    expect(rowRead).toBeGreaterThan(bodyAt);
+    const rowReadEnd = post.indexOf(".single();", rowRead);
+    expect(post.slice(rowRead, rowReadEnd)).toContain('.eq("user_id", user.id)');
+    // The verified identity never reaches a log line.
+    for (const banned of ["auth.userId", "auth.client", "authenticatedUserId", "accessToken", "access_token"]) {
+      expect(callsContaining(consoleCalls, banned), `console output must not include ${banned}`).toEqual([]);
+    }
   });
 
   it("keeps the Gemini request configuration", () => {

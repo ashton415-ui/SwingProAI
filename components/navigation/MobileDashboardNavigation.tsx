@@ -11,6 +11,7 @@ import {
   PLAN_AND_BILLING,
   SIGN_OUT,
 } from "./dashboard-navigation";
+import EndSessionForm from "./EndSessionForm";
 
 interface MobileDashboardNavigationProps {
   role: string;
@@ -18,6 +19,10 @@ interface MobileDashboardNavigationProps {
   roleLabel: string;
   roleBadgeClassName: string;
   showUpgradeCallout: boolean;
+  /** the verified user id this page was rendered for (End Session's account check) */
+  userId: string;
+  /** the session lineage this page was rendered for (End Session's lineage check; never a token) */
+  endSessionLineage: string | null;
 }
 
 /**
@@ -35,6 +40,8 @@ export default function MobileDashboardNavigation({
   roleLabel,
   roleBadgeClassName,
   showUpgradeCallout,
+  userId,
+  endSessionLineage,
 }: MobileDashboardNavigationProps) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const pathname = usePathname();
@@ -258,15 +265,14 @@ export default function MobileDashboardNavigation({
             </div>
 
             <div className="p-4 border-t border-white/5">
-              <form action={SIGN_OUT.href} method="POST">
-                <button
-                  type="submit"
-                  className="flex items-center gap-3 px-3 py-3 w-full min-h-[44px] rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest"
-                >
-                  <LogOut size={14} />
-                  {SIGN_OUT.label}
-                </button>
-              </form>
+              <EndSessionForm
+                expectedUserId={userId}
+                expectedSession={endSessionLineage}
+                className="flex items-center gap-3 px-3 py-3 w-full min-h-[44px] rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest"
+              >
+                <LogOut size={14} />
+                {SIGN_OUT.label}
+              </EndSessionForm>
               <div className="flex items-center gap-2 px-3 mt-4">
                 <Zap size={9} className="text-golf-green" fill="currentColor" />
                 <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-gray-700">AI-Integrated Analysis</p>

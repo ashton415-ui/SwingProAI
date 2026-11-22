@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as readState from "@/lib/golfer-journey-read-state";
 import type { DrillHubReads, DrillHubState, ListReadResponse } from "@/lib/golfer-journey-read-state";
+import { sessionBoundDrillHubReads } from "@/lib/drill-hub-session";
 
 /**
  * GJ-PARALLEL-01-R1 (GJ-READ-01) — a known Drill Hub read failure must not wait
@@ -313,11 +314,27 @@ describe("meanings kept", () => {
       await flush();
       expect(states).toEqual([LOADING, expected]);
     }
-    // the page's makeReads throws before building any read when no session is readable
-    const { states, publish } = recorder();
-    const loader = loaderFor(() => { throw new Error("no readable session"); }, publish);
-    loader.load();
-    await flush();
-    expect(states).toEqual([LOADING, UNAVAILABLE]);
+    // a makeReads that throws (client construction) is unavailable without any read
+    {
+      const { states, publish } = recorder();
+      const loader = loaderFor(() => { throw new Error("no readable session"); }, publish);
+      loader.load();
+      await flush();
+      expect(states).toEqual([LOADING, UNAVAILABLE]);
+    }
+    // AG-WEB-READY-01: the page's reads wait for the shared client's session; signed out or unavailable builds no read
+    for (const status of ["signed_out", "unavailable"] as const) {
+      const { states, publish } = recorder();
+      let built = 0;
+      const loader = loaderFor((signal) => sessionBoundDrillHubReads<Drill, UserDrill>(
+        () => Promise.resolve({ status }),
+        () => { built++; return { catalog: ok(DRILLS), progress: ok(PROGRESS) }; },
+        signal as AbortSignal,
+      ), publish);
+      loader.load();
+      await flush();
+      expect(states).toEqual([LOADING, UNAVAILABLE]);
+      expect(built).toBe(0);
+    }
   });
 });

@@ -732,7 +732,12 @@ const DTO_MODULE = "lib/api/v1-equipment-dto.ts";
 
 describe("equipment slice source contract", () => {
   const FROZEN: Array<[string, string]> = [
-    ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
+    // AG-WEB-READY-03-R1 + A1 (reviewed, retargeted): only the cookie path changed — the raw Cookie header with the
+    // shared strict layout reader, and the binding cookie. The Bearer ingress is pinned separately below to the bytes of
+    // the previously frozen verifier (43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74).
+    // AG-WEB-READY-03-R1-A4 review (reviewed, retargeted): the outage classification reads Auth's own 5xx and a 429 as an
+    // outage (verification_unavailable), never as a refused credential; nothing else in the file changed.
+    ["utils/supabase/server.ts", "e75f81bf7faefbabfd949283d3ad559c990ddf6ac30b7292400e6210a39897c7"],
     // Analysis request authority closure: five analysis-request error codes added.
     // ENT-1C: ANALYSIS_NOT_FOUND added for GET /api/v1/analyses/{id}.
     ["lib/api/v1-response.ts", "dc54ca354d79f306c9a77bef717c7726234631050f637260453176035d9b6028"],
@@ -741,7 +746,9 @@ describe("equipment slice source contract", () => {
     ["lib/api/me-dto.ts", "b643a03f289feea8bb7639b840bd52b60c6a4d81020c243e846d37bb70faa48e"],
     ["app/api/v1/me/route.ts", "73d1a8a0195eae4978bd32ac73665c5c2992682f24281bca91c765c5b7cb5415"],
     // ENT-1C: /me paid-capability expectations follow subscription status.
-    ["lib/api-v1-foundation.test.ts", "8ba4332e5be229ae792a9dcea0462380a5993c300311babfac8213288bd0f547"],
+    // A1 (AG-WEB-READY-03-R1-A1): the foundation suite's server.ts receipt retargeted and its Bearer-ingress pin added.
+    // A4 review: the foundation suite's server.ts receipt and Bearer-region pin retargeted to the corrected outage classification.
+    ["lib/api-v1-foundation.test.ts", "8379a48d0b48365378421d5adf4c8747905ea4d912ad9588b5fa4abf97c33987"],
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
     ["lib/equipment/catalog.ts", "88303c5b51838bd16562246a3ee27379b4e39feacddf0e9ab8c102cb63195a7e"],
     ["lib/equipment/club-display-name.ts", "6533d152a8bc8919e832f97669f35cab3a6f0249ffd5e538dc90be35bd9443d1"],
@@ -749,6 +756,33 @@ describe("equipment slice source contract", () => {
 
   it.each(FROZEN)("51-58. %s remains byte-identical", (relativePath, expected) => {
     expect(sha256Of(relativePath)).toBe(expected);
+  });
+
+  // A1 (AG-WEB-READY-03-R1-A1): the whole-file receipt of utils/supabase/server.ts above was retargeted after review.
+  // The native Bearer ingress this suite depends on — the supabase-js import, the project URL and anon key helpers, client
+  // construction, outage classification, token verification, Authorization parsing and route ingress (widened after
+  // review) — must still be exactly the previously frozen verifier's bytes.
+  // A4 review (security finding 1): the outage classification now also reads Auth's own 5xx and a 429 as an outage
+  // (verification_unavailable), never as a refused credential; every other byte of the ingress region is unchanged.
+  it("the Bearer ingress of utils/supabase/server.ts is byte-identical to the previously frozen verifier (A1)", () => {
+    const text = readFileSync(path.join(repoRoot, "utils/supabase/server.ts"), "utf8").replace(/\r\n/g, "\n");
+    const importLine = 'import { createClient as createSupabaseClient } from "@supabase/supabase-js";';
+    expect(text.startsWith(`${importLine}\n`)).toBe(true);
+    const region = [importLine, ...[
+      "function supabaseUrl(",
+      "function supabaseAnonKey(",
+      "function clientForToken(",
+      "function isVerificationInfrastructureFailure(",
+      "async function verifyAccessToken(",
+      "function parseAuthorizationHeader(",
+      "export async function resolveRouteAuth(",
+    ].map((signature) => {
+      const start = text.indexOf(signature);
+      const end = text.indexOf("\n}\n", start);
+      expect([start >= 0, end > start, text.indexOf(signature, start + 1)]).toEqual([true, true, -1]);
+      return text.slice(start, end + 3);
+    })].join("\n");
+    expect(createHash("sha256").update(region).digest("hex")).toBe("2aefc9b2952b1dcc829087be5b6b07696a1b3f4ee19a62711d84d157fadcc3dd");
   });
 
   it("59. neither route imports or reuses the legacy golf-bag surface", () => {

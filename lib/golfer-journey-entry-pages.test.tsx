@@ -33,6 +33,15 @@ import { fileURLToPath } from "node:url";
  * AG-AUTH-02 changed the sign-in contract deliberately (no token handoff after
  * a session), so its sign-in contract guard now fails on the earlier pages for
  * that reason; the other contract checks are unchanged.
+ * AG-WEB-READY-03-R1 changed who signs in: the page calls signInAndPublish
+ * (utils/supabase/session-publication.ts), which signs in with a
+ * non-persisting client and publishes the session into the browser under the
+ * session-publication lease; its outcome is "signed_in", "refused",
+ * "interrupted" or (A1) "unsupported". The spy below stands in for that call and still receives
+ * exactly { email, password }; an SDK-shaped spy result maps the way the
+ * helper maps the SDK's answer (an error or no session: refused), and a
+ * thrown spy is a thrown call. The publication itself runs through the
+ * installed SDK in lib/session-publication.test.ts.
  * AG-AUTH-03 changed the sign-up contract deliberately: the action returns one
  * of three fixed outcomes ({ outcome: "continue" | "failed" | "unconfirmed" })
  * instead of provider text and a dashboard redirect, and the page renders one
@@ -50,6 +59,12 @@ const hooks = vi.hoisted(() => ({
   signup: null as null | ((...args: unknown[]) => unknown),
   loginActionCalls: [] as string[], // AG-AUTH-02: names of login action exports called (none may be)
   cookieWrites: [] as string[], // AG-AUTH-02: names written to the server request cookie store (none may be)
+  endCalls: [] as string[], // AG-WEB-READY-03-R1: accounts End Session was asked to end in the browser
+  endLineages: [] as unknown[], // A2: the session lineage the End Session form named
+  endOutcome: null as null | (() => Promise<unknown>),
+  // A2: the sign-in page's End Session completion (null: no intent in this browser, a plain visit)
+  completion: null as null | (() => Promise<string>),
+  completionCalls: 0,
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -74,8 +89,23 @@ vi.mock("next/link", async () => {
   const { createElement } = await import("react");
   return { default: (p: Record<string, unknown>) => createElement("a", { ...p, href: p.href }) };
 });
-vi.mock("@/utils/supabase/client", () => ({
-  createClient: () => ({ auth: { signInWithPassword: (...a: unknown[]) => hooks.signIn!(...a) } }),
+vi.mock("@/utils/supabase/session-publication", () => ({
+  endSessionInBrowser: (expectedUserId: string, _signal?: unknown, expectedLineage?: unknown) => {
+    hooks.endCalls.push(expectedUserId);
+    hooks.endLineages.push(expectedLineage);
+    return hooks.endOutcome!();
+  },
+  endIntentPending: () => hooks.completion !== null,
+  completeEndedSession: () => {
+    hooks.completionCalls += 1;
+    return hooks.completion === null ? Promise.resolve("none") : hooks.completion();
+  },
+  signInAndPublish: async (email: string, password: string) => {
+    const answer = (await hooks.signIn!({ email, password })) as unknown;
+    if (answer === "signed_in" || answer === "refused" || answer === "interrupted" || answer === "unsupported") return answer;
+    const r = answer as { data?: { session?: unknown } | null; error?: unknown } | null;
+    return r && !r.error && r.data?.session ? "signed_in" : "refused";
+  },
 }));
 vi.mock("@/app/(auth)/login/actions", async (importOriginal) => {
   const real = await importOriginal<Record<string, unknown>>();
@@ -102,6 +132,9 @@ const SIGN_UP_FAILED =
   "We couldn't create your account. Check your details or try again in a moment. If you already have an account, sign in instead.";
 // AG-AUTH-01: fixed copy for an attempt that did not complete (sign-in) or whose result is unknown (sign-up)
 const SIGN_IN_INTERRUPTED = "We couldn't finish signing you in. Please try again in a moment.";
+// A1 (R5): this browser cannot keep a sign-in safely (no Web Locks, IndexedDB or SubtleCrypto); nothing was sent
+const SIGN_IN_UNSUPPORTED =
+  "This browser can't keep your sign-in safe, so you weren't signed in and nothing was sent. Private browsing or blocked site data can cause this; try a regular window or another browser.";
 // AG-AUTH-03: the uncertainty copy no longer mentions the dashboard (sign-up no longer redirects), and the one completion
 const SIGN_UP_UNCONFIRMED =
   "We couldn't confirm whether your account was created. Check your email or try signing in before creating it again.";
@@ -192,7 +225,10 @@ const one = (nodes: unknown[], pred: (e: El) => boolean) => {
 const byType = (t: string) => (e: El) => e.type === t;
 const alerts = (nodes: unknown[]) => all(nodes, (e) => e.props.role === "alert");
 const submitButton = (nodes: unknown[]) => one(nodes, (e) => e.type === "button" && e.props.type === "submit");
-const statusText = (nodes: unknown[]) => all(nodes, (e) => e.props.role === "status").map(textOf).join("|");
+// A2: the sign-in page also has the End Session completion's own status region (id login-end-status); the progress
+// region of a form is every other status region
+const statusText = (nodes: unknown[]) => all(nodes, (e) => e.props.role === "status" && e.props.id !== "login-end-status").map(textOf).join("|");
+const endStatus = (nodes: unknown[]) => one(nodes, (e) => e.props.role === "status" && e.props.id === "login-end-status");
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -308,6 +344,92 @@ describe.each([
 });
 
 // ── 2. sign-in: idle, pending, returned failures, another attempt, and the unchanged call contract ─────────
+describe("sign-in page — A2 End Session completion", () => {
+  beforeEach(() => {
+    hooks.completion = null;
+    hooks.completionCalls = 0;
+  });
+
+  it("a plain visit (no End Session intent) runs no completion and shows nothing extra", () => {
+    render(LoginPage);
+    runEffects();
+    const { nodes } = render(LoginPage);
+    expect(hooks.completionCalls).toBe(0);
+    expect(textOf(endStatus(nodes))).toBe("");
+    expect(String(endStatus(nodes).props.className)).toBe("sr-only");
+    expect(all(nodes, (e) => e.type === "button" && textOf(e).includes("Finish signing out"))).toHaveLength(0);
+  });
+
+  it("an intent: the progress is announced, then the outcome in fixed text; completed and kept_other end it", async () => {
+    for (const [outcome, copy] of [
+      ["completed", "You're signed out. Your session was ended and removed from this device."],
+      ["kept_other", "Your session was ended. A newer sign-in in this browser was left as it is."],
+      ["unsupported", "Your session was ended, but this browser can't remove its copy safely. Clear this site's data in your browser settings to remove it from this device."],
+    ] as const) {
+      hooks.state = [];
+      const d = deferred<string>();
+      hooks.completion = () => d.promise;
+      render(LoginPage);
+      runEffects();
+      const working = render(LoginPage);
+      expect(textOf(endStatus(working.nodes))).toBe("Your session was ended. Finishing signing you out on this device…");
+      expect(endStatus(working.nodes).props["aria-live"]).toBe("polite");
+      d.resolve(outcome);
+      await new Promise<void>((r) => setImmediate(r));
+      const done = render(LoginPage);
+      expect(textOf(endStatus(done.nodes))).toBe(copy);
+      expect(String(endStatus(done.nodes).props.className)).not.toContain("sr-only");
+      expect(all(done.nodes, (e) => e.type === "button" && textOf(e).includes("Finish signing out"))).toHaveLength(0);
+      expect(submitButton(done.nodes).props.disabled).toBe(false); // signing in is never blocked by it
+    }
+  });
+
+  it("pending (or a thrown completion) offers one explicit retry, 44px, that runs it once more; a second press in the same moment runs nothing", async () => {
+    hooks.state = [];
+    hooks.completion = async () => { throw new Error("synthetic"); };
+    render(LoginPage);
+    runEffects();
+    await new Promise<void>((r) => setImmediate(r));
+    const pending = render(LoginPage);
+    expect(textOf(endStatus(pending.nodes))).toBe("Your session was ended, but we couldn't finish removing it from this device yet.");
+    const retry = one(pending.nodes, (e) => e.type === "button" && textOf(e).includes("Finish signing out"));
+    expect(String(retry.props.className)).toMatch(/\bmin-h-11\b/);
+    const d = deferred<string>();
+    hooks.completion = () => d.promise;
+    (retry.props.onClick as () => void)();
+    (retry.props.onClick as () => void)();
+    expect(hooks.completionCalls).toBe(2); // the hydration run and ONE retry
+    d.resolve("completed");
+    await new Promise<void>((r) => setImmediate(r));
+    expect(textOf(endStatus(render(LoginPage).nodes))).toBe("You're signed out. Your session was ended and removed from this device.");
+  });
+});
+
+describe("sign-in page — A2 review: a retry whose instruction is gone", () => {
+  beforeEach(() => {
+    hooks.completion = null;
+    hooks.completionCalls = 0;
+  });
+
+  it("says the page can no longer finish it (sign in again or clear site data), instead of a dead button", async () => {
+    hooks.state = [];
+    hooks.completion = async () => "pending";
+    render(LoginPage);
+    runEffects();
+    await new Promise<void>((r) => setImmediate(r));
+    const pending = render(LoginPage);
+    const retry = one(pending.nodes, (e) => e.type === "button" && textOf(e).includes("Finish signing out"));
+    hooks.completion = null; // finished in another tab, or this site's data was cleared
+    (retry.props.onClick as () => void)();
+    const after = render(LoginPage);
+    expect(textOf(endStatus(after.nodes))).toBe(
+      "This page can't finish signing out on this device any more. If your account still shows here, sign in again or clear this site's data in your browser settings.",
+    );
+    expect(all(after.nodes, (e) => e.type === "button" && textOf(e).includes("Finish signing out"))).toHaveLength(0);
+    expect(hooks.completionCalls).toBe(1); // nothing more was run
+  });
+});
+
 describe("sign-in page", () => {
   it("idle: no alert, an empty status region and an idle submit button", () => {
     // AG-AUTH-01 R1: the server-rendered form cannot be submitted until the page's handler is ready
@@ -429,6 +551,16 @@ describe("sign-in page", () => {
     expect(win.location.href).toBe("/dashboard");
     // no success state is invented on the page
     expect(alerts(render(LoginPage).nodes)).toHaveLength(0);
+  });
+
+  // AG-WEB-READY-03-R1: the session came back but could not be published in this browser (the lease was busy, its
+  // validation timed out, or another account's publication won): the fixed interrupted text, no navigation
+  it("a sign-in whose session could not be published in this browser shows the fixed interrupted message and does not navigate", async () => {
+    signIn.mockResolvedValue("interrupted");
+    await (one(render(LoginPage).nodes, byType("form")).props.onSubmit as (e: unknown) => Promise<void>)(fakeLoginEvent(DUMMY));
+    const after = render(LoginPage);
+    expect(alerts(after.nodes).map(textOf)).toEqual([SIGN_IN_INTERRUPTED]);
+    expect(win.location.href).toBe("about:blank");
   });
 
   // AG-AUTH-02: replaces "an error returned by the session action shows the fixed message" (the handoff is retired);
@@ -568,6 +700,131 @@ describe("sign-up page", () => {
 });
 
 // ── 4. contract guards: the submit handlers' behaviour, the copy, the wiring, and the unchanged server files ──
+describe("End Session control (components/navigation/EndSessionForm.tsx; QA F-H / F-J)", () => {
+  type FormStub = {
+    isConnected: boolean; hidden: boolean; attrs: Record<string, string>; submitted: number; posted: string[];
+    elements: { namedItem(n: string): { value: string } | null };
+    submit(): void; setAttribute(n: string, v: string): void; cloneNode(): FormStub;
+  };
+  const copies: FormStub[] = [];
+  const appended: unknown[] = [];
+  function formStub(connected: boolean): FormStub {
+    // A2: the form's end_state field (what the post tells the server about the local outcome; display only)
+    const endState = { value: "" };
+    const stub: FormStub = {
+      isConnected: connected,
+      hidden: false,
+      attrs: {},
+      submitted: 0,
+      posted: [],
+      elements: { namedItem: (n: string) => (n === "end_state" ? endState : null) },
+      submit() { stub.submitted += 1; stub.posted.push(endState.value); },
+      setAttribute(n, v) { stub.attrs[n] = v; },
+      cloneNode() { const c = formStub(false); copies.push(c); return c; },
+    };
+    return stub;
+  }
+  const press = (nodes: unknown[], form: FormStub) =>
+    (one(nodes, byType("form")).props.onSubmit as (e: unknown) => Promise<void>)({ preventDefault() {}, currentTarget: form });
+  async function freshForm() {
+    vi.resetModules(); // the attempt is per page (module state): each case is a fresh page
+    const { default: EndSessionForm } = await import("@/components/navigation/EndSessionForm");
+    return function EndSessionFormUnderTest() {
+      return <EndSessionForm expectedUserId="user-a" expectedSession={LINEAGE} className="c">End Session</EndSessionForm>;
+    };
+  }
+  const LINEAGE = "a".repeat(64); // A2: the rendered session lineage (a digest; synthetic)
+  beforeEach(() => {
+    copies.length = 0;
+    appended.length = 0;
+    hooks.endCalls = [];
+    hooks.endLineages = [];
+    (globalThis as Record<string, unknown>).document = { body: { appendChild: (n: unknown) => { appended.push(n); return n; } } };
+  });
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).document;
+  });
+
+  it("one press per page: the browser part runs once and the form posts only when it has finished; a second press — on this instance or on one mounted later (a re-opened drawer) — starts nothing, and the later instance shows the same progress", async () => {
+    const Form = await freshForm();
+    const ended = deferred<string>();
+    hooks.endOutcome = () => ended.promise;
+    const first = render(Form);
+    expect(all(first.nodes, (e) => e.props.role === "status")).toHaveLength(1); // the live region exists before any press
+    expect(statusText(first.nodes)).toBe("");
+    const form = formStub(true);
+    const pressing = press(first.nodes, form);
+    await press(first.nodes, form); // a double press returns at once
+    hooks.state = []; // a re-opened drawer mounts a fresh instance
+    render(Form);
+    runEffects();
+    (globalThis as Record<string, unknown>).document = { body: { appendChild: (n: unknown) => { appended.push(n); return n; } } };
+    const later = render(Form);
+    expect(statusText(later.nodes)).toBe("Ending your session…");
+    expect(submitButton(later.nodes).props["aria-disabled"]).toBe(true); // focusable, not disabled
+    expect(submitButton(later.nodes).props.disabled).toBeUndefined();
+    const laterForm = formStub(true);
+    await press(later.nodes, laterForm);
+    expect(hooks.endCalls).toEqual(["user-a"]);
+    expect(hooks.endLineages).toEqual([LINEAGE]); // A2: only the lineage the page was rendered for
+    expect([form.submitted, laterForm.submitted]).toEqual([0, 0]); // nothing posts before the browser part ends
+    ended.resolve("ended");
+    await pressing;
+    expect([form.submitted, laterForm.submitted]).toEqual([1, 0]);
+    expect(form.posted).toEqual(["ended"]);
+  });
+
+  it("A2: the post says which local outcome was reached (display only): ended, ended_unconfirmed, or nothing when the browser could not end it", async () => {
+    for (const [outcome, posted] of [["ended", "ended"], ["ended_unconfirmed", "ended_unconfirmed"], ["unavailable", ""]] as const) {
+      const Form = await freshForm();
+      hooks.state = [];
+      hooks.endOutcome = async () => outcome;
+      const form = formStub(true);
+      await press(render(Form).nodes, form);
+      expect(form.posted).toEqual([posted]);
+    }
+    const Form = await freshForm();
+    hooks.state = [];
+    hooks.endOutcome = async () => "ended_unconfirmed";
+    const removed = formStub(false); // the drawer closed meanwhile: the hidden copy carries the outcome
+    await press(render(Form).nodes, removed);
+    expect(copies.at(-1)?.posted).toEqual(["ended_unconfirmed"]);
+  });
+
+  it("A2: the form names the rendered lineage as a hidden field (a digest, never a token) and an empty end_state for a native post", async () => {
+    const Form = await freshForm();
+    const { html } = render(Form);
+    expect(html).toContain(`<input type="hidden" name="expected_session" value="${LINEAGE}"/>`);
+    expect(html).toContain('<input type="hidden" name="end_state" value=""/>');
+  });
+
+  it("a form removed meanwhile (the phone drawer closed) posts a hidden, marked copy of itself", async () => {
+    const Form = await freshForm();
+    hooks.endOutcome = async () => "unavailable";
+    const form = formStub(false);
+    await press(render(Form).nodes, form);
+    expect(form.submitted).toBe(0);
+    expect(copies).toHaveLength(1);
+    expect([copies[0].hidden, "data-end-session-copy" in copies[0].attrs, copies[0].submitted, appended.length]).toEqual([true, true, 1, 1]);
+  });
+
+  it("'other_account' reloads and posts nothing; a browser part that throws counts as 'unavailable' and the form posts (the server judges the request's cookies)", async () => {
+    let Form = await freshForm();
+    const reload = vi.fn();
+    (win as { location: Record<string, unknown> }).location.reload = reload;
+    hooks.endOutcome = async () => "other_account";
+    const form = formStub(true);
+    await press(render(Form).nodes, form);
+    expect([reload.mock.calls.length, form.submitted]).toEqual([1, 0]);
+    Form = await freshForm();
+    hooks.state = [];
+    hooks.endOutcome = async () => { throw new Error("start-up failed"); };
+    const second = formStub(true);
+    await press(render(Form).nodes, second);
+    expect(second.submitted).toBe(1);
+  });
+});
+
 describe("byte-level contract guards", () => {
   // AG-AUTH-01 replaced the two accepted handler snapshots (which pinned the handlers' text) with behaviour: the
   // handlers now guard a second submit and recover from thrown or unusable results, and these tests pin what they do.
@@ -615,7 +872,9 @@ describe("byte-level contract guards", () => {
     const signupSrc = source("app/(auth)/signup/page.tsx");
     expect(Array.from(login.matchAll(/setError\(([^;]*)\);/g)).map((m) => m[1])).toEqual(["null", "message"]);
     // AG-AUTH-02: the three handoff outcomes (lost, error, unusable answer) went with the handoff
-    expect(Array.from(login.matchAll(/\bstop\(([^)]*)\);/g)).map((m) => m[1])).toEqual(["SIGN_IN_FAILED", "SIGN_IN_INTERRUPTED"]);
+    // AG-WEB-READY-03-R1: a session that could not be published in this browser is the interrupted text too
+    // A1 (R5): a browser that cannot keep a sign-in safely has its own fixed text (nothing was sent)
+    expect(Array.from(login.matchAll(/\bstop\(([^)]*)\);/g)).map((m) => m[1])).toEqual(["SIGN_IN_FAILED", "SIGN_IN_UNSUPPORTED", "SIGN_IN_INTERRUPTED", "SIGN_IN_INTERRUPTED"]);
     // AG-AUTH-03: the fixed outcome decides; the one completion is the only other settled state
     expect(Array.from(signupSrc.matchAll(/setError\(([^;]*)\);/g)).map((m) => m[1])).toEqual(
       ["null", 'outcome === "failed" ? SIGN_UP_FAILED : SIGN_UP_UNCONFIRMED']);
@@ -623,6 +882,7 @@ describe("byte-level contract guards", () => {
     const constant = (rel: string, name: string) => (new RegExp(`const ${name} =\\s*"([^"]*)";`).exec(source(rel)) || [])[1];
     expect(constant("app/(auth)/login/page.tsx", "SIGN_IN_FAILED")).toBe(SIGN_IN_FAILED);
     expect(constant("app/(auth)/login/page.tsx", "SIGN_IN_INTERRUPTED")).toBe(SIGN_IN_INTERRUPTED);
+    expect(constant("app/(auth)/login/page.tsx", "SIGN_IN_UNSUPPORTED")).toBe(SIGN_IN_UNSUPPORTED);
     expect(constant("app/(auth)/signup/page.tsx", "SIGN_UP_FAILED")).toBe(SIGN_UP_FAILED);
     expect(constant("app/(auth)/signup/page.tsx", "SIGN_UP_UNCONFIRMED")).toBe(SIGN_UP_UNCONFIRMED);
     expect(constant("app/(auth)/signup/page.tsx", "CONTINUE_HEADING")).toBe(CONTINUE_HEADING);
@@ -636,7 +896,9 @@ describe("byte-level contract guards", () => {
     expect(typeof signupForm.props.action).toBe("function");
     expect(signupForm.props.onSubmit).toBeUndefined();
   });
-  it("the auth actions, callback, Supabase utilities, middleware and dashboard layout are byte-identical to the accepted files", () => {
+  it("the auth actions, callback, Supabase utilities (with the AG-WEB-READY-03-R1 session modules), middleware and dashboard layout are byte-identical to the accepted files", () => {
+    // A4: re-pinned after review of each change (notes on the entries below); the auth actions, callback, resume router,
+    // middleware and dashboard layout are unchanged
     // hashed with line endings normalised to LF, so a CRLF checkout compares the same bytes
     const sha = (rel: string) => createHash("sha256").update(source(rel)).digest("hex");
     expect(Object.fromEntries(Object.keys(ACCEPTED_SHA).map((rel) => [rel, sha(rel)]))).toEqual(ACCEPTED_SHA);
@@ -647,10 +909,15 @@ const ACCEPTED_SHA: Record<string, string> = {
   "app/(auth)/login/actions.ts": "63d7b7bdf2158fa946c4672e394efe156409d5c65c613b3b98f2dd415f6e2958", // AG-AUTH-02: the retired module (no export, no cookie write)
   "app/(auth)/signup/actions.ts": "677d36755b7252402bc0278f7f2f0b42ac911ea2f06b4312f062f1e2b3f618b6", // AG-AUTH-03: fixed outcomes only; no provider text, no redirect, no session use
   "app/(auth)/auth/callback/route.ts": "521e9a1d068247e55234b2b5613fdb9a6f361050579f79810f6286da1f3395d4",
-  "utils/supabase/client.ts": "f937ab3b250769d442c81b1e3845c30a26ff93adb7872bbe4b0d21145bfc4ff4", // AG-SESSION-03: the 0.3.0 get/set/remove adapter; 30-day, Secure-on-HTTPS session-cookie writes
-  "utils/supabase/server.ts": "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74",
-  "middleware.ts": "2eeae0934c1d87a6bc985ddc90b56178752f9943c0eb4425b87fab12556f1026", // AG-SESSION-02: the protected matcher and one call to the refresh boundary
-  "app/(dashboard)/layout.tsx": "9a23da7e57dab5eff961ccdbb43a55200840b5430f0ca5f16f6bfddde07bfeb0",
+  "utils/supabase/client.ts": "9b231f0f70039f362e672fd2e8f80400b5daee7bebbf363c354f25e9a29b5a52", // AG-WEB-READY-03-R1: layout-managed storage, refresh transport under the lease, event fence; A1: decided against the newest observed lineage after its own digest (R4), refused initial reads deliver INITIAL_SESSION with no session; review: in-section answers and announcements only for the tenure's own session; A2: End Session's confirmed revocation is tracked per end section; SIGNED_OUT announced after a completion; A2 review: a data request that would leave with only the anonymous key is not sent; A3: inside End Session a refreshed session reaches the SDK only when it continues the lineage being ended (F3); A4 (C4): a local answer repeating the stored session states the access token's own expiry
+  "utils/supabase/server.ts": "e75f81bf7faefbabfd949283d3ad559c990ddf6ac30b7292400e6210a39897c7", // AG-WEB-READY-03-R1: reads the raw Cookie header with the shared strict layout reader; A1: the binding cookie must vouch for the session (R2); A4 review: Auth's own 5xx or a 429 at verification is an outage, never a refused credential
+  "utils/supabase/session-cookie-layout.ts": "9b1862271b1f577c71766e080fac9285e5e213dbc2966f2b06356531ea303f21", // AG-WEB-READY-03-R1: the one session cookie layout (F6); A1: the server-visible binding cookie (R2); A2: the session-lineage digest and the END INTENT cookie; A2 review: the END INTENT lives as long as the session cookies; A4 (C4): sessions are stored with expires_at null (key kept); readers reconstruct the expiry from the access token's exp
+  "utils/supabase/session-lease.ts": "47baefe37a4704c9c9d1c9b3129814701e98fbba9eb5b9ddf4d1b612f76aa624", // AG-WEB-READY-03-R1: the session-publication lease and lineage record (F2, F5); A1: fail closed (R5), section-bound lineage work (R3), observed lineage (R4); review: a failed commit ends trust for the tenure, tenure view fence; A3: the dispatch section (held from the jar check until a cookie-authenticated request is sent; changes nothing); A4: the A3 dispatch section is retired with its only caller (back to the A2 bytes)
+  "utils/supabase/session-storage.ts": "67f634426c16b42fe469fd0ed27a7008af19a584ce115780cf53ad007ee677f2", // AG-WEB-READY-03-R1: compare-and-set session storage; A1: verified reads (R1), binding writes (R2), unrecorded changes not acknowledged (R5); review: an unrecorded save loses its binding, a 'none'-bound session is refused in the browser too; A2 review: the anonymous-request counter; A3: an SDK change never runs inside a dispatch section (it waits for its own); A4: a storage change runs inside any held section again (dispatch retired); C4: writes expires_at null, hands the SDK the token's exp
+  "utils/supabase/session-publication.ts": "0476e8ac37085d5f985836af728d63f37f2ddfcbdbeb62164912229aa72b17c9", // AG-WEB-READY-03-R1: sign-in publication and End Session in the browser (F1, F4); A1: unsupported before credentials are sent (R5); review: the lineage store answers before the password is sent, an unverifiable tenure publishes nothing; A2: lineage-bound End Session (ended / ended_unconfirmed), the ended-lineage notice, the operation-bound completion; A2 review: insecure context and unknown lineage go to the server; an unrevocable removal is unconfirmed; sessionEndPending; A3: owner refusals, the rendered-lineage watch and the cookie-session sender (F1); A4 (C1): the cookie-session sender, its preflight and marked refusals are retired (Bearer ingress on the analysis route)
+  "utils/supabase/session-resume.ts": "dbb417eb2de4e3b7d91632f526a23b9a10aa221e100255debb7f55b4c2213cbe", // AG-WEB-READY-03-R1: expiring navigations go by /auth/resume; no server refresh; A1: unbound sessions go by /auth/resume?unsettled=1 (R2)
+  "middleware.ts": "aae1923dce3fad0bb8faac67fa9dc181f1aeade2cf97f932d4bf37dcd6dabc62", // AG-WEB-READY-03-R1: the protected matcher and one call to the resume router
+  "app/(dashboard)/layout.tsx": "454bcd2e498d814739a4874f9f1f43bb070444807b72850614a2d88e15332caa", // AG-WEB-READY-03-R1: SessionKeeper and the End Session form with the page's account; A2: the End Session forms name the rendered session lineage; A3: RenderedSessionProvider carries the verified owner and lineage to the pages (F1)
 };
 
 // ── 5. landing page: truthful copy, the same destinations, usable links ──────────────────────────────────

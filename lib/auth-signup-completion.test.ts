@@ -83,7 +83,13 @@ vi.mock("next/headers", () => ({
     set: (name: string) => { hooks.cookieWrites.push(`set:${name}`); },
     delete: (name: string) => { hooks.cookieWrites.push(`delete:${name}`); },
   }),
-  headers: () => new Headers(),
+  // A1 (AG-WEB-READY-03-R1-A1): the server client factory reads the request's raw Cookie header through headers() (the
+  // shared strict layout reader; cookies() is never consulted for the session), so the same planted jar is served here as
+  // the Cookie header a browser would send (values as stored, URL-encoded); cookies() stays the write recorder
+  headers: () => {
+    const jar = Object.entries(hooks.cookieValues);
+    return new Headers(jar.length === 0 ? {} : { cookie: jar.map(([name, value]) => `${name}=${value}`).join("; ") });
+  },
 }));
 // the real server client factory, unchanged; each client it builds is shown to the test (layers A and C), or a fake
 // client is returned instead (layer B)

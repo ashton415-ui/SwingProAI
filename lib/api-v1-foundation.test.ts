@@ -722,7 +722,12 @@ describe("frozen read-only dependencies", () => {
    */
   const FROZEN: Array<[string, string]> = [
     ["app/api/v1/swing-data/route.ts", "fc6b3a5c6d2834d8c3ac58666e6f00159b29ab4eb0454d8d87e521bcf5daa135"],
-    ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
+    // AG-WEB-READY-03-R1 + A1 (reviewed, retargeted): only the cookie path changed — the raw Cookie header with the
+    // shared strict layout reader, and the binding cookie. The Bearer ingress is pinned separately below to the bytes of
+    // the previously frozen verifier (43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74).
+    // AG-WEB-READY-03-R1-A4 review (reviewed, retargeted): the outage classification reads Auth's own 5xx and a 429 as an
+    // outage (verification_unavailable), never as a refused credential; nothing else in the file changed.
+    ["utils/supabase/server.ts", "e75f81bf7faefbabfd949283d3ad559c990ddf6ac30b7292400e6210a39897c7"],
     // PI-1A: canUsePracticeIntelligence added.
     // ENT-1C: analysis-result capability helpers added.
     ["lib/entitlements.ts", "65a12b41924b7f7590b22f44639aeb2a8246f7fcdda154c99185f9b281f45865"],
@@ -731,5 +736,32 @@ describe("frozen read-only dependencies", () => {
 
   it.each(FROZEN)("49-52. %s is byte-identical", (relativePath, expected) => {
     expect(sha256Of(relativePath)).toBe(expected);
+  });
+
+  // A1 (AG-WEB-READY-03-R1-A1): the whole-file receipt of utils/supabase/server.ts above was retargeted after review.
+  // The native Bearer ingress this suite depends on — the supabase-js import, the project URL and anon key helpers, client
+  // construction, outage classification, token verification, Authorization parsing and route ingress (widened after
+  // review) — must still be exactly the previously frozen verifier's bytes.
+  // A4 review (security finding 1): the outage classification now also reads Auth's own 5xx and a 429 as an outage
+  // (verification_unavailable), never as a refused credential; every other byte of the ingress region is unchanged.
+  it("the Bearer ingress of utils/supabase/server.ts is byte-identical to the previously frozen verifier (A1)", () => {
+    const text = readFileSync(path.join(repoRoot, "utils/supabase/server.ts"), "utf8").replace(/\r\n/g, "\n");
+    const importLine = 'import { createClient as createSupabaseClient } from "@supabase/supabase-js";';
+    expect(text.startsWith(`${importLine}\n`)).toBe(true);
+    const region = [importLine, ...[
+      "function supabaseUrl(",
+      "function supabaseAnonKey(",
+      "function clientForToken(",
+      "function isVerificationInfrastructureFailure(",
+      "async function verifyAccessToken(",
+      "function parseAuthorizationHeader(",
+      "export async function resolveRouteAuth(",
+    ].map((signature) => {
+      const start = text.indexOf(signature);
+      const end = text.indexOf("\n}\n", start);
+      expect([start >= 0, end > start, text.indexOf(signature, start + 1)]).toEqual([true, true, -1]);
+      return text.slice(start, end + 3);
+    })].join("\n");
+    expect(createHash("sha256").update(region).digest("hex")).toBe("2aefc9b2952b1dcc829087be5b6b07696a1b3f4ee19a62711d84d157fadcc3dd");
   });
 });

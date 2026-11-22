@@ -1,11 +1,13 @@
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { cookies, headers } from "next/headers";
+import { headers } from "next/headers";
+import { bindingAdmits, parseCookieHeader, readSessionLayout } from "@/utils/supabase/session-cookie-layout";
 
 // ============================================================================
 // Verified server authentication
 // ============================================================================
 //
-// The browser session cookie is written by @supabase/ssr and is, from this
+// The browser session cookie is written by the browser client
+// (utils/supabase/session-storage.ts) and is, from this
 // side of the wire, entirely caller-controlled: anyone can set a cookie in
 // their own browser. So the parsed contents of that cookie are treated as a
 // transport envelope and nothing more. Exactly one field is read out of it —
@@ -87,35 +89,49 @@ function clientForToken(accessToken: string | null) {
  */
 type CallerScopedClient = ReturnType<typeof clientForToken>;
 
+type StoredSessionRead =
+  | { readonly kind: "absent" }
+  | { readonly kind: "ambiguous" }
+  /** a complete session the binding cookie does not vouch for (written outside the browser's own writer) */
+  | { readonly kind: "unbound" }
+  /** the binding could not be checked here (no SubtleCrypto): not a judgement on the credential */
+  | { readonly kind: "unverifiable" }
+  | { readonly kind: "present"; readonly value: string };
+
 /**
- * Reassembles the stored session cookie, mirroring @supabase/ssr's own
- * `combineChunks` semantics exactly:
- *
- *   1. the bare key wins outright when it holds a value;
- *   2. otherwise `<key>.0`, `<key>.1`, … are read in ascending order;
- *   3. the scan stops at the first absent or empty chunk;
- *   4. whatever was collected is joined with no separator.
+ * Reads the stored session cookie from the request's own Cookie header with
+ * the one layout rule every reader and the browser's writer share
+ * (utils/supabase/session-cookie-layout.ts): the bare key alone, or
+ * `<key>.0` … `<key>.<n-1>` with no gap, no extra index and no bare key.
  *
  * A legitimate chunked session — which is simply what the library writes once
- * the encoded value passes 3180 characters — must authenticate normally, so
- * chunking is never itself a rejection. A truncated join produces bytes that
- * fail to parse or fail verification, and fails closed there instead.
+ * the encoded value passes 3180 characters — authenticates normally, so
+ * chunking is never itself a rejection. A jar that holds more than one layout
+ * (an older bare cookie beside a newer chunked session, a stale higher chunk),
+ * a duplicated name or an undecodable value is ambiguous: it identifies no one,
+ * because the bytes cannot be attributed to one sign-in.
+ *
+ * The binding cookie (session-cookie-layout.ts) is the server-visible half of
+ * the browser's ordering: the browser's own writer sets it with every session
+ * write or removal, and a tab still running a previous bundle cannot. When this
+ * browser has one and it does not name the carried session's access token, the
+ * session was written outside that writer (for example, a previous bundle's late
+ * refresh after another golfer signed in here): it identifies no one, here or in
+ * createClient(), whatever Auth would say about the token. No binding at all is
+ * the pre-migration state and is read as before. The binding is never authority
+ * by itself; a bound session is still verified with Auth.
  */
-async function readStoredSessionValue(): Promise<string | null> {
-  const cookieStore = await cookies();
-  const key = authStorageKey();
-
-  const bare = cookieStore.get(key)?.value;
-  if (bare) return bare;
-
-  const chunks: string[] = [];
-  for (let index = 0; ; index++) {
-    const chunk = cookieStore.get(`${key}.${index}`)?.value;
-    if (!chunk) break;
-    chunks.push(chunk);
-  }
-
-  return chunks.length > 0 ? chunks.join("") : null;
+async function readStoredSession(): Promise<StoredSessionRead> {
+  const headerList = await headers();
+  const pairs = parseCookieHeader(headerList.get("cookie") ?? "");
+  const layout = readSessionLayout(pairs, authStorageKey());
+  if (layout.kind !== "present") return { kind: layout.kind };
+  const accessToken = extractAccessToken(layout.value);
+  if (accessToken === null) return { kind: "present", value: layout.value }; // refused as invalid by the caller
+  const binding = await bindingAdmits(pairs, accessToken);
+  if (binding === "mismatch") return { kind: "unbound" };
+  if (binding === "unverifiable") return { kind: "unverifiable" };
+  return { kind: "present", value: layout.value };
 }
 
 /**
@@ -126,17 +142,13 @@ async function readStoredSessionValue(): Promise<string | null> {
  * dangerous: there is no code path by which either could become identity.
  */
 function extractAccessToken(rawCookieValue: string): string | null {
-  const decoded = (() => {
-    try {
-      return decodeURIComponent(rawCookieValue);
-    } catch {
-      return rawCookieValue;
-    }
-  })();
-
+  // The layout reader hands over the value already URL-decoded once, exactly as the browser's client reads it
+  // (session-cookie-layout.ts readEnvelope). It is parsed as it is: decoding it a second time would turn text such as
+  // "%22" inside the stored user's metadata into a quote — locking the golfer out of their own session — or let the
+  // server read a different access token than the browser does.
   let parsed: unknown;
   try {
-    parsed = JSON.parse(decoded);
+    parsed = JSON.parse(rawCookieValue);
   } catch {
     return null;
   }
@@ -178,12 +190,18 @@ export type VerifiedAuth =
  * status; a transport failure arrives as a retryable fetch error with no
  * status. Anything unrecognisable is treated as an outage, because guessing
  * "invalid" would sign out a valid golfer on a network blip.
+ *
+ * A4 review: Auth's own failure (5xx) or a rate limit (429) carries a status but
+ * judges nothing about the credential — auth-js reports only 502-504 and
+ * 520-530 as retryable, so a 500 or 429 arrives as an ordinary API error. Those
+ * are outages too; only a 4xx other than 429 is a refusal of the credential.
  */
 function isVerificationInfrastructureFailure(error: unknown): boolean {
   if (!error || typeof error !== "object") return true;
   const candidate = error as { name?: unknown; status?: unknown };
   if (candidate.name === "AuthRetryableFetchError") return true;
-  return typeof candidate.status !== "number";
+  if (typeof candidate.status !== "number") return true;
+  return candidate.status >= 500 || candidate.status === 429;
 }
 
 async function verifyAccessToken(
@@ -221,10 +239,12 @@ async function verifyAccessToken(
 
 /** Verified identity from the browser session cookie. */
 export async function resolveVerifiedAuth(): Promise<VerifiedAuth> {
-  const raw = await readStoredSessionValue();
-  if (!raw) return { status: "absent" };
+  const stored = await readStoredSession();
+  if (stored.kind === "absent") return { status: "absent" };
+  if (stored.kind === "ambiguous" || stored.kind === "unbound") return { status: "invalid" };
+  if (stored.kind === "unverifiable") return { status: "verification_unavailable" };
 
-  const accessToken = extractAccessToken(raw);
+  const accessToken = extractAccessToken(stored.value);
   if (!accessToken) return { status: "invalid" };
 
   return verifyAccessToken(accessToken, "cookie");
@@ -344,7 +364,7 @@ export async function getServerSession(): Promise<VerifiedServerSession | null> 
  * no session yet, to keep working with an ordinary anonymous client.
  */
 export async function createClient() {
-  const raw = await readStoredSessionValue();
-  const accessToken = raw ? extractAccessToken(raw) : null;
+  const stored = await readStoredSession();
+  const accessToken = stored.kind === "present" ? extractAccessToken(stored.value) : null;
   return clientForToken(accessToken);
 }

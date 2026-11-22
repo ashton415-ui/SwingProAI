@@ -9,6 +9,15 @@ import {
   Lock, BarChart2, FileUp, Camera, Square,
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { sessionUnverifiedReason } from "@/utils/supabase/session-storage";
+import {
+  sessionEndPending,
+  watchLineageEnd,
+  watchSessionEnd,
+  type OwnerRefusal,
+} from "@/utils/supabase/session-publication";
+import { confirmOwnerSession, ownerBearer, ownerBoundClient } from "@/lib/drill-hub-session";
+import { useRenderedSession } from "@/components/navigation/SessionKeeper";
 import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 import { ASSESSMENT_LABEL, SCORE_BASIS, UNSCORED_COPY, UNSCORED_LABEL } from "@/lib/swing-metric-presentation";
 import {
@@ -63,12 +72,57 @@ function getUserTier(): SubscriptionTier {
 }
 
 // ─── Auth ──────────────────────────────────────────────────────────────────────
-// Authentication is owned entirely by the managed browser client in
-// utils/supabase/client.ts. This page must never read the auth cookie itself,
-// never copy an access token into a header, and never disable session
-// persistence or auto-refresh — a hand-copied token cannot be refreshed and
-// eventually reaches its `exp`, which Storage rejects mid-submission.
+// Session acquisition, refresh and identity events are owned entirely by the
+// managed browser client in utils/supabase/client.ts. This page never reads the
+// auth cookie itself and never disables session persistence or auto-refresh — a
+// token frozen at page load cannot be refreshed and eventually reaches its `exp`,
+// which Storage rejects mid-submission.
+//
+// A3. The page belongs to the account the dashboard layout was rendered for
+// (the server-verified owner: components/navigation/SessionKeeper.tsx), never
+// to whichever session the browser holds when the page first looks. Every
+// owner-specific request carries a credential confirmed for that owner at the
+// moment it is sent: the data client re-confirms the managed session for every
+// PostgREST and Storage request (lib/drill-hub-session.ts ownerBoundClient);
+// the analysis-request doorway and (A4) the analysis call, whose routes verify
+// a Bearer token themselves and then read no cookie, each get the owner's token
+// confirmed immediately before they are sent (ownerBearer) and go with
+// `credentials: "omit"`, so no cookie — possibly another sign-in's, written by
+// any writer after the confirmation — travels with them. A request whose owner
+// is not confirmed is never sent with another account's credential — it is not
+// sent at all.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+// A2. The managed client refuses a session read it cannot confirm (another
+// sign-in's write not visible here yet, a write from outside the browser's own
+// writer, an unreadable lineage store: utils/supabase/session-storage.ts), and a
+// read can fail outright (Auth unreachable). Neither is a sign-out, and neither
+// reaches the golfer as SDK text: each has fixed copy that says what to do.
+const SESSION_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm which account is signed in on this device, so your swing wasn't analyzed. Your video is still selected — try again, or sign in again.";
+const SESSION_UNAVAILABLE_MESSAGE =
+  "We couldn't check your sign-in just now, so your swing wasn't analyzed. Your video is still selected — try again in a moment.";
+// A sign-out or account change noticed while an analysis runs stops it before
+// its next step; it is never continued for another account.
+const ACCOUNT_CHANGED_MESSAGE =
+  "This browser is now signed in to a different account, so this analysis was stopped. Refresh the page before you try again.";
+// A result that arrives after the page's sign-in changed belongs to the earlier
+// sign-in: it is not shown here and nothing navigates.
+const ANALYSIS_AFTER_CHANGE_MESSAGE =
+  "This browser's sign-in changed while your swing was being analyzed, so the result isn't shown here. Refresh the page to continue with the account that's signed in now.";
+// Anything else that is not one of this page's own messages (or the analysis
+// server's own explanation) is never shown as it is.
+const ANALYSIS_FAILED_MESSAGE = "We couldn't finish this analysis. Please try again.";
+/** The submission's session read is given this long before it is reported as unavailable. */
+const SESSION_READ_DEADLINE_MS = 12_000;
+
+/** `work()`'s result, or null when it has not settled within `ms` (it keeps running; its late result is ignored). */
+function settleWithin<T>(work: () => Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([work(), late]).finally(() => clearTimeout(timer));
+}
 
 // ─── Equipment context ─────────────────────────────────────────────────────────
 // Choosing a club is optional. Every message below is fixed copy: the saved-club
@@ -81,6 +135,74 @@ const CLUBS_AUTH_MESSAGE =
   "We couldn't confirm your session, so your clubs aren't available. You can still analyze without a club.";
 const CLUBS_UNAVAILABLE_MESSAGE =
   "We couldn't load your clubs right now. You can still analyze without a club.";
+// A2. Why the clubs could not be shown when it is the session read itself, not
+// the clubs query: fixed copy, each with the one action that can help.
+const CLUBS_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm which account is signed in on this device, so your clubs aren't shown. Try again, or sign in again.";
+const CLUBS_SESSION_UNAVAILABLE_MESSAGE =
+  "We couldn't check your sign-in just now, so your clubs aren't shown. Try again in a moment.";
+const CLUBS_ACCOUNT_CHANGED_MESSAGE =
+  "This browser is now signed in to a different account, so the clubs shown here were cleared. Refresh the page to continue with the account that's signed in now.";
+/** A load (session read and clubs query together) that has not finished by then is reported as unavailable. */
+const CLUBS_LOAD_DEADLINE_MS = 12_000;
+type ClubsIssue = "unconfirmed" | "unavailable" | "signed_out" | "account_changed";
+type IdentityEnd = "signed_out" | "account_changed";
+
+/** The user id a session object from the managed client states, or null. Never throws. */
+function sessionUserId(session: unknown): string | null {
+  if (session === null || typeof session !== "object") return null;
+  try {
+    const user = (session as { user?: unknown }).user;
+    const id = user !== null && typeof user === "object" ? (user as { id?: unknown }).id : undefined;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a managed-client event means for a page showing `shownUserId`'s clubs (null: none shown yet): SIGNED_OUT ends
+ * it; an event carrying another golfer's session is an account change. A null session on any other event is not a
+ * sign-out (the client reports an unconfirmed start-up read that way).
+ */
+function identityEndFromEvent(shownUserId: string | null, event: string, session: unknown): IdentityEnd | null {
+  if (event === "SIGNED_OUT") return "signed_out";
+  if (shownUserId === null) return null;
+  const id = sessionUserId(session);
+  return id !== null && id !== shownUserId ? "account_changed" : null;
+}
+
+/** The fixed copy for why the clubs cannot be shown because of the session. */
+function clubsNoticeMessage(issue: ClubsIssue | null): string {
+  return issue === "unconfirmed" ? CLUBS_UNCONFIRMED_MESSAGE
+    : issue === "unavailable" ? CLUBS_SESSION_UNAVAILABLE_MESSAGE
+      : issue === "account_changed" ? CLUBS_ACCOUNT_CHANGED_MESSAGE
+        : CLUBS_AUTH_MESSAGE;
+}
+
+/**
+ * The club panel's notice when the clubs cannot be shown because of the session, with its one recovery action. Its
+ * text is announced by the panel's persistent status region (a region mounted together with its text is often missed).
+ */
+function ClubsSessionNotice({ issue, onRetry }: { issue: ClubsIssue | null; onRetry: () => void }) {
+  const message = clubsNoticeMessage(issue);
+  const action = "min-h-11 px-4 rounded-xl border border-white/15 text-xs font-bold text-white hover:bg-white/5 inline-flex items-center justify-center";
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-gray-400">{message}</p>
+      <div className="flex flex-wrap gap-2">
+        {(issue === "unconfirmed" || issue === "unavailable") && (
+          <button type="button" onClick={onRetry} className={action}>Try again</button>
+        )}
+        {issue === "account_changed" ? (
+          <button type="button" onClick={() => window.location.reload()} className={action}>Refresh page</button>
+        ) : issue !== "unavailable" && (
+          <Link href="/login" className={action}>Sign in again</Link>
+        )}
+      </div>
+    </div>
+  );
+}
 // Raised when a club that was selectable when the page loaded is no longer in
 // the golfer's active bag at submission time. The analysis is refused rather
 // than quietly recorded against a different club, or against no club at all.
@@ -190,6 +312,48 @@ const CAMERA_PUTTING_GUIDANCE =
 const PREPROCESSING_FAILED_MESSAGE =
   "Your browser couldn't prepare this clip for analysis. Try a shorter or smaller clip, or use another browser or device.";
 
+/** A2. This page's own fixed messages: the only error text a failed analysis shows as it is. */
+const PAGE_MESSAGES: ReadonlySet<string> = new Set([
+  SESSION_EXPIRED_MESSAGE,
+  SESSION_UNCONFIRMED_MESSAGE,
+  SESSION_UNAVAILABLE_MESSAGE,
+  ACCOUNT_CHANGED_MESSAGE,
+  ANALYSIS_AFTER_CHANGE_MESSAGE,
+  CLUB_UNAVAILABLE_MESSAGE,
+  ANALYSIS_CREATE_FAILED_MESSAGE,
+  EMPTY_VIDEO_MESSAGE,
+  CLIP_TOO_LARGE_MESSAGE,
+  UPLOAD_FAILED_MESSAGE,
+  PREPROCESSING_FAILED_MESSAGE,
+]);
+
+/** A3. The fixed copy for a request of this page that was not sent because its account could not be confirmed. */
+const OWNER_REFUSAL_MESSAGES: Readonly<Record<OwnerRefusal, string>> = {
+  signed_out: SESSION_EXPIRED_MESSAGE,
+  ended: SESSION_EXPIRED_MESSAGE,
+  unconfirmed: SESSION_UNCONFIRMED_MESSAGE,
+  unavailable: SESSION_UNAVAILABLE_MESSAGE,
+  account_changed: ACCOUNT_CHANGED_MESSAGE,
+};
+
+/** A3. This page's data client: the shared managed client's Auth, with every data request bound to `ownerId`. */
+function analyzeClientFor(ownerId: string | null) {
+  return ownerBoundClient(createClient(), ownerId, process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+}
+
+/**
+ * A2. What a failed analysis shows: one of this page's fixed messages; the analysis server's own explanation (a plain
+ * Error thrown from its refusal, after the analysis started); a fixed "unconfirmed" message for a session read the
+ * managed client refused inside a request; otherwise fixed copy — never an SDK, Storage or runtime error's own text.
+ */
+function golferMessage(failure: unknown, analysisStarted: boolean): string {
+  if (sessionUnverifiedReason(failure) !== null) return SESSION_UNCONFIRMED_MESSAGE;
+  if (!(failure instanceof Error)) return ANALYSIS_FAILED_MESSAGE;
+  if (PAGE_MESSAGES.has(failure.message)) return failure.message;
+  if (analysisStarted && failure.constructor === Error && failure.message.length > 0) return failure.message;
+  return ANALYSIS_FAILED_MESSAGE;
+}
+
 function formatYt(url: string) {
   if (!url) return "";
   if (url.includes("watch?v=")) return url.replace("watch?v=", "embed/");
@@ -208,6 +372,11 @@ export default function AnalyzePage() {
   const [videoAspect, setVideoAspect] = useState<number | null>(null);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // A2. Set synchronously: a second Run press before the busy overlay renders starts nothing.
+  const analyzingRef = useRef(false);
+  // A3 review. The running analysis's cancellation: leaving the page cancels an
+  // analysis call it has not sent yet (one already sent runs on, as before).
+  const runAbortRef = useRef<AbortController | null>(null);
   const [isTrimming, setIsTrimming] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -215,15 +384,24 @@ export default function AnalyzePage() {
   const [lmFile, setLmFile] = useState<File | null>(null);
   const [userTier, setUserTier] = useState<SubscriptionTier>("par");
 
-  // One managed browser client for the lifetime of this mounted page. A lazy
-  // ref is used rather than a memo because this is an identity that must not be
-  // recreated, not a value derived from props: memoization is a cache the
-  // runtime is free to discard, which would silently hand the selector and the
-  // submission two different clients. Selector loading and submission below
+  // A3. The account this page belongs to: the one the dashboard layout was
+  // rendered for, as the server verified it — taken once, when the page first
+  // renders, and never replaced by a session the browser holds. No account
+  // (a page rendered outside the dashboard layout): nothing is read or sent.
+  const rendered = useRenderedSession();
+  const ownerRef = useRef<string | null>(rendered?.ownerId ?? null);
+  const renderedLineageRef = useRef<string | null>(rendered?.lineage ?? null);
+
+  // One client for the lifetime of this mounted page: the managed browser
+  // client's Auth, with every data request bound to the page's account (A3). A
+  // lazy ref is used rather than a memo because this is an identity that must
+  // not be recreated, not a value derived from props: memoization is a cache
+  // the runtime is free to discard, which would silently hand the selector and
+  // the submission two different clients. Selector loading and submission below
   // both use this exact binding.
-  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const supabaseRef = useRef<ReturnType<typeof analyzeClientFor> | null>(null);
   if (supabaseRef.current === null) {
-    supabaseRef.current = createClient();
+    supabaseRef.current = analyzeClientFor(ownerRef.current);
   }
   const supabase = supabaseRef.current;
 
@@ -237,6 +415,20 @@ export default function AnalyzePage() {
   // The URL hint is applied at most once, so a later re-resolution cannot
   // overwrite a choice the golfer has since made in the selector.
   const clubHintApplied = useRef(false);
+  // A2. Why the clubs are not shown when the session read itself failed (shown
+  // with the auth_error state); a deliberate Try again bumps the load key.
+  const [clubsIssue, setClubsIssue] = useState<ClubsIssue | null>(null);
+  const [clubsLoadKey, setClubsLoadKey] = useState(0);
+  // A load is running (a second Try again press before React re-renders starts nothing).
+  const clubsLoadingRef = useRef(false);
+  // False once the page has left: an analysis finishing afterwards shows nothing and navigates nowhere.
+  const mountedRef = useRef(true);
+  // Identity generation: bumped by a sign-out or account change, so a clubs load or an analysis started for the
+  // earlier account stops at its next step and never shows or sends anything afterwards.
+  const identityRef = useRef(0);
+  const identityEndRef = useRef<IdentityEnd | null>(null);
+  const endIdentityRef = useRef<(why: IdentityEnd) => void>(() => undefined);
+  const stopLineageWatchRef = useRef<() => void>(() => undefined);
 
   // EQ4-S2 camera capture. `cameraError` is separate from the page-wide `error`
   // banner on purpose: that banner renders inside the preview branch, so it is
@@ -265,26 +457,109 @@ export default function AnalyzePage() {
     setUserTier(getUserTier());
   }, []);
 
+  /**
+   * A2. Whether the browser is still signed in as `userId`, by a fresh read
+   * through the same managed client. Never rejects.
+   */
+  const confirmSignedInAs = useCallback(
+    async (userId: string): Promise<"same" | IdentityEnd | "unconfirmed" | "unavailable"> => {
+      try {
+        const { data, error: readError } = await supabase.auth.getSession();
+        if (readError) return "unavailable";
+        const id = sessionUserId(data.session);
+        if (id === null) return "signed_out";
+        return id === userId ? "same" : "account_changed";
+      } catch (readFailure) {
+        return sessionUnverifiedReason(readFailure) !== null ? "unconfirmed" : "unavailable";
+      }
+    },
+    [supabase],
+  );
+
   useEffect(() => {
     let cancelled = false;
+    const generation = identityRef.current;
+    clubsLoadingRef.current = true;
+
+    // A2. Every load settles exactly once: with the clubs, with a classified
+    // reason (Try again or Sign in again), or — when an identity change ended
+    // the page's view meanwhile — with nothing, leaving that change's notice.
+    const finish = () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      clubsLoadingRef.current = false;
+    };
+    const settle = (issue: ClubsIssue) => {
+      finish();
+      if (identityRef.current !== generation) return;
+      // another account than the page's golfer: the page's view ends for good (an analysis then refuses to run)
+      if (issue === "account_changed") return endIdentityRef.current("account_changed");
+      setSavedClubs({ status: "auth_error", clubs: [] });
+      setClubsIssue(issue);
+    };
+    // A load still running after CLUBS_LOAD_DEADLINE_MS is reported as
+    // unavailable, and whatever it returns afterwards is dropped.
+    const deadline = setTimeout(() => {
+      if (!cancelled) settle("unavailable");
+    }, CLUBS_LOAD_DEADLINE_MS);
 
     void (async () => {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      let sessionRead: Awaited<ReturnType<typeof supabase.auth.getSession>>;
+      try {
+        sessionRead = await supabase.auth.getSession();
+      } catch (readFailure) {
+        if (cancelled) return;
+        // A refused read is "unconfirmed", a failed one "unavailable": never a
+        // sign-out, never SDK text, and nothing is read without a session.
+        settle(sessionUnverifiedReason(readFailure) !== null ? "unconfirmed" : "unavailable");
+        return;
+      }
+      const { data: { session }, error: sessionError } = sessionRead;
       const clubsUserId = session?.user?.id;
       if (cancelled) return;
 
       if (sessionError || !session || !clubsUserId) {
-        // Classified, never surfaced raw. The golfer can still analyze.
-        setSavedClubs({ status: "auth_error", clubs: [] });
+        // Classified, never surfaced raw. A returned error is a read that
+        // failed (Auth unreachable); no session at all is a genuine sign-out.
+        settle(sessionError ? "unavailable" : "signed_out");
+        return;
+      }
+      if (identityRef.current !== generation) return finish();
+      // A3. Only the account the page was rendered for: another account's
+      // session is never adopted (it ends the view), and without an account
+      // nothing is read.
+      const owner = ownerRef.current;
+      if (owner === null) {
+        settle("unconfirmed");
+        return;
+      }
+      if (clubsUserId !== owner) {
+        settle("account_changed");
         return;
       }
 
       // The one saved-club reader. It scopes to this user id alongside RLS and
-      // excludes archived rows in the query itself.
+      // excludes archived rows in the query itself; its request carries the
+      // page's account's confirmed token, or is not sent (A3).
       const result = await querySavedClubs(supabase, { userId: clubsUserId });
       if (cancelled) return;
+      // A2. Shown only while that golfer is still the one signed in here: an
+      // answer from a read that went out after a sign-out or account change
+      // (the managed client attaches whatever session is current) is dropped.
+      const still = await confirmSignedInAs(clubsUserId);
+      if (cancelled) return;
+      if (identityRef.current !== generation) return finish();
+      if (still !== "same") {
+        settle(still);
+        return;
+      }
+      finish();
 
+      setClubsIssue(null);
       setSavedClubs(result);
+      // End Session of this session (here or in another tab) ends what is shown.
+      stopLineageWatchRef.current();
+      stopLineageWatchRef.current = watchSessionEnd(session, () => endIdentityRef.current("signed_out"));
 
       if (!clubHintApplied.current) {
         clubHintApplied.current = true;
@@ -297,8 +572,75 @@ export default function AnalyzePage() {
 
     return () => {
       cancelled = true;
+      clearTimeout(deadline);
+      clubsLoadingRef.current = false;
     };
-  }, [supabase, searchParams]);
+  }, [supabase, searchParams, clubsLoadKey, confirmSignedInAs]);
+
+  /** A2. A deliberate Try again after a failed clubs load: one load at a time. */
+  const retryClubs = useCallback(() => {
+    if (clubsLoadingRef.current || identityEndRef.current === "account_changed") return;
+    clubsLoadingRef.current = true;
+    setSavedClubs(null);
+    setClubsIssue(null);
+    setClubsLoadKey((key) => key + 1);
+  }, []);
+
+  // A2. A sign-out or account change noticed while the page is open (managed
+  // client events, which also bring other tabs' sign-ins and sign-outs, and an
+  // End Session of this session anywhere in the browser) ends what was shown
+  // for the earlier account: the clubs and the club choice are cleared, a load
+  // or analysis still running for it stops before its next step, and the
+  // panel says what happened. The golfer's chosen video stays selected.
+  useEffect(() => {
+    const end = (why: IdentityEnd) => {
+      if (identityEndRef.current === "account_changed") return;
+      identityEndRef.current = why;
+      identityRef.current += 1;
+      clubsLoadingRef.current = false;
+      stopLineageWatchRef.current();
+      stopLineageWatchRef.current = () => undefined;
+      setSelectedClubId(null);
+      setSavedClubs({ status: "auth_error", clubs: [] });
+      setClubsIssue(why);
+    };
+    endIdentityRef.current = end;
+    let unsubscribe = () => {};
+    try {
+      const { data } = supabase.auth.onAuthStateChange((event, session) => {
+        // A3: measured against the account the page was rendered for, from the moment it mounts
+        const why = identityEndFromEvent(ownerRef.current, event, session);
+        if (why !== null) end(why);
+      });
+      unsubscribe = () => data.subscription.unsubscribe();
+    } catch {
+      // no events: the next session read decides
+    }
+    // A3: End Session of the sign-in the page was rendered for (here or in another tab) ends the view at once
+    const stopRenderedWatch = watchLineageEnd(renderedLineageRef.current, () => end("signed_out"));
+    return () => {
+      unsubscribe();
+      stopRenderedWatch();
+      stopLineageWatchRef.current();
+      endIdentityRef.current = () => undefined;
+    };
+  }, [supabase]);
+
+  // A3. The layout re-rendered for another account while this page stays
+  // mounted (a refresh after another sign-in): this page's view ends; a reload
+  // shows the account signed in now.
+  const renderedOwner = rendered?.ownerId ?? null;
+  useEffect(() => {
+    if (renderedOwner !== ownerRef.current) endIdentityRef.current("account_changed");
+  }, [renderedOwner]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      runAbortRef.current?.abort();
+    };
+  }, []);
 
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -557,7 +899,39 @@ export default function AnalyzePage() {
       setError(`Trim your segment to under ${MAX_SEGMENT_SECONDS}s for best results.`);
       return;
     }
+    // A2. After the page's view ended for another account, nothing runs here
+    // until the page is refreshed for the account signed in now.
+    if (identityEndRef.current === "account_changed") {
+      setError(ACCOUNT_CHANGED_MESSAGE);
+      return;
+    }
+    // A2. One analysis at a time: a second press before React re-renders the
+    // busy overlay starts nothing.
+    if (analyzingRef.current) return;
+    analyzingRef.current = true;
     setIsAnalyzing(true); setError(null);
+    const runAbort = new AbortController();
+    runAbortRef.current = runAbort;
+
+    // A2. The analysis belongs to the golfer this page is showing. A sign-out
+    // or account change noticed while it runs stops it before its next step.
+    const generation = identityRef.current;
+    const stopIfIdentityChanged = () => {
+      if (identityRef.current === generation) return;
+      throw new Error(identityEndRef.current === "signed_out" ? SESSION_EXPIRED_MESSAGE : ACCOUNT_CHANGED_MESSAGE);
+    };
+    // A3 review. A request refused because the browser now holds another
+    // account also ends the page's view (as the clubs re-check does).
+    const refusedFor = (reason: OwnerRefusal): string => {
+      if (reason === "account_changed") endIdentityRef.current("account_changed");
+      return OWNER_REFUSAL_MESSAGES[reason];
+    };
+    // A3. Why a data step failed when the page's account can no longer be
+    // confirmed (its request was then not sent at all); null otherwise.
+    const ownerNoLongerConfirmed = async (): Promise<string | null> => {
+      const now = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+      return now.status === "ready" ? null : refusedFor(now.status);
+    };
 
     // Which step a network failure interrupted decides what the golfer is told.
     let analysisStarted = false;
@@ -576,12 +950,36 @@ export default function AnalyzePage() {
       // is at (or near) expiry, persisting the rotated tokens through the managed
       // client's own cookie storage. Refreshing is deliberately NOT forced on
       // every submission.
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      let sessionAnswer: Awaited<ReturnType<typeof supabase.auth.getSession>> | null;
+      try {
+        // bounded: a read with no answer in time is unavailable, never a run left busy
+        sessionAnswer = await settleWithin(async () => await supabase.auth.getSession(), SESSION_READ_DEADLINE_MS);
+      } catch (readFailure) {
+        // A2. A refused read (unconfirmed) or a failed one: fixed copy, the
+        // video stays selected, nothing is sent.
+        throw new Error(sessionUnverifiedReason(readFailure) !== null ? SESSION_UNCONFIRMED_MESSAGE : SESSION_UNAVAILABLE_MESSAGE);
+      }
+      if (sessionAnswer === null) throw new Error(SESSION_UNAVAILABLE_MESSAGE);
+      const { data: { session }, error: sessionError } = sessionAnswer;
       const userId = session?.user?.id;
+      // A returned error is a read that failed (Auth unreachable), not a sign-out.
+      const sessionGuardMessage = sessionError ? SESSION_UNAVAILABLE_MESSAGE : SESSION_EXPIRED_MESSAGE;
       // Fail here — before Storage, before swing_videos, before swing_analysis,
       // and before /api/analyze-swing. The raw Supabase error is not surfaced to
       // the golfer; they get an actionable instruction instead.
-      if (sessionError || !session || !userId) throw new Error(SESSION_EXPIRED_MESSAGE);
+      if (sessionError || !session || !userId) throw new Error(sessionGuardMessage);
+      // A3. Only the account the page was rendered for: never another, and
+      // never one adopted because it was the first seen (another account's
+      // session ends the page's view; without an account nothing is sent).
+      if (ownerRef.current === null) throw new Error(SESSION_UNCONFIRMED_MESSAGE);
+      if (userId !== ownerRef.current) {
+        endIdentityRef.current("account_changed");
+        throw new Error(ACCOUNT_CHANGED_MESSAGE);
+      }
+      stopIfIdentityChanged();
+      // A2. A session the server already ended (its removal from this browser is still pending) is not used.
+      if (await sessionEndPending(session)) throw new Error(SESSION_EXPIRED_MESSAGE);
+      stopIfIdentityChanged();
 
       // Re-check the chosen club against a freshly read active bag, using the
       // session just resolved. A club removed from the bag since the selector
@@ -593,6 +991,11 @@ export default function AnalyzePage() {
       if (selectedClubId !== null) {
         const currentClubs = await querySavedClubs(supabase, { userId });
         if (!isSelectionStillValid(currentClubs, selectedClubId)) {
+          // A3: a re-check not sent because the page's account could not be confirmed says why
+          if (currentClubs.status === "auth_error") {
+            const notConfirmed = await ownerNoLongerConfirmed();
+            if (notConfirmed !== null) throw new Error(notConfirmed);
+          }
           // No substitution and no fallback — recording a club the golfer did
           // not choose would corrupt the analysis record.
           throw new Error(CLUB_UNAVAILABLE_MESSAGE);
@@ -604,14 +1007,19 @@ export default function AnalyzePage() {
       // ENT-1D: a file name the canonical-key rule accepts, fixed before upload.
       const safeFilename = canonicalUploadFileName(file.name);
       const storagePath = `${userId}/${crypto.randomUUID()}/${safeFilename}`;
+      stopIfIdentityChanged();
       const { error: uploadErr } = await supabase.storage
         .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
       if (uploadErr) {
         console.error("Video upload failed");
+        // A3: an upload not sent because the page's account could not be confirmed says why
+        const notConfirmed = await ownerNoLongerConfirmed();
+        if (notConfirmed !== null) throw new Error(notConfirmed);
         throw new Error(UPLOAD_FAILED_MESSAGE);
       }
 
       // 2. Create the swing_videos record
+      stopIfIdentityChanged();
       const { data: videoRow, error: videoErr } = await supabase
         .from("swing_videos").insert({
           user_id:           userId,
@@ -626,6 +1034,8 @@ export default function AnalyzePage() {
         }).select().single();
       if (videoErr || !videoRow) {
         console.error("Failed to register video");
+        const notConfirmed = await ownerNoLongerConfirmed();
+        if (notConfirmed !== null) throw new Error(notConfirmed);
         throw new Error(UPLOAD_FAILED_MESSAGE);
       }
 
@@ -635,9 +1045,18 @@ export default function AnalyzePage() {
       // native clients use. The club id is the only equipment fact sent; the
       // derived analysis family and the immutable equipment snapshot are
       // produced by the database trigger and are never sent from here.
+      // A3. That doorway verifies a Bearer token itself and then reads no
+      // cookie, so the request carries the page's account's token, confirmed
+      // now: it can only ever be that account's request.
+      stopIfIdentityChanged();
+      const requestSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+      if (requestSession.status !== "ready") throw new Error(refusedFor(requestSession.status));
+      stopIfIdentityChanged();
       const createRes = await fetch("/api/v1/analyses", {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        // A3 review: the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
+        credentials: "omit",
+        headers: { "Content-Type": "application/json", ...ownerBearer(requestSession.session) },
         body:    JSON.stringify({ swingVideoId: videoRow.id, clubId: validatedClubId }),
       });
       const created = await createRes.json().catch(() => null) as
@@ -654,15 +1073,36 @@ export default function AnalyzePage() {
       }
 
       // 4. Call the direct Gemini pipeline — it fetches the video from Storage itself
+      // A4 (C1). The route verifies a Bearer token itself (resolveRouteAuth) and
+      // then reads no cookie, so the request carries the page's account's
+      // token, confirmed now, and no cookie at all: whatever any writer puts in
+      // the jar after this confirmation, the request can only be this account's.
+      // No lease is held, and nothing waits on the analysis. Leaving the page
+      // before it is sent cancels it; once sent it runs on, as before.
+      stopIfIdentityChanged();
+      const analysisSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+      if (analysisSession.status !== "ready") throw new Error(refusedFor(analysisSession.status));
+      stopIfIdentityChanged();
+      if (runAbort.signal.aborted || !mountedRef.current) return;
       analysisStarted = true;
       const analysisRes = await fetch("/api/analyze-swing", {
         method:  "POST",
-        headers: { "Content-Type": "application/json" },
+        // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
+        credentials: "omit",
+        headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session) },
         body:    JSON.stringify({ analysisId: analysisRow.id }),
       });
+      // A2. Finished after the golfer left the page, or after the page's
+      // sign-in changed: nothing of it is shown here and nowhere is navigated.
+      if (!mountedRef.current) return;
+      if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
 
       if (!analysisRes.ok) {
         const err = await analysisRes.json().catch(() => ({}));
+        // A3 (F2). The error body can finish after the golfer left the page or
+        // the page's sign-in changed: nothing of it is acted on then.
+        if (!mountedRef.current) return;
+        if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
         // ENT-1D. Already running for this swing: hand over to its report page,
         // which shows the in-progress state and can check again. A stalled
         // analysis falls through to the error banner below, which offers no
@@ -681,6 +1121,8 @@ export default function AnalyzePage() {
       }
 
       const { data: updatedRow } = await analysisRes.json() as { data: Record<string, unknown> };
+      if (!mountedRef.current) return;
+      if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
 
       // EQ5C-D. Which report this is was decided by the database at insert and
       // returned by the server on the completed row — not by the selector the
@@ -704,10 +1146,11 @@ export default function AnalyzePage() {
       if (err instanceof TypeError && /Failed to fetch|NetworkError|Load failed/.test(err.message)) {
         setError(analysisStarted ? ANALYSIS_CONNECTION_LOST_MESSAGE : UPLOAD_FAILED_MESSAGE);
       } else {
-        setError(err instanceof Error ? err.message : "Analysis failed.");
+        setError(golferMessage(err, analysisStarted));
       }
     } finally {
       setIsAnalyzing(false);
+      analyzingRef.current = false;
     }
   };
 
@@ -1005,6 +1448,13 @@ export default function AnalyzePage() {
     };
   }, []);
 
+  // A2: what the club panels' persistent status region announces
+  const clubsStatus =
+    savedClubs === null ? CLUBS_LOADING_MESSAGE
+      : savedClubs.status === "auth_error" ? clubsNoticeMessage(clubsIssue)
+        : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? CLUBS_UNAVAILABLE_MESSAGE
+          : "";
+
   const cameraGuidance = isPuttingCapture
     ? CAMERA_PUTTING_GUIDANCE
     : CAMERA_FULL_SWING_GUIDANCE;
@@ -1029,12 +1479,22 @@ export default function AnalyzePage() {
               </div>
             </div>
 
+            {/* A2: one persistent live region per panel, so every change of the clubs' state is announced */}
+            <p role="status" aria-live="polite" className="sr-only">{clubsStatus}</p>
             {savedClubs === null ? (
               <p className="text-sm text-gray-400">{CLUBS_LOADING_MESSAGE}</p>
             ) : savedClubs.status === "auth_error" ? (
-              <p className="text-sm text-gray-400">{CLUBS_AUTH_MESSAGE}</p>
+              <ClubsSessionNotice issue={clubsIssue} onRetry={retryClubs} />
             ) : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? (
-              <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+              <div className="space-y-3">
+                <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+                {savedClubs.status === "database_error" && (
+                  <button type="button" onClick={retryClubs}
+                    className="min-h-11 px-4 rounded-xl border border-white/15 text-xs font-bold text-white hover:bg-white/5">
+                    Try again
+                  </button>
+                )}
+              </div>
             ) : (
               <ClubSelector
                 clubs={savedClubs.clubs}
@@ -1203,7 +1663,7 @@ export default function AnalyzePage() {
             {/* Error banner */}
             {error && (
               <div className="absolute top-16 left-4 right-4 z-50">
-                <div className="bg-red-500/10 border border-red-500/40 backdrop-blur-xl p-4 rounded-xl flex items-start gap-3">
+                <div role="alert" className="bg-red-500/10 border border-red-500/40 backdrop-blur-xl p-4 rounded-xl flex items-start gap-3">
                   <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
                   <p className="text-sm text-white">{error}</p>
                   <button onClick={() => setError(null)} aria-label="Dismiss message"
@@ -1327,12 +1787,22 @@ export default function AnalyzePage() {
               </div>
             </div>
 
+            {/* A2: one persistent live region per panel, so every change of the clubs' state is announced */}
+            <p role="status" aria-live="polite" className="sr-only">{clubsStatus}</p>
             {savedClubs === null ? (
               <p className="text-sm text-gray-400">{CLUBS_LOADING_MESSAGE}</p>
             ) : savedClubs.status === "auth_error" ? (
-              <p className="text-sm text-gray-400">{CLUBS_AUTH_MESSAGE}</p>
+              <ClubsSessionNotice issue={clubsIssue} onRetry={retryClubs} />
             ) : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? (
-              <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+              <div className="space-y-3">
+                <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+                {savedClubs.status === "database_error" && (
+                  <button type="button" onClick={retryClubs}
+                    className="min-h-11 px-4 rounded-xl border border-white/15 text-xs font-bold text-white hover:bg-white/5">
+                    Try again
+                  </button>
+                )}
+              </div>
             ) : (
               <ClubSelector
                 clubs={savedClubs.clubs}

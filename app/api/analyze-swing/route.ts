@@ -57,7 +57,7 @@ import {
   SWING_POSITIONS,
   THRESHOLD_MEASURES,
 } from "@/lib/full-swing-scoring-rubric";
-import { createClient } from "@/utils/supabase/server";
+import { resolveRouteAuth, type AuthenticatedCaller } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 import { extractSwingMetrics } from "@/lib/biometrics";
 import { computePuttingScoreFromAnalysisV1 } from "@/lib/putting-score-from-analysis-eq5f-e";
@@ -488,7 +488,8 @@ function isSubscriptionTier(value: unknown): value is SubscriptionTier {
 // no biomechanics, no score. An uncalibrated phone video supports qualitative
 // observation only, so nothing here writes the numeric putting columns.
 
-type RouteSupabaseClient = Awaited<ReturnType<typeof createClient>>;
+/** A4 (C1): the verified caller's own caller-scoped client (utils/supabase/server.ts resolveRouteAuth). */
+type RouteSupabaseClient = AuthenticatedCaller["client"];
 
 // ── Trusted analysis writes ──────────────────────────────────────────────────
 //
@@ -769,13 +770,25 @@ export async function POST(req: NextRequest) {
   console.log("[analyze-swing] POST received");
 
   // ── Auth ──────────────────────────────────────────────────────────────────
-  const supabase = await createClient();
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
-  console.log("[analyze-swing] authenticated:", !authError && !!user);
+  // A4 (C1). This route opts into the shared route ingress (utils/supabase/server.ts resolveRouteAuth). An
+  // Authorization header selects Bearer mode — the web app's Analyze page and report send only the confirmed token
+  // of the account they were rendered for, with no cookie — and a presented credential that is malformed, invalid or
+  // expired is refused: it never falls back to whatever session cookie the browser carries. Without the header the
+  // session-cookie ingress is unchanged for any other caller. An Auth outage is not a sign-out: it is answered 503,
+  // honestly. All of this happens before the body is read and before any database, Storage, claim or provider work,
+  // and everything below runs on the verified caller's own client and user id — no second client is ever built from
+  // the cookie for a caller verified by Bearer.
+  const auth = await resolveRouteAuth();
+  console.log("[analyze-swing] authenticated:", auth.status === "authenticated");
 
-  if (authError || !user) {
+  if (auth.status === "verification_unavailable") {
+    return NextResponse.json({ error: AUTH_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  if (auth.status !== "authenticated") {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const supabase = auth.client;
+  const user = { id: auth.userId } as const;
 
   // ── Parse body ────────────────────────────────────────────────────────────
   let rawBody: unknown;
@@ -1241,6 +1254,8 @@ export async function POST(req: NextRequest) {
 // ── ENT-1A full-swing answers that never call Gemini ──────────────────────────
 
 const FULL_SWING_UNAVAILABLE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
+/** A4 (C1): Auth could not be reached to verify the caller (not a sign-out); nothing was read or started. */
+const AUTH_UNAVAILABLE_COPY = "We couldn't confirm your sign-in just now, so nothing was analyzed. Please try again shortly.";
 const IN_PROGRESS_COPY = "This analysis is already in progress. Please check back shortly.";
 const NOT_STARTABLE_COPY = "This analysis can't be started right now. Please refresh and try again.";
 

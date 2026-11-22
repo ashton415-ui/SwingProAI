@@ -578,7 +578,12 @@ describe("D1 source contract", () => {
 
 describe("frozen read-only dependencies", () => {
   const FROZEN: Array<[string, string]> = [
-    ["utils/supabase/server.ts", "43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74"],
+    // AG-WEB-READY-03-R1 + A1 (reviewed, retargeted): only the cookie path changed — the raw Cookie header with the
+    // shared strict layout reader, and the binding cookie. The Bearer ingress is pinned separately below to the bytes of
+    // the previously frozen verifier (43e341460fa254d92bcd041774c6b085ab99931c9dc4cf631d6959d9c921fe74).
+    // AG-WEB-READY-03-R1-A4 review (reviewed, retargeted): the outage classification reads Auth's own 5xx and a 429 as an
+    // outage (verification_unavailable), never as a refused credential; nothing else in the file changed.
+    ["utils/supabase/server.ts", "e75f81bf7faefbabfd949283d3ad559c990ddf6ac30b7292400e6210a39897c7"],
     // PI-1A: Practice Intelligence entitlement and effective /me capability.
     // ENT-1C: paid analysis capabilities and mode reported with subscription status.
     ["lib/api/me-dto.ts", "b643a03f289feea8bb7639b840bd52b60c6a4d81020c243e846d37bb70faa48e"],
@@ -596,7 +601,17 @@ describe("frozen read-only dependencies", () => {
     // ENT-1D local acceptance: keyboard-reachable file inputs (sr-only) and a 44px upsell link.
     // ENT-1D D1 and golfer experience: video file checks, recovery copy, honest plan/upgrade copy, Enter opens the chooser.
     // S6-R1: an unscored full-swing result shows "Not scored" with its basis, never 0; no grade colour; assessment label.
-    ["app/(dashboard)/analyze/page.tsx", "a484db0ed003dd74b44d2a8c33e1efcabeabc8d80cbed6ab5d3e88a953ea740c"],
+    // AG-WEB-READY-03-R1-A2: session reads classified (refused, failed, signed out) with fixed copy and retry; the clubs
+    // load bounded and re-confirmed; an identity change stops a run before its next step; only fixed messages shown.
+    // The upload, Storage, swing_videos and /api/v1/analyses request authority is unchanged.
+    // A2 review: a result arriving after the sign-in changed (or after leaving) is not shown; the run's session
+    // read is bounded; a session whose End Session is pending is not used; one persistent live region per panel.
+    // AG-WEB-READY-03-R1-A3: the page belongs to the account its dashboard layout was rendered for; its data requests
+    // carry that account's confirmed token (owner-bound client), the /api/v1/analyses request its confirmed Bearer, and
+    // the analysis call is sent through the cookie-session sender; a late error body is acted on only while current.
+    // AG-WEB-READY-03-R1-A4 (C1): the analysis call carries the page's account's Bearer, confirmed just before it is sent,
+    // with no cookie (the route verifies the Bearer itself); A3's cookie-session sender and its preflight are retired.
+    ["app/(dashboard)/analyze/page.tsx", "f1031065ee6d3b4d674c6094607cc757ffb0c37102bdc9f7b40b007c6d9b5506"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
     // ENT-1D video sources: video_url records the canonical key, never a public URL.
     // ENT-1D video sources: canonical file name before upload (video_url already records the key).
@@ -614,5 +629,32 @@ describe("frozen read-only dependencies", () => {
       .update(readFileSync(path.join(repoRoot, relativePath)))
       .digest("hex");
     expect(actual).toBe(expected);
+  });
+
+  // A1 (AG-WEB-READY-03-R1-A1): the whole-file receipt of utils/supabase/server.ts above was retargeted after review.
+  // The native Bearer ingress this suite depends on — the supabase-js import, the project URL and anon key helpers, client
+  // construction, outage classification, token verification, Authorization parsing and route ingress (widened after
+  // review) — must still be exactly the previously frozen verifier's bytes.
+  // A4 review (security finding 1): the outage classification now also reads Auth's own 5xx and a 429 as an outage
+  // (verification_unavailable), never as a refused credential; every other byte of the ingress region is unchanged.
+  it("the Bearer ingress of utils/supabase/server.ts is byte-identical to the previously frozen verifier (A1)", async () => {
+    const text = readFileSync(path.join(repoRoot, "utils/supabase/server.ts"), "utf8").replace(/\r\n/g, "\n");
+    const importLine = 'import { createClient as createSupabaseClient } from "@supabase/supabase-js";';
+    expect(text.startsWith(`${importLine}\n`)).toBe(true);
+    const region = [importLine, ...[
+      "function supabaseUrl(",
+      "function supabaseAnonKey(",
+      "function clientForToken(",
+      "function isVerificationInfrastructureFailure(",
+      "async function verifyAccessToken(",
+      "function parseAuthorizationHeader(",
+      "export async function resolveRouteAuth(",
+    ].map((signature) => {
+      const start = text.indexOf(signature);
+      const end = text.indexOf("\n}\n", start);
+      expect([start >= 0, end > start, text.indexOf(signature, start + 1)]).toEqual([true, true, -1]);
+      return text.slice(start, end + 3);
+    })].join("\n");
+    expect((await import("node:crypto")).createHash("sha256").update(region).digest("hex")).toBe("2aefc9b2952b1dcc829087be5b6b07696a1b3f4ee19a62711d84d157fadcc3dd");
   });
 });

@@ -1,18 +1,40 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createClient } from "@/utils/supabase/client";
+import { completeEndedSession, endIntentPending, signInAndPublish, type EndCompletion } from "@/utils/supabase/session-publication";
 import Link from "next/link";
 import { Zap } from "lucide-react";
 
 // Shown for every returned sign-in failure. It never repeats provider text and never says whether an account exists.
 const SIGN_IN_FAILED = "We couldn't sign you in. Check your email and password, or try again in a moment.";
 // Shown when the attempt could not be completed or its result is unknown: the client could not be created, or the
-// sign-in call threw or gave no usable answer. Fixed text, never provider text, never says whether an account exists.
+// sign-in call threw or gave no usable answer, or its session could not be kept in this browser. Fixed text, never
+// provider text, never says whether an account exists.
 const SIGN_IN_INTERRUPTED = "We couldn't finish signing you in. Please try again in a moment.";
 // Shown until the page's own sign-in handler is ready (scripts still loading, failed, or turned off). Until then the
 // form cannot be submitted, so the fields are never sent anywhere by the browser itself.
 const SIGN_IN_NOT_READY = "Sign-in needs JavaScript. If the button stays unavailable, check that JavaScript is on and reload this page.";
+// Shown when this browser cannot keep a sign-in safely (no site storage or secure-context features, as in some private
+// windows or with site data blocked). Nothing was sent. Fixed text; trying again in this browser would not help.
+const SIGN_IN_UNSUPPORTED =
+  "This browser can't keep your sign-in safe, so you weren't signed in and nothing was sent. Private browsing or blocked site data can cause this; try a regular window or another browser.";
+
+// A2 — finishing an End Session the server confirmed but could not remove from this browser (no JavaScript, before the
+// page had loaded, or the session lease was busy). It runs only when the server left its single-use instruction for
+// that exact session (utils/supabase/session-publication.ts completeEndedSession); a plain visit to this page changes
+// nothing. Fixed text that says what is true on this device; it never names an account.
+type EndingState = "working" | Exclude<EndCompletion, "none"> | "gone";
+const END_COMPLETION_COPY: Record<EndingState, string> = {
+  // a retry that finds the instruction gone (finished in another tab, or this site's data cleared)
+  gone: "This page can't finish signing out on this device any more. If your account still shows here, sign in again or clear this site's data in your browser settings.",
+  working: "Your session was ended. Finishing signing you out on this device…",
+  completed: "You're signed out. Your session was ended and removed from this device.",
+  kept_other: "Your session was ended. A newer sign-in in this browser was left as it is.",
+  pending: "Your session was ended, but we couldn't finish removing it from this device yet.",
+  unsupported:
+    "Your session was ended, but this browser can't remove its copy safely. Clear this site's data in your browser settings to remove it from this device.",
+};
+const END_COMPLETION_RETRY = "Finish signing out";
 
 const FIELD =
   "w-full px-4 py-3.5 bg-black/40 border border-gray-500 rounded-2xl text-white text-base placeholder:text-gray-400 focus:outline-none focus:border-golf-green focus:ring-2 focus:ring-golf-green";
@@ -31,6 +53,33 @@ export default function LoginPage() {
   const [ready, setReady] = useState(false);
   useEffect(() => {
     setReady(true);
+  }, []);
+
+  // A2: the End Session completion, only when the server left its instruction (see END_COMPLETION_COPY). One attempt
+  // at a time; "pending" offers an explicit retry, never an automatic loop.
+  const [ending, setEnding] = useState<EndingState | null>(null);
+  const completing = useRef(false);
+  async function finishEndedSession() {
+    if (completing.current) return;
+    if (!endIntentPending()) {
+      // a plain visit: nothing at all; a retry whose instruction is gone: say so instead of a dead button
+      if (ending !== null) setEnding("gone");
+      return;
+    }
+    completing.current = true;
+    setEnding("working");
+    let outcome: EndCompletion;
+    try {
+      outcome = await completeEndedSession();
+    } catch {
+      outcome = "pending";
+    }
+    completing.current = false;
+    setEnding(outcome === "none" ? null : outcome);
+  }
+  useEffect(() => {
+    void finishEndedSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, after hydration
   }, []);
 
   // Disabling the focused submit button drops focus to the page; when a failure is shown, put it on the message.
@@ -58,15 +107,23 @@ export default function LoginPage() {
       inFlight.current = false;
     };
 
-    // Sign in with the browser client. When it returns a session, the installed client has already kept that session in
-    // its own cookie (inherited and unchanged here: readable by page scripts and sent with this site's requests), and
-    // pages that need a signed-in golfer verify it on the server. So the page makes no further request with the session
-    // itself and goes straight to the dashboard.
+    // Sign in, then publish the new session into this browser under the session-publication lease
+    // (utils/supabase/session-publication.ts): it replaces every older session cookie in one ordered step, so no other
+    // tab's refresh or older cookie can stand in for it. The session cookie itself keeps its established attributes
+    // (readable by page scripts, sent with this site's requests), and pages that need a signed-in golfer verify it on
+    // the server. So the page makes no further request with the session itself and goes straight to the dashboard.
     try {
-      const supabase = createClient();
-      const { data, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-      if (signInError || !data?.session) {
+      const outcome = await signInAndPublish(email, password);
+      if (outcome === "refused") {
         stop(SIGN_IN_FAILED);
+        return;
+      }
+      if (outcome === "unsupported") {
+        stop(SIGN_IN_UNSUPPORTED);
+        return;
+      }
+      if (outcome !== "signed_in") {
+        stop(SIGN_IN_INTERRUPTED);
         return;
       }
     } catch {
@@ -97,6 +154,19 @@ export default function LoginPage() {
         </div>
 
         <div className="bg-golf-surface border border-white/5 rounded-5xl p-6 sm:p-8">
+          {/* A2: always mounted, so the End Session completion's outcome is announced as it changes */}
+          <div id="login-end-status" role="status" aria-live="polite" className={ending === null ? "sr-only" : "mb-5 text-sm text-gray-200 bg-white/5 border border-white/10 rounded-xl px-4 py-3"}>
+            {ending === null ? "" : END_COMPLETION_COPY[ending]}
+          </div>
+          {ending === "pending" && (
+            <button
+              type="button"
+              onClick={() => void finishEndedSession()}
+              className="mb-5 w-full min-h-11 py-3 border border-white/20 text-white font-black uppercase tracking-widest rounded-2xl text-xs hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              {END_COMPLETION_RETRY}
+            </button>
+          )}
           {/* method="post": should the form ever be submitted natively, the fields go in the request body, never a URL */}
           <form method="post" onSubmit={handleSubmit} className="space-y-5">
             <div>
