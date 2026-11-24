@@ -16,9 +16,10 @@ import { RenderedSessionProvider } from "@/components/navigation/SessionKeeper";
  * that one, the shell is removed from the screen and replaced by fixed guidance: no name, plan, media, data or actionable
  * control of the old account stays on screen, so nothing in it can be pressed or submitted. This is a presentation
  * boundary, not an identity fence around browser requests: work a page already started, or that code starts without a
- * press (see the limits below), is not stopped here. Some components fence their own late answers (GoalsForm, the
- * analysis report); others do not (e.g. the plan view's generation). (What the page already loaded stays in its memory
- * until it is reloaded or left: removal is from the screen and its controls, not from the browser.)
+ * press (see the limits below), is not stopped here. Some components fence their own late answers (GoalsForm, the plan
+ * view's generation since AG-WEB-READY-06-P1, the analysis report); a component without its own fence is not covered by
+ * this boundary. (What the page already loaded stays in its memory until it is reloaded or left: removal is from the
+ * screen and its controls, not from the browser.)
  *
  * Only established primitives decide; nothing here writes a credential:
  *  - End Session of the rendered lineage, in this tab or another (watchLineageEnd), ends the view.

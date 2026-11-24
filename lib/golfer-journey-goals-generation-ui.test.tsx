@@ -880,7 +880,10 @@ describe("AG-WEB-READY-05-G1: both clients send the account they were rendered f
     expect(h.nav.push).toEqual([]);
   });
 
-  it("[G1] a rendered owner the server cannot use (malformed): out-of-date guidance on both clients, nothing done", async () => {
+  // AG-WEB-READY-06-P1: the plan view now confirms its rendered owner before using any answer. A rendered owner the browser's
+  // account does not match is withheld (the whole view replaced by fixed guidance); because the server's answer was its fixed
+  // out-of-date refusal, the guidance says so (nothing was saved) rather than "may already have been saved"
+  it("[G1] a rendered owner the server cannot use (malformed): out-of-date guidance on both clients; the plan view also removes the plan; nothing done", async () => {
     h.rendered = { ownerId: "not-a-uuid", lineage: null };
     await fillAndSubmit();
     expect(text()).toContain(OUT_OF_DATE);
@@ -888,7 +891,8 @@ describe("AG-WEB-READY-05-G1: both clients send the account they were rendered f
     showPlan(V);
     await regenerate();
     expect(text()).toContain(OUT_OF_DATE);
-    expect(text()).toContain(V.summary);
+    expect(text()).not.toMatch(/may already have been saved/);
+    expect(text()).not.toContain(V.summary);
     expect(h.rec.queries).toHaveLength(0);
     expect(h.rec.calls).toBe(0);
   });

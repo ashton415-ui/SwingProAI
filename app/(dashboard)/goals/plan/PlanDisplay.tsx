@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import {
   Zap,
   ChevronDown,
@@ -16,6 +16,8 @@ import { generateSyllabus } from "../actions";
 import GoalsLoadError from "@/components/goals/GoalsLoadError";
 import { useRenderedSession } from "@/components/navigation/SessionKeeper";
 import { GOALS_COPY, toGoalPlan, type GoalPlan, type PlanCategory } from "@/lib/golfer-journey-goals-read-state";
+import { createClient } from "@/utils/supabase/client";
+import { confirmOwnerSession } from "@/lib/drill-hub-session";
 
 // ── Category styling ───────────────────────────────────────────────────────────
 
@@ -78,6 +80,47 @@ const UNCONFIRMED = "We couldn't confirm whether your new plan was saved. Reload
 const OWNER_MISMATCH =
   "This page was opened for a different account than the one signed in now, so nothing was saved or generated. Reload the page to continue with the account that's signed in.";
 const OWNER_INTENT_INVALID = "This page is out of date, so nothing was saved or generated. Reload the page to continue.";
+// AG-WEB-READY-06-P1: the answer to a generation is applied only by the view that asked for it — still on screen, not left,
+// and still showing the account this page was rendered for (useRenderedSession: the server-verified owner), confirmed when
+// the answer arrives the way owner-bound requests are (confirmOwnerSession; the managed client's ordinary session read, which
+// may renew an expiring session of that same account, as everywhere else). A confirmation can join a session read that began
+// before a sign-in was published, so a "ready" answer is confirmed once more — a fresh read, since the joined one has ended —
+// and only then applied, with no further wait (the rendered-session boundary's rule: confirmed once more, never more). That
+// second answer can only refuse. Nothing here reads the stored session itself, writes, refreshes or ends a session, and
+// nothing is adopted from the browser.
+// A request already sent is neither retried, cancelled nor compensated: the server may already have saved the plan for the
+// account it verified. When the sign-in was confirmed changed or ended, or cannot be confirmed now (an Auth outage is not a
+// sign-out), the answer is withheld and the whole view — plan, details and controls — is replaced by fixed guidance with a
+// fresh page; nothing generates by itself.
+const RESULT_SIGN_IN_CHANGED =
+  "This browser signed in to a different account before your plan's result arrived, so it isn't shown here. A new plan may already have been saved for the account this page was opened for. Reload the page to continue with the account that's signed in now.";
+const RESULT_SIGN_IN_ENDED =
+  "This page's sign-in ended before your plan's result arrived, so it isn't shown here. A new plan may already have been saved. Reload the page to continue.";
+const RESULT_ACCOUNT_UNCONFIRMED =
+  "We couldn't confirm the signed-in account, so your plan's result isn't shown here. A new plan may already have been saved. Reload My Plan to see what's saved.";
+type Withheld = "changed" | "ended" | "unconfirmed";
+const WITHHELD_COPY: Readonly<Record<Withheld, string>> = { changed: RESULT_SIGN_IN_CHANGED, ended: RESULT_SIGN_IN_ENDED, unconfirmed: RESULT_ACCOUNT_UNCONFIRMED };
+
+/**
+ * P1: a press that will leave this page in this window — a primary, unmodified press on a same-origin link to a different
+ * page (not a new tab or window, not a download, not this same page or a fragment of it). Same rule as GoalsForm's.
+ */
+function leavesThisPage(event: Event): boolean {
+  const press = event as MouseEvent;
+  if (press.defaultPrevented || (typeof press.button === "number" && press.button !== 0)) return false;
+  if (press.metaKey || press.ctrlKey || press.shiftKey || press.altKey) return false;
+  const target = press.target as { closest?: (selector: string) => unknown } | null;
+  const link = target && typeof target.closest === "function" ? (target.closest("a[href]") as HTMLAnchorElement | null) : null;
+  if (!link) return false;
+  const opens = link.getAttribute("target");
+  if ((opens && opens !== "_self") || link.hasAttribute("download")) return false;
+  try {
+    const to = new URL(link.getAttribute("href") ?? "", window.location.href);
+    return to.origin === window.location.origin && (to.pathname !== window.location.pathname || to.search !== window.location.search);
+  } catch {
+    return false;
+  }
+}
 interface Notice {
   text: string;
   /** "error": nothing new was attempted or stored; "info": an observed outcome other than saved; "ok": saved. */
@@ -98,6 +141,65 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [openWeek, setOpenWeek] = useState<number>(0);
+  // P1: the answer to a generation was withheld (the sign-in changed, ended or could not be confirmed when it arrived). When
+  // the server's answer was itself a fixed G1 refusal (nothing was saved), that known outcome is said instead of "may already
+  // have been saved"; it carries no data either way.
+  const [withheld, setWithheld] = useState<{ kind: Withheld; refusal: "owner_mismatch" | "owner_intent_invalid" | null } | null>(null);
+  // P1: the fixed guidance takes keyboard focus when it replaces the view (its controls are gone)
+  const guidanceRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (withheld) guidanceRef.current?.focus();
+  }, [withheld]);
+  // P1: false once this view is no longer on screen (the golfer left, or the dashboard shell was removed)
+  const liveRef = useRef(true);
+  // P1: the golfer chose to leave while an answer was pending — a link pressed, or back/forward. The app router queues that
+  // navigation behind the running Server Action, so the view is still mounted when the answer arrives; the answer must not
+  // then be applied over that choice.
+  const departedRef = useRef(false);
+  useEffect(() => {
+    liveRef.current = true;
+    if (typeof document === "undefined" || typeof window === "undefined") {
+      return () => {
+        liveRef.current = false;
+      };
+    }
+    const onPress = (event: Event) => {
+      if (leavesThisPage(event)) departedRef.current = true;
+    };
+    const onHistory = () => {
+      departedRef.current = true;
+    };
+    document.addEventListener("click", onPress, true);
+    window.addEventListener("popstate", onHistory);
+    return () => {
+      liveRef.current = false;
+      document.removeEventListener("click", onPress, true);
+      window.removeEventListener("popstate", onHistory);
+    };
+  }, []);
+
+  /** P1: whether the answer that just arrived may be applied by this view, and if not, what to show instead. */
+  async function mayApplyAnswer(): Promise<"apply" | "drop" | Withheld> {
+    if (!liveRef.current || departedRef.current) return "drop";
+    if (rendered === null) return "unconfirmed"; // no rendered account to apply it to
+    const ownerId = rendered.ownerId;
+    const confirm = async (): Promise<Awaited<ReturnType<typeof confirmOwnerSession>>> => {
+      try {
+        return await confirmOwnerSession(() => createClient(), ownerId);
+      } catch {
+        return { status: "unavailable" };
+      }
+    };
+    const refusal = (status: string): Withheld =>
+      status === "account_changed" ? "changed" : status === "signed_out" || status === "ended" ? "ended" : "unconfirmed";
+    const first = await confirm();
+    if (!liveRef.current || departedRef.current) return "drop";
+    if (first.status !== "ready") return refusal(first.status);
+    // the first read may have joined one that began before a sign-in was published: confirm once more (never more)
+    const again = await confirm();
+    if (!liveRef.current || departedRef.current) return "drop";
+    return again.status === "ready" ? "apply" : refusal(again.status);
+  }
 
   function run() {
     setNotice(null);
@@ -108,12 +210,31 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
       setNotice({ text: OWNER_INTENT_INVALID, tone: "error", reload: true, owner: true });
       return;
     }
+    departedRef.current = false; // only a departure while this request's answer is pending counts
     startTransition(async () => {
       let result: Awaited<ReturnType<typeof generateSyllabus>> | undefined;
       try {
         result = await generateSyllabus(owner);
       } catch {
         result = undefined;
+      }
+      // P1: nothing of the answer — plan, view instruction or message, including a refusal or a missing answer — is used
+      // until this view is confirmed to still be the one that asked, for the account it was rendered for
+      const may = await mayApplyAnswer();
+      // this continuation resumes after an await of its own, so the view is checked again here, before anything of the
+      // answer (its outcome, refusal code, plan, display instruction or message) is used: a view that is gone does nothing
+      // at all; a view that was left while the helper returned shows only fixed, data-free uncertainty (the plan may already
+      // be saved), never a result, and never overrides the chosen navigation
+      if (!liveRef.current) return;
+      if (may === "drop" || departedRef.current) {
+        setNotice({ text: UNCONFIRMED, tone: "info", reload: true });
+        return;
+      }
+      if (may !== "apply") {
+        // only the fixed refusal code is read here, to say "nothing was saved" truthfully; no plan, state or message is used
+        const refusal = result && (result.outcome === "owner_mismatch" || result.outcome === "owner_intent_invalid") ? result.outcome : null;
+        setWithheld({ kind: may, refusal });
+        return;
       }
       // the action failed (dropped connection) or came back without a result (Next resolves undefined when the
       // response is not a Server Action response, e.g. a platform timeout page): a write may or may not have happened,
@@ -180,6 +301,27 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
       )}
     </div>
   );
+
+  // ── P1: the answer was withheld — the whole account-bearing view is replaced by fixed guidance ─────────
+
+  if (withheld) {
+    const copy = withheld.refusal === "owner_mismatch" ? OWNER_MISMATCH : withheld.refusal === "owner_intent_invalid" ? OWNER_INTENT_INVALID : WITHHELD_COPY[withheld.kind];
+    return (
+      <div className="max-w-md mx-auto text-center py-12">
+        {/* guidance (the rendered-session boundary lets its own controls act); no plan, detail or generation control remains */}
+        <div ref={guidanceRef} tabIndex={-1} role="status" data-rendered-session-guidance="plan" className="bg-golf-header border border-white/5 rounded-2xl p-7 focus:outline-none">
+          <p className="text-sm text-gray-300 mb-2 break-words">{copy}</p>
+          {/* a document link on purpose: a fresh server render for the account signed in now; nothing generates by itself */}
+          <a
+            href="/goals/plan"
+            className={`mt-4 inline-flex items-center justify-center min-h-11 min-w-11 px-5 rounded-xl bg-golf-green hover:bg-golf-green/90 text-sm font-black uppercase tracking-widest text-white transition-colors ${FOCUS_RING}`}
+          >
+            {withheld.kind === "unconfirmed" && withheld.refusal === null ? "Reload My Plan" : "Reload page"}
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   // ── No goals yet ─────────────────────────────────────────────────────────
 
