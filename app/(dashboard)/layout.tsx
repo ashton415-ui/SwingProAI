@@ -12,7 +12,8 @@ import {
 } from "@/components/navigation/dashboard-navigation";
 import MobileDashboardNavigation from "@/components/navigation/MobileDashboardNavigation";
 import EndSessionForm from "@/components/navigation/EndSessionForm";
-import SessionKeeper, { RenderedSessionProvider } from "@/components/navigation/SessionKeeper";
+import SessionKeeper from "@/components/navigation/SessionKeeper";
+import RenderedSessionBoundary from "@/components/navigation/RenderedSessionBoundary";
 import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 
 export const dynamic = "force-dynamic";
@@ -58,6 +59,10 @@ export default async function DashboardLayout({ children }: { children: React.Re
     <div className="flex min-h-screen bg-golf-dark">
       {/* The browser keeps the session current (the server never refreshes it) */}
       <SessionKeeper />
+      {/* F1: the whole account-bearing shell (sidebar, phone/tablet navigation and the page) belongs to the account and
+          session lineage this layout was rendered for; when this browser's sign-in is confirmed to no longer be that one,
+          the boundary removes it and shows fixed guidance (components/navigation/RenderedSessionBoundary.tsx). */}
+      <RenderedSessionBoundary ownerId={user.id} lineage={endSessionLineage}>
       {/* Desktop sidebar — visible only at lg (>=1024px) and wider */}
       <aside className="hidden lg:flex w-64 bg-golf-header border-r border-white/5 flex-col fixed h-full overflow-y-auto">
         {/* Logo */}
@@ -137,11 +142,11 @@ export default async function DashboardLayout({ children }: { children: React.Re
       <main
         className="flex-1 min-w-0 min-h-screen pt-[calc(3.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:ml-16 md:pb-[env(safe-area-inset-bottom)] lg:ml-64 lg:pt-0 lg:pb-0"
       >
-        {/* A3: the pages below send their requests only as the account this layout was rendered for (no token) */}
-        <RenderedSessionProvider ownerId={user.id} lineage={endSessionLineage}>
-          {children}
-        </RenderedSessionProvider>
+        {/* A3: the pages below send their requests only as the account this layout was rendered for (no token); the
+            boundary above provides that account (RenderedSessionProvider) */}
+        {children}
       </main>
+      </RenderedSessionBoundary>
     </div>
   );
 }

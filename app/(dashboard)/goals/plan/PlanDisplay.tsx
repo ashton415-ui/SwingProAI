@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { generateSyllabus } from "../actions";
 import GoalsLoadError from "@/components/goals/GoalsLoadError";
+import { useRenderedSession } from "@/components/navigation/SessionKeeper";
 import { GOALS_COPY, toGoalPlan, type GoalPlan, type PlanCategory } from "@/lib/golfer-journey-goals-read-state";
 
 // ── Category styling ───────────────────────────────────────────────────────────
@@ -69,15 +70,26 @@ interface Props {
 
 type View = "plan" | "unreadable" | "goal_missing";
 const UNCONFIRMED = "We couldn't confirm whether your new plan was saved. Reload My Plan to see what's saved.";
+// AG-WEB-READY-05-G1: a plan is requested only for the account this view was rendered for (useRenderedSession: the
+// server-verified owner), sent as generateSyllabus's one argument — never the account the browser happens to hold when the
+// request leaves. The server refuses before reading a goal or calling the provider when the verified caller is another
+// account, or when no usable owner was sent; with no rendered owner nothing is sent at all. The plan on screen stays, a
+// fixed message says nothing was generated, and a fresh page (a document link) is offered; nothing is retried.
+const OWNER_MISMATCH =
+  "This page was opened for a different account than the one signed in now, so nothing was saved or generated. Reload the page to continue with the account that's signed in.";
+const OWNER_INTENT_INVALID = "This page is out of date, so nothing was saved or generated. Reload the page to continue.";
 interface Notice {
   text: string;
   /** "error": nothing new was attempted or stored; "info": an observed outcome other than saved; "ok": saved. */
   tone: "error" | "info" | "ok";
   /** The outcome came from the content readback: offer a fresh, server-rendered view of what is saved. */
   reload: boolean;
+  /** G1: an ownership refusal — rendered as guidance the rendered-session boundary lets act, with "Reload page". */
+  owner?: boolean;
 }
 
 export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
+  const rendered = useRenderedSession();
   const [isPending, startTransition] = useTransition();
   // AG-S1: only a plan that came from storage is ever shown — the page's own read, or the boundary's content
   // readback after an attempt. A generated plan the server could not confirm never replaces it.
@@ -90,10 +102,16 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
   function run() {
     setNotice(null);
     setConfirming(false);
+    // G1: no rendered owner, nothing to request a plan as (never the cookie's account): fixed guidance, no request
+    const owner = rendered?.ownerId ?? null;
+    if (owner === null) {
+      setNotice({ text: OWNER_INTENT_INVALID, tone: "error", reload: true, owner: true });
+      return;
+    }
     startTransition(async () => {
       let result: Awaited<ReturnType<typeof generateSyllabus>> | undefined;
       try {
-        result = await generateSyllabus();
+        result = await generateSyllabus(owner);
       } catch {
         result = undefined;
       }
@@ -102,6 +120,12 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
       // so the last verified plan stays and the golfer is told what is actually known
       if (!result || typeof result.outcome !== "string") {
         setNotice({ text: UNCONFIRMED, tone: "info", reload: true });
+        return;
+      }
+      // G1: refused before any work (another account is signed in now, or no usable owner was sent): the plan on screen
+      // stays exactly as it is; fixed copy and a fresh page
+      if (result.outcome === "owner_mismatch" || result.outcome === "owner_intent_invalid") {
+        setNotice({ text: result.outcome === "owner_mismatch" ? OWNER_MISMATCH : OWNER_INTENT_INVALID, tone: "error", reload: true, owner: true });
         return;
       }
       if (result.display === "stored_plan" && result.plan) {
@@ -131,7 +155,7 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
   }
 
   const noticeBlock = notice && (
-    <div className="mt-3">
+    <div className="mt-3" {...(notice.owner ? { "data-rendered-session-guidance": "plan" } : {})}>
       <p
         role={notice.tone === "error" ? "alert" : "status"}
         className={`text-xs rounded-lg px-3 py-2 border break-words ${
@@ -151,7 +175,7 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
           href="/goals/plan"
           className={`mt-2 inline-flex items-center justify-center min-h-11 min-w-11 px-4 rounded-xl border border-white/10 text-sm font-medium text-gray-300 hover:text-white hover:bg-white/5 transition-colors ${FOCUS_RING}`}
         >
-          Reload My Plan
+          {notice.owner ? "Reload page" : "Reload My Plan"}
         </a>
       )}
     </div>

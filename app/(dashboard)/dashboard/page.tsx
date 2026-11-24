@@ -187,7 +187,7 @@ export default async function DashboardPage() {
             <Zap size={12} className="text-golf-green" />
             Recent Telemetry Logs
           </h3>
-          <button className="text-[9px] font-bold text-gray-600 hover:text-white transition-colors flex items-center gap-2 uppercase tracking-widest">
+          <button type="button" className="inline-flex items-center justify-center gap-2 min-h-11 min-w-11 px-3 -mr-3 rounded-xl text-[9px] font-bold text-gray-600 hover:text-white transition-colors uppercase tracking-widest">
             <Filter size={12} />
             Filter
           </button>
@@ -199,7 +199,7 @@ export default async function DashboardPage() {
             <p>Telemetry Array Empty</p>
             <Link
               href="/analyze"
-              className="px-5 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all"
+              className="inline-flex items-center justify-center min-h-11 px-5 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all"
             >
               Upload First Swing
             </Link>
@@ -349,7 +349,7 @@ function ProgressHubHeader() {
         </div>
         <Link
           href="/analyze"
-          className="px-6 py-3 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_20px_rgba(74,222,128,0.15)] text-[10px] uppercase tracking-widest"
+          className="min-h-11 px-6 py-3 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_20px_rgba(74,222,128,0.15)] text-[10px] uppercase tracking-widest"
         >
           <Target size={14} />
           Analyze Swing

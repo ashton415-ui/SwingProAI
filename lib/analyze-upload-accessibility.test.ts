@@ -49,18 +49,31 @@ describe("analyze page upload controls are keyboard reachable", () => {
 });
 
 describe("report status pill agrees with the failure panel", () => {
-  // Found by local browser acceptance: after a definite provider failure the
-  // panel said "Analysis Failed" while the pill still showed the initial
-  // "pending" from the server render.
-  it("the processing state reports failure to its parent and clears it on Retry", () => {
-    expect(report).toMatch(/setError\(res\.error\);\s*onFailed\?\.\(true\);/);
-    expect(report).toMatch(/setError\(NETWORK_FAILURE_COPY\);\s*onFailed\?\.\(true\);/);
-    expect(report).toMatch(/setError\(null\); onFailed\?\.\(false\);/);
-    expect(report).toContain("onFailed={setFailedNow}");
+  // Found by local browser acceptance (ENT-1D): after a definite provider
+  // failure the panel said "Analysis Failed" while the pill still showed the
+  // initial "pending" from the server render. AG-WEB-READY-04 F1 / F1-A1: the
+  // pill shows what the page knows about the saved status. Only the server's
+  // video-unusable answer makes it "failed"; a readable 500/400 (an attempt
+  // that may have recorded a failure) makes it "unconfirmed"; a 503, an
+  // unreachable server, an unreadable or malformed answer, or one showing the
+  // status may be out of date (404, 409) keeps the status the page last knew,
+  // labelled "Last known status"; and only a valid
+  // completed answer for this analysis replaces it. These are source checks;
+  // lib/web-ready04-report-status.test.tsx renders every case.
+  it("each answer reaches the parent as what it is: a stored failure, an unconfirmed attempt or an ambiguous outcome", () => {
+    expect(report).toMatch(/if \(unusable\) onStoredFailure\?\.\(\);\s*else if \(kind === "attempt"\) onStatusNote\?\.\("unconfirmed"\);\s*else if \(kind === "unavailable" \|\| kind === "unknown" \|\| \(kind === "refused" && \(httpStatus === 404 \|\| httpStatus === 409\)\)\) onStatusNote\?\.\("last_known"\);/);
+    expect(report).toMatch(/setError\(NETWORK_FAILURE_COPY\);\s*onStatusNote\?\.\("last_known"\);/);
+    expect(report).toMatch(/const completed = completedAnalysis\(\(res as \{ data\?: unknown \}\)\.data, analysisId\);/);
+    expect(report).toMatch(/if \(d\.id !== analysisId \|\| d\.status !== "complete"\) return null;/);
+    expect(report).toContain("onComplete(completed);");
+    expect(report).not.toMatch(/onComplete\(res\.data|onFailed|setFailedNow/);
   });
 
-  it("the pill shows failed while the failure is displayed", () => {
-    expect(report).toContain('{isStalled ? "interrupted" : failedNow ? "failed" : analysis.status}');
+  it("the pill shows failed only for a stored failure and labels a status it cannot confirm as last known", () => {
+    expect(report).toContain('{isStalled ? "interrupted" : storedFailedNow ? "failed" : statusNote === "unconfirmed" ? "unconfirmed" : analysis.status}');
+    expect(report).toContain('const LAST_KNOWN_LABEL = "Last known status";');
+    expect(report).toContain('const lastKnown = statusNote === "last_known" && !storedFailedNow && !isStalled;');
+    expect(report).toContain('{lastKnown ? LAST_KNOWN_LABEL : "Status"}');
   });
 });
 

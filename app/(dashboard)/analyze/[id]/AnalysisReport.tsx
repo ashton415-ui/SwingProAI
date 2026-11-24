@@ -22,6 +22,47 @@ import { useRenderedSession } from "@/components/navigation/SessionKeeper";
 
 const NETWORK_FAILURE_COPY = "We couldn't reach SwingProAI. Check your connection, then tap Retry.";
 const SERVICE_FAILURE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
+// F1 (AG-WEB-READY-04): an answer that is not the route's JSON (a gateway page, a cut-off body) says nothing about the
+// analysis itself: its outcome is unknown, so the page says so and keeps the status it last knew.
+const UNKNOWN_OUTCOME_COPY = "We couldn't confirm what happened with this request. Your swing is saved. Reload to see its current status, or retry.";
+// F1 review (QA B1 / security F-6): the route answers a readable 500 (and, to this page's request, a 400) after an attempt
+// that may have recorded the analysis as failed (a provider or save failure) — or before anything was recorded (a read
+// error). The page cannot tell which, so it claims neither: the stored status is shown as unconfirmed until a reload.
+const ATTEMPT_COPY = "This attempt didn't complete, so its result isn't confirmed. Your swing is saved. Reload to see this analysis's current status, or retry.";
+// F1 review (QA S2): a 401 means this request's sign-in was not accepted; nothing was analyzed.
+const SIGN_IN_AGAIN_COPY = "We couldn't confirm your sign-in for this request, so nothing was analyzed. Sign in again, then retry.";
+// F1-A1 (R2): a refusal whose answer carries no readable message of its own.
+const REFUSED_COPY = "This request wasn't accepted. Your swing is saved.";
+// F1-A1 (R1): after a 503, an unreachable server or an unreadable answer the page cannot know whether the saved status
+// changed (the route sends the same 503 body before a claim and after an undispatched claim was released as failed, by
+// design without saying which). It keeps showing the status it last knew, labelled as such, and invents nothing.
+const LAST_KNOWN_LABEL = "Last known status";
+const LAST_KNOWN_NOTE = "Not confirmed since this request. Reload to check.";
+
+/**
+ * F1-A1: what the page knows about the saved status after this page's latest request. `null`: what the server rendered
+ * or a completed answer returned. "last_known": the request may or may not have changed it (shown with its label).
+ * "unconfirmed": the request may have recorded a failure (a readable 500, or a 400 to this page's request).
+ */
+export type StatusNote = "last_known" | "unconfirmed";
+
+/**
+ * F1 (AG-WEB-READY-04): what the latest request of this page ended with, kept apart from the analysis's stored status.
+ * Only "unusable" is the server reporting the stored analysis as failed (its video cannot be read); every other kind
+ * describes this request alone: a refused or unavailable request, an unreachable server or an unreadable answer never
+ * turns a pending analysis into a failed one on this page.
+ */
+type RequestProblem = "identity" | "signin" | "unavailable" | "network" | "unknown" | "refused" | "attempt" | "unusable";
+const PROBLEM_HEADING: Readonly<Record<RequestProblem, string>> = {
+  identity: "Sign-in not confirmed",
+  signin: "Sign-in not confirmed",
+  unavailable: "Analysis unavailable right now",
+  network: "Couldn't reach SwingProAI",
+  unknown: "Result not confirmed",
+  refused: "Request not accepted",
+  attempt: "This attempt didn't complete",
+  unusable: "Analysis Failed",
+};
 
 // A4 (C1). This report's analysis call is sent only as the account the dashboard layout rendered the page for: with that
 // account's token, confirmed immediately before the request (lib/drill-hub-session.ts confirmOwnerSession; never a
@@ -97,6 +138,42 @@ export interface AnalysisData {
     club: string | null;
     created_at: string;
   } | null;
+}
+
+/**
+ * F1-A1 (R2): the completed analysis an answer carries, only when it is exactly that: an object for the analysis this
+ * page asked about, completed, with the containers this view renders in their expected form (each may be null). Any other
+ * body (empty, `{error: ""}`, missing/null/array data, another analysis, a status other than complete) replaces nothing.
+ * The fields this view renders as text must be text when present (an object there could not be rendered); nothing
+ * else is validated: the server returns its own sanitised record (lib/analysis-result-read-authority.ts), which passes.
+ */
+function completedAnalysis(data: unknown, analysisId: string): AnalysisData | null {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+  const d = data as Record<string, unknown>;
+  if (d.id !== analysisId || d.status !== "complete") return null;
+  const absent = (v: unknown) => v === null || v === undefined;
+  const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
+  const text = (o: Record<string, unknown>, keys: readonly string[]) => keys.every((k) => absent(o[k]) || typeof o[k] === "string");
+  const listOf = (v: unknown, ok: (item: Record<string, unknown>) => boolean) => absent(v) || (Array.isArray(v) && v.every((item) => record(item) && ok(item)));
+  const highlightOk = (h: Record<string, unknown>) => text(h, ["checkpoint", "positive_movement", "mechanical_benefit"]);
+  // a location is direct text, or an object whose joint is text (or absent / null): its label is joined as text
+  const jointOk = (v: unknown) => absent(v) || typeof v === "string" || (record(v) && text(v, ["joint"]));
+  // the severity chip shows "Major" for "major" and "Minor" for anything else that is not null: only the server's own
+  // values (assessedSeverity: "minor", "major" or null) may reach it, so no severity is invented
+  const severityOk = (v: unknown) => v === null || v === "minor" || v === "major";
+  const deficiencyOk = (f: Record<string, unknown>) =>
+    text(f, ["checkpoint", "fault_description", "corrective_drill_title", "corrective_drill_detail"])
+    && severityOk(f.severity)
+    && jointOk(f.joint_coordinate);
+  const pillarOk = (v: unknown) => absent(v) || (record(v) && text(v, ["rating", "observation", "correction"]));
+  const metricsOk = (v: unknown) => absent(v) || (record(v)
+    && text(v, ["scoring_breakdown", "evidence_limits", "practice_focus", "pro_cue", "the_feel"])
+    && pillarOk(v.posture) && pillarOk(v.swing_plane) && pillarOk(v.impact));
+  if (!listOf(d.swing_highlights, highlightOk) || !listOf(d.mechanical_deficiencies, deficiencyOk) || !metricsOk(d.metrics)) return null;
+  // the player renders the video's filename as text (absent / null: none shown)
+  if (!absent(d.swing_video) && !(record(d.swing_video) && text(d.swing_video, ["original_filename"]))) return null;
+  if (!absent(d.feedback) && typeof d.feedback !== "string") return null;
+  return d as unknown as AnalysisData;
 }
 
 interface Props {
@@ -186,7 +263,8 @@ function ProcessingState({
   renderedOwner,
   onComplete,
   onStalled,
-  onFailed,
+  onStoredFailure,
+  onStatusNote,
 }: {
   analysisId: string;
   /** A4: the account this report was rendered for (taken once), or null outside the dashboard layout: nothing is sent */
@@ -197,12 +275,17 @@ function ProcessingState({
   renderedOwner: string | null;
   onComplete: (data: AnalysisData) => void;
   onStalled?: () => void;
-  // Set while the failure panel is shown, cleared on Retry, so the status pill
-  // agrees with the body (it otherwise still showed the initial "pending").
-  onFailed?: (failed: boolean) => void;
+  // F1: called only when the server reports the stored analysis failed (its video cannot be read), so the status pill
+  // shows "failed" for that and nothing else; a request that was refused, unavailable or unanswered leaves the pill on
+  // the status the page last knew.
+  onStoredFailure?: () => void;
+  /** F1-A1: what this request leaves known about the saved status (see StatusNote) */
+  onStatusNote?: (note: StatusNote) => void;
 }) {
   const [step, setStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // F1: what kind of outcome `error` describes (its heading and recovery action); never a stored status by itself.
+  const [problem, setProblem] = useState<RequestProblem>("attempt");
   // A4 (C1). Shown instead of an answer that arrived after this browser's sign-in changed.
   const [identityNotice, setIdentityNotice] = useState(false);
   // A4 (C1). False once the report has been left: an answer arriving afterwards changes nothing.
@@ -306,8 +389,8 @@ function ProcessingState({
       if (ended !== null && confirmed.status === "ready") confirmed = { status: ended };
       if (confirmed.status !== "ready") {
         clearInterval(interval);
+        setProblem("identity"); // nothing was sent: the analysis is exactly as it was
         setError(OWNER_REFUSAL_COPY[confirmed.status]);
-        onFailed?.(true);
         return;
       }
       await fetch("/api/analyze-swing", {
@@ -319,27 +402,74 @@ function ProcessingState({
       })
       // A response that is not JSON (a gateway error page) is the service's
       // failure, not the golfer's connection.
-      .then(async (r) => ({
-        httpStatus: r.status,
-        res: await r.json().catch(() => ({ error: SERVICE_FAILURE_COPY })),
-      }))
-      .then(({ httpStatus, res }) => {
+      .then(async (r) => {
+        let readable = true;
+        let res = await r.json().catch(() => {
+          readable = false;
+          return { error: SERVICE_FAILURE_COPY };
+        });
+        // valid JSON that is not the route's answer (null, a list, an error that is not text) is not read as one
+        if (res === null || typeof res !== "object" || Array.isArray(res) || ("error" in res && typeof res.error !== "string")) {
+          readable = false;
+          res = { error: SERVICE_FAILURE_COPY };
+        }
+        // F1-A1: the route reports a stored, unusable video only with 422; the same field with any other status is not that
+        if (r.status !== 422 && res.status === VIDEO_UNUSABLE_STATUS) res = { ...res, status: null };
+        return { httpStatus: r.status, res, readable };
+      })
+      .then(({ httpStatus, res, readable }) => {
         // A4 (C1): checked after the whole answer has been read
         if (obsolete()) return;
         clearInterval(interval);
         if (httpStatus === 409 && res.status === "processing") {
           setInProgressNotice(res.error ?? "This analysis is already in progress.");
+          onStatusNote?.("last_known"); // the server reports work in progress: the pending shown is only what the page last knew
         } else if (httpStatus === 409 && res.status === "stalled") {
           setStalledNotice(res.error ?? "This analysis was interrupted and can't be finished.");
           onStalled?.();
-        } else if (res.error) {
+        } else if (!(httpStatus >= 200 && httpStatus < 300) || !readable || "error" in res) {
+          // an error answer, an unreadable one, or a 2xx that carries an error: never a completion (R2)
           setVideoUnusable(res.status === VIDEO_UNUSABLE_STATUS);
-          setError(res.error);
-          onFailed?.(true);
+          const unusable = res.status === VIDEO_UNUSABLE_STATUS;
+          // F1: the kind of outcome decides the heading and action; only the server's video-unusable answer reports
+          // the stored analysis as failed.
+          // F1 review: a readable 500 (other than 503) or 400 may follow a recorded failure — the stored status is then
+          // unconfirmed (never asserted pending, never invented failed). A 503 is shown as unavailable and keeps the last
+          // known status (the work order's rule for 503): most 503s refuse before the claim, but two answered after a
+          // claim that could not be dispatched also record the analysis failed (route.ts, undispatched release) — the
+          // status shown can then lag until a reload (recorded limitation).
+          const kind: RequestProblem =
+            unusable ? "unusable"
+            : !readable || (httpStatus >= 200 && httpStatus < 300) ? "unknown"
+            : httpStatus === 503 ? "unavailable"
+            : httpStatus === 401 ? "signin"
+            : httpStatus >= 500 || httpStatus === 400 ? "attempt"
+            : "refused";
+          // the route's own message only when it is one (an empty or missing error is never shown as text)
+          const routeCopy = typeof res.error === "string" && res.error.trim() !== "" ? res.error : null;
+          setProblem(kind);
+          setError(
+            kind === "unknown" ? UNKNOWN_OUTCOME_COPY
+            : kind === "attempt" ? ATTEMPT_COPY
+            : kind === "signin" ? SIGN_IN_AGAIN_COPY
+            : kind === "unavailable" ? routeCopy ?? SERVICE_FAILURE_COPY
+            : routeCopy ?? REFUSED_COPY,
+          );
+          if (unusable) onStoredFailure?.();
+          else if (kind === "attempt") onStatusNote?.("unconfirmed");
+          else if (kind === "unavailable" || kind === "unknown" || (kind === "refused" && (httpStatus === 404 || httpStatus === 409))) onStatusNote?.("last_known");
         } else {
+          // F1-A1 (R2): only the completed analysis this page asked about replaces it
+          const completed = completedAnalysis((res as { data?: unknown }).data, analysisId);
+          if (completed === null) {
+            setProblem("unknown");
+            setError(UNKNOWN_OUTCOME_COPY);
+            onStatusNote?.("last_known");
+            return;
+          }
           // Clean up sessionStorage entry now that the API has consumed it
           try { sessionStorage.removeItem(`mediapipe_${analysisId}`); } catch { /* ignore */ }
-          onComplete(res.data as AnalysisData);
+          onComplete(completed);
         }
       })
       .catch(() => {
@@ -347,13 +477,14 @@ function ProcessingState({
         clearInterval(interval);
         // A network failure surfaces as the browser's own text ("Failed to
         // fetch"), which tells a golfer nothing; the copy says what to do.
+        setProblem("network"); // the request may or may not have arrived: the page shows the status it last knew, as such
         setError(NETWORK_FAILURE_COPY);
-        onFailed?.(true);
+        onStatusNote?.("last_known");
       });
     })();
 
     return () => clearInterval(interval);
-  }, [analysisId, ownerId, onComplete, onStalled, onFailed, attempt]);
+  }, [analysisId, ownerId, onComplete, onStalled, onStoredFailure, onStatusNote, attempt]);
 
   if (identityNotice) {
     return (
@@ -410,13 +541,14 @@ function ProcessingState({
   }
 
   if (error) {
+    const stored = problem === "unusable";
     return (
       <div className="text-center py-16 max-w-sm mx-auto">
-        <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
-          <AlertCircle className="w-7 h-7 text-red-400" />
+        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 ${stored ? "bg-red-500/10 border border-red-500/20" : "bg-amber-500/10 border border-amber-500/20"}`}>
+          <AlertCircle className={`w-7 h-7 ${stored ? "text-red-400" : "text-amber-400"}`} />
         </div>
-        <p className="text-white font-bold mb-2">Analysis Failed</p>
-        <p className="text-sm text-red-400 mb-6">{error}</p>
+        <p className="text-white font-bold mb-2">{PROBLEM_HEADING[problem]}</p>
+        <p role={stored ? undefined : "status"} className={`text-sm mb-6 ${stored ? "text-red-400" : "text-gray-300"}`}>{error}</p>
         {videoUnusable ? (
           <a
             href="/analyze"
@@ -426,11 +558,19 @@ function ProcessingState({
           </a>
         ) : (
         <button
-          onClick={() => { setError(null); onFailed?.(false); setStep(0); setAttempt((a) => a + 1); }}
+          onClick={() => { setError(null); setStep(0); setAttempt((a) => a + 1); }}
           className="flex items-center gap-2 mx-auto px-5 py-2.5 min-h-[44px] rounded-xl border border-white/10 text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
         >
           <RotateCcw className="w-3.5 h-3.5" /> Retry
         </button>
+        )}
+        {problem === "signin" && (
+          <a
+            href="/login"
+            className="mt-3 inline-flex items-center justify-center mx-auto px-5 py-2.5 min-h-[44px] rounded-xl text-sm font-bold text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+          >
+            Sign in
+          </a>
         )}
       </div>
     );
@@ -744,8 +884,13 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
   // ENT-1D. Set when the server reports the analysis stalled, so the status
   // pill agrees with the body.
   const [isStalled, setIsStalled] = useState(false);
-  // Set while this page's own request is showing a failure.
-  const [failedNow, setFailedNow] = useState(false);
+  // F1: set only when this page's request was answered that the stored analysis failed (its video cannot be read). A
+  // refused, unavailable, unreachable or unreadable request never changes the status the page shows.
+  const [storedFailedNow, setStoredFailedNow] = useState(false);
+  // F1-A1: what this page's requests leave known about the saved status (StatusNote); cleared only by completed data.
+  // "unconfirmed" (a failure may have been recorded) is not weakened by a later "last_known" answer.
+  const [statusNote, setStatusNote] = useState<StatusNote | null>(null);
+  const lastKnown = statusNote === "last_known" && !storedFailedNow && !isStalled;
 
   const showProcessing = isPending || isProcessing || forceReanalyze;
 
@@ -767,14 +912,16 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
             </p>
           </div>
           <div className="text-right">
-            <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-0.5">Status</p>
-            <span className={`text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border ${
+            <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-0.5">{lastKnown ? LAST_KNOWN_LABEL : "Status"}</p>
+            <span aria-describedby={lastKnown ? "report-status-note" : undefined} className={`text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border ${
               isComplete ? "bg-golf-green/10 border-golf-green/25 text-golf-green" :
-              isFailed || (failedNow && !isStalled) ? "bg-red-500/10 border-red-500/25 text-red-400" :
+              statusNote === "unconfirmed" && !storedFailedNow && !isStalled ? "bg-amber-500/10 border-amber-500/25 text-amber-400" :
+              isFailed || (storedFailedNow && !isStalled) ? "bg-red-500/10 border-red-500/25 text-red-400" :
                            "bg-amber-500/10 border-amber-500/25 text-amber-400"
             }`}>
-              {isStalled ? "interrupted" : failedNow ? "failed" : analysis.status}
+              {isStalled ? "interrupted" : storedFailedNow ? "failed" : statusNote === "unconfirmed" ? "unconfirmed" : analysis.status}
             </span>
+            {lastKnown && <p id="report-status-note" className="mt-1.5 text-xs text-gray-300 max-w-[11rem] ml-auto">{LAST_KNOWN_NOTE}</p>}
           </div>
         </div>
 
@@ -791,9 +938,10 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
             ownerId={ownerRef.current}
             lineage={lineageRef.current}
             renderedOwner={rendered?.ownerId ?? null}
-            onComplete={(data) => { setForceReanalyze(false); setFailedNow(false); setAnalysis(data); }}
+            onComplete={(data) => { setForceReanalyze(false); setStoredFailedNow(false); setStatusNote(null); setAnalysis(data); }}
             onStalled={() => setIsStalled(true)}
-            onFailed={setFailedNow}
+            onStoredFailure={() => setStoredFailedNow(true)}
+            onStatusNote={(note) => setStatusNote((known) => (known === "unconfirmed" ? known : note))}
           />
         )}
 

@@ -1969,12 +1969,19 @@ describe("A3 (F1): the dashboard layout's rendered account reaches its client pa
     expect(renderToStaticMarkup(React.createElement(Probe))).toBe("<output>null</output>");
     const { readFileSync } = await import("node:fs");
     const layout = readFileSync(new URL("../app/(dashboard)/layout.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-    expect(layout).toContain('import SessionKeeper, { RenderedSessionProvider } from "@/components/navigation/SessionKeeper";');
-    expect(layout).toMatch(/<main[\s\S]*<RenderedSessionProvider ownerId=\{user\.id\} lineage=\{endSessionLineage\}>\s*\{children\}\s*<\/RenderedSessionProvider>\s*<\/main>/);
+    // AG-WEB-READY-04 F1: the layout wraps its whole account-bearing shell (sidebar, phone/tablet navigation and the page)
+    // in RenderedSessionBoundary, which provides exactly this RenderedSessionProvider to everything below it
+    expect(layout).toContain('import SessionKeeper from "@/components/navigation/SessionKeeper";');
+    expect(layout).toContain('import RenderedSessionBoundary from "@/components/navigation/RenderedSessionBoundary";');
+    expect(layout).toMatch(/<SessionKeeper \/>[\s\S]*<RenderedSessionBoundary ownerId=\{user\.id\} lineage=\{endSessionLineage\}>[\s\S]*<aside[\s\S]*<MobileDashboardNavigation[\s\S]*<main[\s\S]*\{children\}\s*<\/main>\s*<\/RenderedSessionBoundary>\s*<\/div>/);
     // the verified owner comes from the server's own verification, the lineage from the same token; no token is passed
     expect(layout).toContain("const session = await getServerSession();");
-    const element = layout.match(/<RenderedSessionProvider[^>]*>/g) ?? [];
-    expect(element).toEqual(["<RenderedSessionProvider ownerId={user.id} lineage={endSessionLineage}>"]);
+    const element = layout.match(/<RenderedSessionBoundary[^>]*>/g) ?? [];
+    expect(element).toEqual(["<RenderedSessionBoundary ownerId={user.id} lineage={endSessionLineage}>"]);
+    expect(layout).not.toMatch(/<RenderedSessionProvider/); // provided by the boundary, not twice
+    const boundary = readFileSync(new URL("../components/navigation/RenderedSessionBoundary.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    expect(boundary).toContain('import { RenderedSessionProvider } from "@/components/navigation/SessionKeeper";');
+    expect(boundary).toMatch(/<RenderedSessionProvider ownerId=\{ownerId\} lineage=\{lineage\}>\s*\{children\}\s*<\/RenderedSessionProvider>/);
   });
 });
 

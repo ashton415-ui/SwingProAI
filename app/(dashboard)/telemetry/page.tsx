@@ -510,10 +510,10 @@ export default async function TelemetryPage() {
         </div>
 
         <div className="flex gap-2 mt-1">
-          <Link href="/range" className="px-4 py-2.5 border border-white/10 text-gray-400 hover:text-white hover:border-white/20 rounded-xl font-black flex items-center gap-2 text-[10px] uppercase tracking-widest transition-all">
+          <Link href="/range" className="min-h-11 px-4 py-2.5 border border-white/10 text-gray-400 hover:text-white hover:border-white/20 rounded-xl font-black flex items-center gap-2 text-[10px] uppercase tracking-widest transition-all">
             <Target size={13} />Range
           </Link>
-          <Link href="/analyze" className="px-4 py-2.5 bg-golf-green text-golf-dark rounded-xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all text-[10px] uppercase tracking-widest">
+          <Link href="/analyze" className="min-h-11 px-4 py-2.5 bg-golf-green text-golf-dark rounded-xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all text-[10px] uppercase tracking-widest">
             <Video size={13} />Analyze
           </Link>
         </div>
@@ -545,8 +545,8 @@ export default async function TelemetryPage() {
           <Zap size={36} className="text-gray-700" />
           <p className="text-gray-700 font-mono text-[10px] uppercase tracking-[0.3em] italic">No telemetry recorded yet</p>
           <div className="flex gap-3">
-            <Link href="/range" className="px-4 py-2.5 border border-white/10 text-gray-400 rounded-xl font-black text-[9px] uppercase tracking-widest hover:text-white transition-all">Start Range Session</Link>
-            <Link href="/analyze" className="px-4 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all">Upload First Swing</Link>
+            <Link href="/range" className="inline-flex items-center justify-center min-h-11 px-4 py-2.5 border border-white/10 text-gray-400 rounded-xl font-black text-[9px] uppercase tracking-widest hover:text-white transition-all">Start Range Session</Link>
+            <Link href="/analyze" className="inline-flex items-center justify-center min-h-11 px-4 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all">Upload First Swing</Link>
           </div>
         </div>
       ) : (
