@@ -14,14 +14,19 @@ import { fileURLToPath } from "node:url";
  * account it was rendered for (app/(dashboard)/goals/plan/PlanDisplay.tsx). Two lanes:
  *
  * 1. The REAL-RENDERER lane (the "[real renderer]" describe at the end): the production build's own React and ReactDOM in
- *    Chromium — real mounting, committed DOM, effects, unmounting and navigation — driven through the loopback service of
- *    the P1 evidence harness, whose address is given as P1R_URL (http://127.0.0.1:<port>). Each case asks the service to run
- *    one scenario and asserts what it observed: the committed DOM over time (an in-page MutationObserver records every
- *    transition, so a transient render counts), the account the browser's session names, Auth writes, action POSTs, and
- *    the server's goal operations per owner and synthetic provider calls. Scheduling that only a gate can make exact
- *    (an owner change while a confirmation is awaited; the caller's handoff) runs on an EXTERNAL seam copy of the build,
- *    never on the candidate. Without P1R_URL this lane is skipped and reported as skipped; with it, any service or
- *    infrastructure failure fails the case.
+ *    Chromium — real mounting, the DOM it produces, effects, unmounting and navigation — driven through the loopback service of
+ *    the evidence harness (06-P1's, extended by 08-P1's), whose address is given as P1R_URL (http://127.0.0.1:<port>). Each
+ *    case asks the service to run one scenario and asserts what it observed: the DOM over time (an in-page MutationObserver
+ *    records the page's state after each delivered mutation batch — a state that appears and is replaced within one batch,
+ *    or between two observer callbacks, is not seen, and it observes DOM changes, not React renders), the account the
+ *    browser's session names, Auth writes, action POSTs, and the server's goal operations per owner and synthetic provider
+ *    calls. Scheduling that only a gate can make exact (an owner change while a confirmation is awaited; the caller's
+ *    handoff) runs on an EXTERNAL seam copy of the build, never on the candidate. Without P1R_URL this lane is skipped and
+ *    reported as skipped; with it, any service or infrastructure failure fails the case.
+ *    AG-WEB-READY-08-P1: a confirmed change or end now also ends the rendered-session boundary around the plan view (the
+ *    whole account-bearing page is replaced by the boundary's fixed guidance, which takes focus), so R1/R2/R6/R6b expect
+ *    that guidance; the seam copy also probes the plan view's report to the boundary ("report", never a "set:" point).
+ *    The shell itself (header, saved goal, sidebar, navigation, End Session) is asserted in web-ready08-shell-coherence.
  * 2. The SIMULATED lane (every other describe): NOT React's lifecycle. React's hooks are replaced by a small synchronous
  *    runtime (the one the goals UI tests use) that keeps state across renders and runs effects and cleanups when the test
  *    mounts and unmounts; each state is then serialized by react-dom/server. It exercises the real PlanDisplay module, the
@@ -29,7 +34,8 @@ import { fileURLToPath } from "node:url";
  *    the browser's shared client (its session read answer by answer; spies on every credential-writing method — none may be
  *    called), server Auth verification, a caller-scoped two-owner goal table recording every operation with its owner, and
  *    the provider. "setsAfterUnmount" counts setter calls the component attempts after the runtime unmounted it — React
- *    itself silently discards such updates, so this count is a property of this runtime, not of React.
+ *    itself silently discards such updates, so this count is a property of this runtime, not of React. 08-P1: the plan
+ *    view's reporter to the boundary around it is a recording fixture here ("reports"); the boundary is not mounted.
  */
 
 const h = vi.hoisted(() => ({
@@ -41,6 +47,8 @@ const h = vi.hoisted(() => ({
     writes: [] as string[], releaseRead: null as null | (() => void) },
   server: { verify: "A" as "A" | "B", ops: [] as Array<{ kind: string; as?: string }>, calls: [] as Array<string | null>, provider: "ok" as "ok" | "fail", readback: "ok" as "ok" | "error" },
   action: { hold: null as null | Promise<void>, mode: "real" as "real" | "undefined" | "throw", sent: [] as unknown[][] },
+  // 08-P1: what the plan view reported to the boundary around it (recorded; the fixture reporter accepts every report)
+  reports: [] as unknown[],
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -79,6 +87,12 @@ vi.mock("react", async (importOriginal) => {
 });
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), refresh: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }), usePathname: () => "/goals/plan", redirect: vi.fn() }));
 vi.mock("@/components/navigation/SessionKeeper", () => ({ useRenderedSession: () => h.rendered }));
+vi.mock("@/components/navigation/RenderedSessionObservation", () => ({
+  useRenderedViewEndReport: () => (report: unknown) => {
+    h.reports.push(report);
+    return true;
+  },
+}));
 vi.mock("@/components/goals/GoalsLoadError", async () => {
   const R = await import("react");
   return { default: ({ variant }: { variant: string }) => R.createElement("div", { "data-stub": `goals-load-error-${variant}` }, `[load-error ${variant}]`) };
@@ -283,6 +297,7 @@ beforeEach(() => {
   Object.assign(h.browser, { holds: "A", seq: [], reads: 0, writes: [], releaseRead: null });
   Object.assign(h.server, { verify: "A", ops: [], calls: [], provider: "ok", readback: "ok" });
   Object.assign(h.action, { hold: null, mode: "real", sent: [] });
+  h.reports = [];
   seed(null);
   vi.stubEnv("OPENAI_API_KEY", "synthetic-provider-key-p1");
   for (const m of ["log", "info", "warn", "error"] as const) vi.spyOn(console, m).mockImplementation(() => {});
@@ -329,6 +344,8 @@ describe("[simulated] P1: A's answer held while the browser signs in to B — wi
     expect(h.browser.writes).toEqual([]);
     expect(h.action.sent).toHaveLength(1);
     expect(h.server.calls).toHaveLength(1);
+    // 08-P1: the confirmed change is reported once to the boundary around the view, as fixed enums only
+    expect(h.reports).toEqual([{ end: "account_changed", plan: "may_be_saved" }]);
   });
 
   it("[switch] the sign-in to B is published between the two confirmations (a joined first read): the second one refuses", async () => {
@@ -340,6 +357,7 @@ describe("[simulated] P1: A's answer held while the browser signs in to B — wi
     expect(h.browser.reads).toBe(2);
     expect(text()).toMatch(CHANGED);
     expect(accountContentGone()).toBe(true);
+    expect(h.reports).toEqual([{ end: "account_changed", plan: "may_be_saved" }]);
   });
 
   it("[switch] the server refused (G1 owner_mismatch: the request verified as B) and the browser holds B: the stale A view is replaced, not kept under a notice; the guidance says nothing was saved (a known refusal, not 'may have been saved')", async () => {
@@ -355,6 +373,8 @@ describe("[simulated] P1: A's answer held while the browser signs in to B — wi
     expect(text()).not.toMatch(MAY_BE_SAVED);
     expect(accountContentGone()).toBe(true);
     expect(links()).toEqual([{ href: "/goals/plan", label: "Reload page" }]);
+    // 08-P1: the change is confirmed by the browser's session (B), not by the refusal code; the code only says "refused"
+    expect(h.reports).toEqual([{ end: "account_changed", plan: "refused" }]);
   });
 
   it("[switch] the withheld guidance is the keyboard target that replaces the removed controls (focusable, not a tab stop)", async () => {
@@ -380,6 +400,7 @@ describe("[simulated] P1: A's answer held while the browser signs in to B — wi
       expect(accountContentGone(), mode).toBe(true);
       unmount();
     }
+    expect(h.reports).toEqual([{ end: "account_changed", plan: "may_be_saved" }, { end: "account_changed", plan: "may_be_saved" }]);
   });
 });
 
@@ -397,6 +418,7 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     expect(h.rt.setsAfterUnmount).toBe(0);
     expect(h.browser.reads).toBe(0); // nothing even asked: the view was gone
     expect(h.action.sent).toHaveLength(1);
+    expect(h.reports).toEqual([]); // 08-P1: a view that is gone reports nothing
   });
 
   it("[lifecycle] the view is unmounted while its confirmation is awaited: still nothing applied", async () => {
@@ -406,9 +428,11 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     pressGenerate();
     expect(await until(() => h.browser.releaseRead !== null)).toBe(true);
     unmount();
+    h.browser.holds = "B"; // even a confirmed change, answered after the view is gone, reports nothing
     h.browser.releaseRead!();
     await settle();
     expect(h.rt.setsAfterUnmount).toBe(0);
+    expect(h.reports).toEqual([]);
   });
 
   it("[lifecycle] the account changes while the confirmation is awaited (the read answers after B was published): withheld", async () => {
@@ -422,6 +446,7 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     await settle();
     expect(text()).toMatch(CHANGED);
     expect(accountContentGone()).toBe(true);
+    expect(h.reports).toEqual([{ end: "account_changed", plan: "may_be_saved" }]);
   });
 
   const LOCATION = { href: "http://127.0.0.1:3941/goals/plan", origin: "http://127.0.0.1:3941", pathname: "/goals/plan", search: "" };
@@ -458,6 +483,25 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     // still on screen while the chosen navigation completes: only fixed, data-free uncertainty with a document link
     expect(text()).toMatch(/couldn't confirm whether your new plan was saved/i);
     expect(h.browser.reads).toBe(0);
+    expect(h.reports).toEqual([]); // 08-P1: a view that was left never ends the page the golfer chose
+  });
+
+  it.each(["link to another page", "back/forward"] as const)("[lifecycle] 08-P1: left while the answer is held and the browser now holds B (%s): still no report — the departure wins", async (how) => {
+    const listeners = captureGlobals();
+    seed(INITIAL_A);
+    mount(INITIAL_A);
+    const release = holdAnswer();
+    pressGenerate();
+    expect(await until(() => h.server.calls.length === 1)).toBe(true);
+    if (how === "back/forward") listeners["window:popstate"]?.({});
+    else listeners["document:click"]?.(pressOn(linkTo("/bag")));
+    h.browser.holds = "B";
+    release();
+    await settle();
+    expect(text()).not.toContain(GENERATED.summary);
+    expect(text()).toMatch(/couldn't confirm whether your new plan was saved/i);
+    expect(h.browser.reads).toBe(0);
+    expect(h.reports).toEqual([]);
   });
 
   it("[lifecycle] presses that do not leave this page are not departures: the answer still applies", async () => {
@@ -487,6 +531,7 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     expect(text()).toMatch(ENDED);
     expect(accountContentGone()).toBe(true);
     expect(h.browser.writes).toEqual([]);
+    expect(h.reports).toEqual([{ end: "signed_out", plan: "may_be_saved" }]);
   });
 
   it("[lifecycle] End Session of the rendered lineage is pending (its end intent is in the jar): 'ended' guidance", async () => {
@@ -499,6 +544,7 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     await settle();
     expect(text()).toMatch(ENDED);
     expect(accountContentGone()).toBe(true);
+    expect(h.reports).toEqual([{ end: "signed_out", plan: "may_be_saved" }]); // the rendered lineage's end, confirmed
   });
 
   it("[lifecycle] the account cannot be confirmed (Auth unavailable): withheld as unconfirmed — not a sign-out, not a failed save; Reload My Plan", async () => {
@@ -514,6 +560,24 @@ describe("[simulated] P1: lifecycle — an answer is used only by a live view th
     expect(links()).toEqual([{ href: "/goals/plan", label: "Reload My Plan" }]);
     expect(h.browser.writes).toEqual([]);
     expect(h.action.sent).toHaveLength(1);
+    expect(h.reports).toEqual([]); // 08-P1: an unconfirmed answer never ends the page around the view
+  });
+
+  it("[lifecycle] 08-P1: no rendered account (outside the provider) and an unconfirmed answer report nothing", async () => {
+    seed(INITIAL_A);
+    h.rendered = null;
+    mount(INITIAL_A);
+    pressGenerate();
+    await settle();
+    expect(h.action.sent).toHaveLength(0);
+    unmount();
+    h.rendered = { ownerId: A, lineage: null };
+    mount(INITIAL_A);
+    h.browser.seq = ["A", "unavailable"]; // the second confirmation cannot be made
+    pressGenerate();
+    await settle();
+    expect(text()).toMatch(UNCONFIRMED_ACCOUNT);
+    expect(h.reports).toEqual([]);
   });
 });
 
@@ -530,6 +594,7 @@ describe("[simulated] P1: the same account — ordinary results still apply", ()
     await settle();
     expect(text()).toContain(GENERATED.summary);
     expect(text()).toMatch(/Your new plan is saved/);
+    expect(h.reports).toEqual([]); // 08-P1: a newer sign-in of the same account is not an end or a change
   });
 
   it("[confirm] the same account's answer is confirmed exactly twice — once, then once more, never more — through the managed client's read only", async () => {
@@ -540,6 +605,7 @@ describe("[simulated] P1: the same account — ordinary results still apply", ()
     expect(text()).toContain(GENERATED.summary);
     expect(h.browser.reads).toBe(2);
     expect(h.browser.writes).toEqual([]);
+    expect(h.reports).toEqual([]);
   });
 
   it("[positive] generate with no saved plan: the persisted plan appears", async () => {
@@ -624,7 +690,10 @@ describe("[simulated] P1: the same account — ordinary results still apply", ()
 // A run that did not happen (service error) fails at once; every other check is a soft assertion, so a failing case
 // reports each property it broke.
 type RealEvent = { at: number; path: string; plan: boolean; saved: boolean; initial: boolean; guidance: boolean; changed: boolean; unconfirmed: boolean; planControls: number };
-type RealView = { path: string; guidance: string[]; statuses: string[]; initialShown: boolean; generatedShown: string[]; savedNotice: boolean; focusInGuidance: boolean; pending: boolean };
+// 08-P1: ended — the boundary's ended guidance (null when absent); planOutcome — its fixed plan line's enum; focusInEnded —
+// keyboard focus inside that guidance
+type RealView = { path: string; guidance: string[]; statuses: string[]; initialShown: boolean; generatedShown: string[]; savedNotice: boolean; focusInGuidance: boolean; pending: boolean;
+  ended?: string | null; planOutcome?: string | null; focusInEnded?: boolean };
 type OwnerOps = { read: number; insert: number; update: number };
 type RealRun = {
   scenario: string;
@@ -698,10 +767,11 @@ async function realRunOrFail(scenario: string, tree: "final" | "seam"): Promise<
 
 const ownPlanDisplay = () =>
   createHash("sha256").update(readFileSync(fileURLToPath(new URL("../app/(dashboard)/goals/plan/PlanDisplay.tsx", import.meta.url)))).digest("hex");
-/** Every committed DOM state from the press on (the in-page observer records each transition with its time). */
-const committedSincePress = (r: RealRun) => (r.events ?? []).filter((e) => e.at >= r.marks.press);
-/** Every committed DOM state from the moment the answer was released (or the handoff gate opened). */
-const committedAfterRelease = (r: RealRun) => (r.events ?? []).filter((e) => e.at >= r.marks.release);
+/** The DOM states the in-page observer recorded from the press on (one per delivered mutation batch that changed what it
+ *  records, with its time; not every React commit — see the header). */
+const observedSincePress = (r: RealRun) => (r.events ?? []).filter((e) => e.at >= r.marks.press);
+/** The recorded DOM states from the moment the answer was released (or the handoff gate opened). */
+const observedAfterRelease = (r: RealRun) => (r.events ?? []).filter((e) => e.at >= r.marks.release);
 /** The continuation's setter attempts after the release, as the seam copy's probes counted them. */
 const attemptsAfterRelease = (r: RealRun) => (r.seamCalls ?? []).filter((c) => c.at >= r.marks.release && c.point.startsWith("set:")).map((c) => c.point);
 const seamCount = (r: RealRun, point: string) => (r.seamCalls ?? []).filter((c) => c.at >= r.marks.press && c.point === point).length;
@@ -721,16 +791,17 @@ function expectRanAsDescribed(r: RealRun, tree: "final" | "seam") {
   }
 }
 
-/** A's answer arrived after B had signed in: nothing of it was ever committed, the whole view became the guidance, B's
- *  session stayed, and nothing ran as B. */
+/** A's answer arrived after B had signed in: nothing of it was ever observed on screen, the whole page became the
+ *  boundary's fixed guidance (08-P1: the plan view reported its confirmed change), B's session stayed, and nothing ran as B. */
 function expectWithheldForB(r: RealRun) {
-  expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved)).toEqual([]);
+  expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved)).toEqual([]);
   expect.soft(r.view.guidance).toHaveLength(1);
-  expect.soft(r.view.guidance[0] ?? "").toMatch(/signed in to a different account before your plan's result arrived/);
+  expect.soft(r.view.guidance[0] ?? "").toMatch(/^ended: Signed in to a different account/);
+  expect.soft(r.view.planOutcome).toBe("may_be_saved");
   expect.soft(r.view.generatedShown).toEqual([]);
   expect.soft(r.view.savedNotice).toBe(false);
   expect.soft(r.view.initialShown).toBe(false);
-  expect.soft(r.view.focusInGuidance).toBe(true);
+  expect.soft(r.view.focusInEnded).toBe(true);
   expect.soft(r.jarAtRelease).toBe("B");
   expect.soft(r.jarAfter).toBe("B");
   expect.soft(r.logouts).toBe(0);
@@ -755,11 +826,12 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
 
   it("R3: the same account signs in again while A's answer is held — the answer applies", async () => {
     const r = await realRunOrFail("R3", "final");
-    expect.soft(committedSincePress(r).filter((e) => e.guidance || e.unconfirmed)).toEqual([]);
-    expect.soft(committedAfterRelease(r).some((e) => e.plan && e.saved)).toBe(true);
+    expect.soft(observedSincePress(r).filter((e) => e.guidance || e.unconfirmed)).toEqual([]);
+    expect.soft(observedAfterRelease(r).some((e) => e.plan && e.saved)).toBe(true);
     expect.soft(r.view.generatedShown).toEqual([REAL_A_PLAN]);
     expect.soft(r.view.savedNotice).toBe(true);
     expect.soft(r.view.guidance).toEqual([]);
+    expect.soft(r.view.ended ?? null).toBeNull(); // 08-P1: the page stays (a newer sign-in of the same account)
     expect.soft(r.jarAfter).toBe("A");
     expect.soft(r.logouts).toBe(0);
     expect.soft(r.providerCalls).toEqual([{ goal: REAL_A_GOAL, mode: "hold" }]);
@@ -770,8 +842,8 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
 
   it("R9: ordinary generation for the signed-in account — the plan and its success notice; the plan control at 44 px", async () => {
     const r = await realRunOrFail("R9", "final");
-    expect.soft(committedSincePress(r).filter((e) => e.guidance || e.unconfirmed)).toEqual([]);
-    expect.soft(committedSincePress(r).some((e) => e.plan && e.saved)).toBe(true);
+    expect.soft(observedSincePress(r).filter((e) => e.guidance || e.unconfirmed)).toEqual([]);
+    expect.soft(observedSincePress(r).some((e) => e.plan && e.saved)).toBe(true);
     expect.soft(r.view.generatedShown).toEqual([REAL_A_PLAN]);
     expect.soft(r.view.savedNotice).toBe(true);
     expect.soft(r.view.guidance).toEqual([]);
@@ -782,7 +854,7 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
   }, REAL_TIMEOUT);
 
   const expectUnmountedR4 = (r: RealRun) => {
-    expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved || e.guidance || e.unconfirmed)).toEqual([]);
+    expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved || e.guidance || e.unconfirmed)).toEqual([]);
     expect.soft(r.atRelease).toEqual({ path: "/dashboard", planViewPresent: false });
     expect.soft(r.view.path).toBe("/dashboard");
     expect.soft(r.providerCalls).toEqual([{ goal: REAL_A_GOAL, mode: "hold" }]);
@@ -792,7 +864,7 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
     expect.soft(r.jarAfter).toBe("A");
   };
   const expectQueuedDepartureR5 = (r: RealRun) => {
-    expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved || e.guidance)).toEqual([]);
+    expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved || e.guidance)).toEqual([]);
     expect.soft(r.atRelease).toEqual({ path: "/goals/plan", planViewPresent: true });
     expect.soft(r.view.path).toBe("/bag");
     expect.soft(r.providerCalls).toEqual([{ goal: REAL_A_GOAL, mode: "hold" }]);
@@ -802,13 +874,13 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
     expect.soft(r.jarAfter).toBe("A");
   };
 
-  it("R4: a true unmount (back) while the answer is held — nothing of it is committed after it arrives", async () => {
+  it("R4: a true unmount (back) while the answer is held — nothing of it is observed on screen after it arrives", async () => {
     const r = await realRunOrFail("R4", "final");
     expectUnmountedR4(r);
     expectRanAsDescribed(r, "final");
   }, REAL_TIMEOUT);
 
-  it("R5: a departure while the view is still mounted with its answer queued — no result is committed; the navigation completes", async () => {
+  it("R5: a departure while the view is still mounted with its answer queued — no result is observed on screen; the navigation completes", async () => {
     const r = await realRunOrFail("R5", "final");
     expectQueuedDepartureR5(r);
     expectRanAsDescribed(r, "final");
@@ -818,6 +890,7 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
   it("R4 [seam]: after the true unmount the caller attempts no setter and the helper reads no session", async () => {
     const r = await realRunOrFail("R4", "seam");
     expect.soft(attemptsAfterRelease(r)).toEqual([]);
+    expect.soft(seamCount(r, "report")).toBe(0); // 08-P1: nothing reported to the boundary
     expectUnmountedR4(r);
     expect.soft(seamCount(r, "confirm")).toBe(0);
     expect.soft(seamCount(r, "handoff")).toBe(1);
@@ -828,6 +901,7 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
     const r = await realRunOrFail("R5", "seam");
     expect.soft(attemptsAfterRelease(r).filter((p) => p !== "set:setNotice")).toEqual([]);
     expect.soft(attemptsAfterRelease(r).length).toBeLessThanOrEqual(1);
+    expect.soft(seamCount(r, "report")).toBe(0);
     expectQueuedDepartureR5(r);
     expect.soft(seamCount(r, "confirm")).toBe(0);
     expectRanAsDescribed(r, "seam");
@@ -840,6 +914,7 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
     const r = await realRunOrFail(scenario, "seam");
     expectWithheldForB(r);
     expect.soft(attemptsAfterRelease(r)).toEqual(["set:setWithheld"]);
+    expect.soft(seamCount(r, "report")).toBe(1); // 08-P1: one report, after the caller's final checks
     expect.soft(seamCount(r, "confirm")).toBe(confirmations);
     expect.soft(r.providerCalls).toEqual([{ goal: REAL_A_GOAL, mode: "ok" }]);
     expectRanAsDescribed(r, "seam");
@@ -848,7 +923,8 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
   it("R7 [seam]: unmounted (back) at the helper-to-caller handoff — the caller returns without one setter attempt", async () => {
     const r = await realRunOrFail("R7", "seam");
     expect.soft(attemptsAfterRelease(r)).toEqual([]);
-    expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved || e.guidance || e.unconfirmed)).toEqual([]);
+    expect.soft(seamCount(r, "report")).toBe(0);
+    expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved || e.guidance || e.unconfirmed)).toEqual([]);
     expect.soft(r.atRelease).toEqual({ path: "/dashboard", planViewPresent: false });
     expect.soft(r.view.path).toBe("/dashboard");
     expect.soft(seamCount(r, "confirm")).toBe(2);
@@ -861,8 +937,9 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
   it("R8 [seam]: left while still mounted at the handoff — only the fixed uncertainty notice, never the result", async () => {
     const r = await realRunOrFail("R8", "seam");
     expect.soft(attemptsAfterRelease(r)).toEqual(["set:setNotice"]);
-    expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved || e.guidance)).toEqual([]);
-    expect.soft(committedAfterRelease(r).some((e) => e.path === "/goals/plan" && e.unconfirmed)).toBe(true);
+    expect.soft(seamCount(r, "report")).toBe(0);
+    expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved || e.guidance)).toEqual([]);
+    expect.soft(observedAfterRelease(r).some((e) => e.path === "/goals/plan" && e.unconfirmed)).toBe(true);
     expect.soft(r.whileStillMounted?.view.generatedShown).toEqual([]);
     expect.soft(r.whileStillMounted?.view.savedNotice).toBe(false);
     expect.soft(seamCount(r, "confirm")).toBe(2);
@@ -872,10 +949,11 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
     expectRanAsDescribed(r, "seam");
   }, REAL_TIMEOUT);
 
-  it("R10 [seam]: unmounted (back) while the second owner confirmation is awaited — no setter attempt, nothing committed", async () => {
+  it("R10 [seam]: unmounted (back) while the second owner confirmation is awaited — no setter attempt, nothing observed on screen", async () => {
     const r = await realRunOrFail("R10", "seam");
     expect.soft(attemptsAfterRelease(r)).toEqual([]);
-    expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved || e.guidance || e.unconfirmed)).toEqual([]);
+    expect.soft(seamCount(r, "report")).toBe(0);
+    expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved || e.guidance || e.unconfirmed)).toEqual([]);
     expect.soft(r.atRelease).toEqual({ path: "/dashboard", planViewPresent: false });
     expect.soft(seamCount(r, "confirm")).toBe(2);
     expect.soft(seamCount(r, "handoff")).toBe(1);
@@ -888,8 +966,9 @@ describe.skipIf(!P1R_URL)("[real renderer] P1: the production build's React in C
   it("R11 [seam]: left while the first owner confirmation is awaited — no further session read, only the fixed notice", async () => {
     const r = await realRunOrFail("R11", "seam");
     expect.soft(attemptsAfterRelease(r)).toEqual(["set:setNotice"]);
-    expect.soft(committedSincePress(r).filter((e) => e.plan || e.saved || e.guidance)).toEqual([]);
-    expect.soft(committedAfterRelease(r).some((e) => e.path === "/goals/plan" && e.unconfirmed)).toBe(true);
+    expect.soft(seamCount(r, "report")).toBe(0);
+    expect.soft(observedSincePress(r).filter((e) => e.plan || e.saved || e.guidance)).toEqual([]);
+    expect.soft(observedAfterRelease(r).some((e) => e.path === "/goals/plan" && e.unconfirmed)).toBe(true);
     expect.soft(r.atRelease).toEqual({ path: "/goals/plan", planViewPresent: true });
     expect.soft(r.view.path).toBe("/bag");
     expect.soft(seamCount(r, "confirm")).toBe(1);

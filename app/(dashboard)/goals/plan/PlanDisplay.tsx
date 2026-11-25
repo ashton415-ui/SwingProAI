@@ -15,6 +15,7 @@ import {
 import { generateSyllabus } from "../actions";
 import GoalsLoadError from "@/components/goals/GoalsLoadError";
 import { useRenderedSession } from "@/components/navigation/SessionKeeper";
+import { useRenderedViewEndReport } from "@/components/navigation/RenderedSessionObservation";
 import { GOALS_COPY, toGoalPlan, type GoalPlan, type PlanCategory } from "@/lib/golfer-journey-goals-read-state";
 import { createClient } from "@/utils/supabase/client";
 import { confirmOwnerSession } from "@/lib/drill-hub-session";
@@ -92,6 +93,10 @@ const OWNER_INTENT_INVALID = "This page is out of date, so nothing was saved or 
 // account it verified. When the sign-in was confirmed changed or ended, or cannot be confirmed now (an Auth outage is not a
 // sign-out), the answer is withheld and the whole view — plan, details and controls — is replaced by fixed guidance with a
 // fresh page; nothing generates by itself.
+// AG-WEB-READY-08-P1: when the sign-in was CONFIRMED changed or ended (not when it could not be confirmed), this view also
+// tells the rendered-session boundary around it (useRenderedViewEndReport; a fixed enum, no data), after its own final
+// live/departure checks, so the whole account-bearing page — header, saved-goal details, sidebar, navigation and End
+// Session — is removed too, not just this plan view. A view that is gone or was left reports nothing.
 const RESULT_SIGN_IN_CHANGED =
   "This browser signed in to a different account before your plan's result arrived, so it isn't shown here. A new plan may already have been saved for the account this page was opened for. Reload the page to continue with the account that's signed in now.";
 const RESULT_SIGN_IN_ENDED =
@@ -133,6 +138,8 @@ interface Notice {
 
 export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
   const rendered = useRenderedSession();
+  // 08-P1: this view's reporter to the boundary around it (bound to that boundary generation and to this view's lifetime)
+  const reportViewEnd = useRenderedViewEndReport();
   const [isPending, startTransition] = useTransition();
   // AG-S1: only a plan that came from storage is ever shown — the page's own read, or the boundary's content
   // readback after an attempt. A generated plan the server could not confirm never replaces it.
@@ -211,6 +218,7 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
       return;
     }
     departedRef.current = false; // only a departure while this request's answer is pending counts
+    const report = reportViewEnd; // 08-P1: the reporter of the view that asked (inert once that view or its boundary is gone)
     startTransition(async () => {
       let result: Awaited<ReturnType<typeof generateSyllabus>> | undefined;
       try {
@@ -234,6 +242,12 @@ export default function PlanDisplay({ initialSyllabus, hasGoals }: Props) {
         // only the fixed refusal code is read here, to say "nothing was saved" truthfully; no plan, state or message is used
         const refusal = result && (result.outcome === "owner_mismatch" || result.outcome === "owner_intent_invalid") ? result.outcome : null;
         setWithheld({ kind: may, refusal });
+        // 08-P1: only a CONFIRMED change or end, and only now — after this view's final live/departure checks above — ends
+        // the surrounding view as well; "unconfirmed" never does. Only fixed enums go: which end, and whether the plan request
+        // was a known refusal (nothing saved) or may already have been saved. The refusal code says nothing about the account.
+        if (may === "changed" || may === "ended") {
+          report({ end: may === "changed" ? "account_changed" : "signed_out", plan: refusal === null ? "may_be_saved" : "refused" });
+        }
         return;
       }
       // the action failed (dropped connection) or came back without a result (Next resolves undefined when the

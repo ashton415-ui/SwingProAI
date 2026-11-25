@@ -16,6 +16,12 @@ import { randomUUID, createHash } from "node:crypto";
  * methods are spies that must never be called (the boundary never clears, revokes or replaces the browser's session).
  * `document` / `window` are minimal event targets (visibility, pageshow) with a cookie spy. The shell children carry
  * distinct account, plan, media and End Session markers. Synthetic identities only; nothing leaves the process.
+ *
+ * AG-WEB-READY-08-P1 (the last describe): the boundary's view-end channel (RenderedSessionObservation.tsx) as the boundary
+ * provides it, taken from the rendered tree and called directly — the channel-level contract (fixed enums only, this
+ * generation only, refused once ended, refused after unmount or a re-render for another lineage, never across a fresh
+ * boundary for B). A page component's own reporter (its lifetime binding) and the composed plan view are exercised in
+ * lib/web-ready08-shell-coherence.test.tsx; this runtime does not model child components with their own hooks.
  */
 
 const rt = vi.hoisted(() => ({
@@ -27,6 +33,8 @@ const rt = vi.hoisted(() => ({
   pathname: "/dashboard",
   // the account the browser's stored session names, as the boundary's local read sees it (undefined: the real read)
   storedSub: undefined as string | null | undefined,
+  // 08-P1: every context value provided while the tree was expanded (the boundary's view-end channel among them)
+  provided: [] as unknown[],
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -92,6 +100,7 @@ import RenderedSessionBoundary from "@/components/navigation/RenderedSessionBoun
 import { announceEndedLineage } from "@/utils/supabase/session-publication";
 import { sessionLineageId } from "@/utils/supabase/session-cookie-layout";
 import { confirmOwnerSession } from "@/lib/drill-hub-session";
+import { createRenderedViewEndChannel, type RenderedViewEndChannel } from "@/components/navigation/RenderedSessionObservation";
 
 const A = randomUUID();
 const B = randomUUID();
@@ -113,7 +122,10 @@ function expand(node: unknown): (HostNode | string)[] {
   const props = (element.props ?? {}) as Record<string, unknown>;
   if (element.type === React.Fragment) return expand(props.children);
   if (typeof element.type === "function") return expand((element.type as (p: unknown) => unknown)(props));
-  if (typeof element.type === "object" && element.type !== null && "_context" in (element.type as object)) return expand(props.children); // Context.Provider
+  if (typeof element.type === "object" && element.type !== null && "_context" in (element.type as object)) { // Context.Provider
+    rt.provided.push(props.value);
+    return expand(props.children);
+  }
   if (typeof element.type !== "string") return [];
   return [{ type: element.type, props, children: expand(props.children) }];
 }
@@ -134,6 +146,7 @@ function mount(initial: BoundaryProps) {
   rt.pending = [];
   rt.dirty = false;
   let nodes: (HostNode | string)[] = [];
+  let provided: unknown[] = [];
   let unmounted = false;
   const Component = RenderedSessionBoundary as unknown as (p: unknown) => unknown;
   const render = () => {
@@ -141,7 +154,9 @@ function mount(initial: BoundaryProps) {
     for (let guard = 0; guard < 25; guard++) {
       rt.i = 0;
       rt.dirty = false;
+      rt.provided = [];
       nodes = expand(Component(props));
+      provided = rt.provided;
       for (const i of rt.pending.splice(0)) {
         const slot = rt.slots[i] as { fn: () => unknown; cleanup?: unknown };
         if (typeof slot.cleanup === "function") (slot.cleanup as () => void)();
@@ -157,6 +172,15 @@ function mount(initial: BoundaryProps) {
     rerender: (next: Partial<BoundaryProps>) => {
       props = { ...props, ...next };
       render();
+    },
+    /** 08-P1: render with new props WITHOUT running effects — the window between a render and its effects; render() flushes */
+    renderWithoutEffects: (next: Partial<BoundaryProps>) => {
+      props = { ...props, ...next };
+      rt.i = 0;
+      rt.dirty = false;
+      rt.provided = [];
+      nodes = expand(Component(props));
+      provided = rt.provided;
     },
     heading: () => findAll(nodes, (n) => n.type === "h1")[0] ?? null,
     notice: () => findAll(nodes, (n) => n.props["data-rendered-session-guidance"] === "refused" && n.props.role === "status")[0] ?? null,
@@ -175,6 +199,9 @@ function mount(initial: BoundaryProps) {
     media: () => findAll(nodes, (n) => n.type === "video").length,
     button: (label: string) => findAll(nodes, (n) => n.type === "button" && textOf(n.children).includes(label))[0] ?? null,
     link: (label: string) => findAll(nodes, (n) => n.type === "a" && textOf(n.children).includes(label))[0] ?? null,
+    /** 08-P1: the view-end channel the boundary provides in its latest render (null once it no longer renders the shell) */
+    channel: () => (provided.find((v) => !!v && typeof (v as RenderedViewEndChannel).report === "function" && typeof (v as RenderedViewEndChannel).attach === "function") ?? null) as RenderedViewEndChannel | null,
+    planOutcome: () => findAll(nodes, (n) => n.props["data-rendered-session-plan-outcome"] !== undefined).map((n) => [n.props["data-rendered-session-plan-outcome"], textOf(n.children)]),
   };
 }
 type Mounted = ReturnType<typeof mount>;
@@ -579,5 +606,203 @@ describe("F1-V: the rendered account's whole shell ends only on a confirmed end 
     await settle(page);
     expect(removedShell(page)).toBe(true);
     expect(page.guidance()).not.toBeNull(); // presses inside it (Reload, Sign in) are let through by the guard
+  });
+
+  // ── AG-WEB-READY-08-P1: a page component's confirmed observation, through the boundary's own channel ──────────────────
+  describe("08-P1: the view-end channel — this generation only, fixed enums only, never a newer view", () => {
+    const PLAN_MAY = "A new plan may already have been saved for the account this page was opened for.";
+    const PLAN_REFUSED = "Your plan request was refused before anything was saved or generated.";
+
+    it.each([
+      ["account_changed", "may_be_saved", "Signed in to a different account", PLAN_MAY, false],
+      ["account_changed", "refused", "Signed in to a different account", PLAN_REFUSED, false],
+      ["signed_out", "may_be_saved", "This page's sign-in has ended", PLAN_MAY, true],
+    ] as const)("a report (%s, %s) through the current channel ends the whole shell: fixed guidance with the fixed plan line, focus target, nothing written", async (end, plan, heading, line, signIn) => {
+      const a = sessionOf(A);
+      holds(a);
+      const { page } = await openFor(A, a);
+      expect(showsShell(page)).toBe(true);
+      const reads = browser.state.reads;
+      expect(page.channel()!.report({ end, plan })).toBe(true);
+      page.render();
+      await settle(page);
+      expect(removedShell(page)).toBe(true);
+      expect(page.text()).toContain(heading);
+      expect(page.planOutcome()).toEqual([[plan, line]]);
+      expect(page.link("Sign in") !== null).toBe(signIn);
+      expect(page.button("Reload page")).not.toBeNull();
+      expect(page.channel()).toBeNull(); // the shell (and its provider) is gone
+      expect(browser.state.reads).toBe(reads); // the report is the page's own confirmed answer: no extra read here
+      expect(browser.writes).toEqual([]);
+      expect(cookieWrites).toEqual([]);
+      (page.button("Reload page")!.props.onClick as () => void)();
+      expect(reloads).toBe(1);
+    });
+
+    it("once a report is accepted, the old view's presses and submits are refused at once, before the guidance is drawn", async () => {
+      const a = sessionOf(A);
+      holds(a);
+      const { page } = await openFor(A, a);
+      const reached: string[] = [];
+      win.addEventListener("click", () => reached.push("click"));
+      win.addEventListener("submit", () => reached.push("submit"));
+      expect(page.channel()!.report({ end: "account_changed", plan: "may_be_saved" })).toBe(true);
+      expect(showsShell(page)).toBe(true); // decided, not yet drawn
+      const press = new Event("click", { cancelable: true });
+      win.dispatchEvent(press);
+      const submit = new Event("submit", { cancelable: true });
+      win.dispatchEvent(submit);
+      expect(press.defaultPrevented).toBe(true);
+      expect(submit.defaultPrevented).toBe(true);
+      expect(reached).toEqual([]);
+      page.render();
+      await settle(page);
+      expect(removedShell(page)).toBe(true);
+    });
+
+    it("anything but the fixed enums is ignored; a report after the view already ended (another signal) is refused and adds no plan claim", async () => {
+      const a = sessionOf(A);
+      holds(a);
+      const { page, lineage } = await openFor(A, a);
+      const channel = page.channel()!;
+      for (const bad of [
+        { end: "account_changed", plan: "saved" },
+        { end: "unconfirmed", plan: "may_be_saved" },
+        { end: "signed_out" },
+        null,
+        "account_changed",
+        { end: "account_changed", plan: "may_be_saved", ownerId: B }, // last: extra data is never read; still only the enums
+      ]) {
+        const accepted = channel.report(bad as never);
+        if (bad && typeof bad === "object" && "ownerId" in bad) {
+          expect(accepted).toBe(true); // the enum pair is valid; the extra field is ignored
+          page.render();
+          await settle(page);
+          expect(page.text()).not.toContain(B);
+          break;
+        }
+        expect(accepted).toBe(false);
+        page.render();
+        await settle(page);
+        expect(showsShell(page)).toBe(true);
+      }
+      expect(removedShell(page)).toBe(true);
+      // a fresh view ended by its own lineage's End Session: a later report is refused and adds no plan line
+      page.unmount();
+      holds(a);
+      const second = await openFor(A, a);
+      const live = second.page.channel()!;
+      announceEndedLineage(second.lineage!);
+      second.page.render();
+      await settle(second.page);
+      expect(removedShell(second.page)).toBe(true);
+      expect(live.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      second.page.render();
+      await settle(second.page);
+      expect(second.page.planOutcome()).toEqual([]);
+      expect(second.page.text()).toContain("This page's sign-in has ended");
+      expect(second.lineage).toBe(lineage); // the same rendered lineage, a fresh boundary (the first one was unmounted)
+    });
+
+    it("an old generation's channel ends nothing: after unmount, after a re-render for a newer lineage of the same owner (A2), and across a fresh boundary for B; the current one does", async () => {
+      // unmounted
+      const a1 = sessionOf(A);
+      holds(a1);
+      const first = await openFor(A, a1);
+      const detached = first.page.channel()!;
+      first.page.unmount();
+      expect(detached.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      expect(rt.dirty).toBe(false);
+      // a retained boundary receiving a newer lineage of the same owner: the A1 channel is refused from that render on
+      holds(a1);
+      const retained = await openFor(A, a1);
+      const oldChannel = retained.page.channel()!;
+      const a2 = sessionOf(A);
+      holds(a2);
+      retained.page.rerender({ lineage: await sessionLineageId(a2.access_token) });
+      await settle(retained.page);
+      const newChannel = retained.page.channel()!;
+      expect(newChannel).not.toBe(oldChannel);
+      expect(oldChannel.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      expect(oldChannel.report({ end: "signed_out", plan: "may_be_saved" })).toBe(false);
+      retained.page.render();
+      await settle(retained.page);
+      expect(showsShell(retained.page)).toBe(true); // A2's view stays
+      // a fresh boundary for B: A's channel (from an unmounted boundary) cannot end it
+      retained.page.unmount();
+      const b = sessionOf(B);
+      holds(b);
+      const bLineage = await sessionLineageId(b.access_token);
+      const bPage = mount({ ownerId: B, lineage: bLineage, children: shell() });
+      await settle(bPage);
+      expect(showsShell(bPage)).toBe(true);
+      for (const stale of [detached, oldChannel, newChannel]) expect(stale.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      bPage.render();
+      await settle(bPage);
+      expect(showsShell(bPage)).toBe(true);
+      // positive control: B's own current channel is accepted
+      expect(bPage.channel()!.report({ end: "signed_out", plan: "may_be_saved" })).toBe(true);
+      bPage.render();
+      await settle(bPage);
+      expect(removedShell(bPage)).toBe(true);
+      expect(browser.writes).toEqual([]);
+    });
+
+    it("in the window between a re-render for a newer lineage (A2) and its effects, the A1 channel — still attached — already ends nothing; after the effects the A2 channel does", async () => {
+      const a1 = sessionOf(A);
+      holds(a1);
+      const { page } = await openFor(A, a1);
+      const old = page.channel()!;
+      const a2 = sessionOf(A);
+      holds(a2);
+      const a2Lineage = await sessionLineageId(a2.access_token);
+      page.renderWithoutEffects({ lineage: a2Lineage });
+      const fresh = page.channel()!;
+      expect(fresh).not.toBe(old);
+      // the A1 effect has not been cleaned up yet (its acceptor is still attached to the A1 channel): only the render-time
+      // binding (the latest rendered channel) refuses it
+      expect(old.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      expect(rt.dirty).toBe(false);
+      page.render();
+      await settle(page);
+      expect(showsShell(page)).toBe(true);
+      expect(old.report({ end: "signed_out", plan: "may_be_saved" })).toBe(false); // and after the cleanup (detached)
+      expect(fresh.report({ end: "signed_out", plan: "may_be_saved" })).toBe(true); // positive control
+      page.render();
+      await settle(page);
+      expect(removedShell(page)).toBe(true);
+    });
+
+    it("the channel itself: only its own generation attaches, a second acceptor is refused while one is attached, a detached channel reports nothing", () => {
+      const channel = createRenderedViewEndChannel({ ownerId: A, lineage: "lineage-a1" });
+      const seen: string[] = [];
+      const first = (r: { end: string }) => { seen.push(`first:${r.end}`); return true; };
+      const second = (r: { end: string }) => { seen.push(`second:${r.end}`); return true; };
+      expect(channel.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false); // nothing attached
+      channel.attach({ ownerId: B, lineage: "lineage-a1" }, second)(); // another owner: not attached
+      channel.attach({ ownerId: A, lineage: "lineage-a2" }, second)(); // another lineage: not attached
+      expect(channel.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      const detachFirst = channel.attach({ ownerId: A, lineage: "lineage-a1" }, first);
+      const detachSecond = channel.attach({ ownerId: A, lineage: "lineage-a1" }, second); // refused while first is attached
+      expect(channel.report({ end: "signed_out", plan: "refused" })).toBe(true);
+      detachSecond(); // a refused attach's detach changes nothing
+      expect(channel.report({ end: "account_changed", plan: "may_be_saved" })).toBe(true);
+      detachFirst();
+      expect(channel.report({ end: "account_changed", plan: "may_be_saved" })).toBe(false);
+      expect(seen).toEqual(["first:signed_out", "first:account_changed"]);
+    });
+
+    it("the channel adds no listener, timer or read of its own: listeners are the boundary's four; idle time reads nothing", async () => {
+      const a = sessionOf(A);
+      holds(a);
+      const { page } = await openFor(A, a);
+      for (const key of ["document:visibilitychange", "window:pageshow", "window:click", "window:submit"]) expect(listening.get(key), key).toBe(1);
+      expect(Array.from(listening.keys()).sort()).toEqual(["document:visibilitychange", "window:click", "window:pageshow", "window:submit"]);
+      const reads = browser.state.reads;
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await settle(page);
+      expect(browser.state.reads).toBe(reads);
+      expect(showsShell(page)).toBe(true);
+    });
   });
 });

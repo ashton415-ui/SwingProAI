@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import { watchLineageEnd } from "@/utils/supabase/session-publication";
@@ -8,6 +8,11 @@ import { jwtClaims } from "@/utils/supabase/session-cookie-layout";
 import { readStoredSession } from "@/utils/supabase/session-storage";
 import { confirmOwnerSession, drillHubIdentityEndFromEvent } from "@/lib/drill-hub-session";
 import { RenderedSessionProvider } from "@/components/navigation/SessionKeeper";
+import {
+  RenderedViewEndProvider,
+  createRenderedViewEndChannel,
+  type RenderedPlanOutcome,
+} from "@/components/navigation/RenderedSessionObservation";
 
 /**
  * AG-WEB-READY-04 F1 — the dashboard's whole account-bearing shell (sidebar with the account name, plan badge and End
@@ -29,6 +34,14 @@ import { RenderedSessionProvider } from "@/components/navigation/SessionKeeper";
  *    owner-bound request uses, and only its confirmed answers end the view — signed out or ended → "signed_out", another
  *    account → "account_changed". An event that named an end is confirmed once more after the read it may have joined
  *    (a read already in flight can predate the change), never more.
+ *  - AG-WEB-READY-08-P1: a page component's own confirmed observation (components/navigation/RenderedSessionObservation.tsx).
+ *    The plan view reports when its pending generation's answer was withheld because confirmOwnerSession confirmed the
+ *    sign-in ended or changed to another account — reported only after its own final live/departure checks — so the shell
+ *    around it ends too, instead of staying until another signal arrives here. The report is a fixed enum (which end; and
+ *    for the plan request, "refused before anything was saved" or "may already have been saved"), accepted only through
+ *    this generation's channel (this rendered owner and lineage, while mounted, from a reporter that is still mounted);
+ *    a report from a view that is gone, or from before a re-render for another lineage or owner, ends nothing. It is
+ *    the same confirmation the checks below use, not a new identity source, and it never ends a view that already ended.
  *  - An answer that confirms nothing (unavailable: an Auth outage, a slow or refused read; unconfirmed) never ends the
  *    view and is never treated as a sign-out; the pages keep refusing what they cannot confirm, as before.
  *  - Until a check answers, a press or submit in the view is refused before the page acts on it when the browser's
@@ -55,6 +68,14 @@ type ViewEnd = "signed_out" | "account_changed";
 
 const REFUSED_COPY =
   "This browser's sign-in changed after this page was opened, so the page can't act on it. Reload to continue with the current sign-in.";
+
+// 08-P1: said only when the plan view's own confirmed observation ended the view (fixed, account-free; never a returned
+// plan or message). A known refusal: nothing was saved. Otherwise the request may already have been saved for the account
+// this page was opened for — it is neither cancelled nor retried.
+const PLAN_OUTCOME_COPY: Readonly<Record<RenderedPlanOutcome, string>> = {
+  refused: "Your plan request was refused before anything was saved or generated.",
+  may_be_saved: "A new plan may already have been saved for the account this page was opened for.",
+};
 
 const ENDED_COPY: Readonly<Record<ViewEnd, { readonly heading: string; readonly body: string }>> = {
   signed_out: {
@@ -87,9 +108,16 @@ export default function RenderedSessionBoundary({
   readonly children: ReactNode;
 }) {
   const [ended, setEnded] = useState<ViewEnd | null>(null);
+  // 08-P1: what the plan view could say about its withheld request, when its report ended the view (null otherwise)
+  const [planOutcome, setPlanOutcome] = useState<RenderedPlanOutcome | null>(null);
   // a press or submit was refused because the browser now holds another account (shown until it holds this one again)
   const [refused, setRefused] = useState(false);
   const endedRef = useRef<ViewEnd | null>(null);
+  // 08-P1: this generation's report channel (one per rendered owner and lineage). The latest rendered one is the only one
+  // accepted: from the moment the boundary renders for another lineage or owner, an older channel's report ends nothing.
+  const channel = useMemo(() => createRenderedViewEndChannel({ ownerId, lineage }), [ownerId, lineage]);
+  const channelRef = useRef(channel);
+  channelRef.current = channel;
   const checkRef = useRef<() => void>(() => undefined);
   const pathname = usePathname();
   const firstPathRef = useRef(true);
@@ -105,10 +133,13 @@ export default function RenderedSessionBoundary({
     let live = true;
     let running = false;
     let again = false;
-    const end = (why: ViewEnd) => {
-      if (!live || endedRef.current !== null) return;
+    // decided synchronously (the guard below refuses the old view's presses from here on), then drawn
+    const end = (why: ViewEnd, plan: RenderedPlanOutcome | null = null): boolean => {
+      if (!live || endedRef.current !== null) return false;
       endedRef.current = why;
+      if (plan !== null) setPlanOutcome(plan);
       setEnded(why);
+      return true;
     };
     const verify = async () => {
       let answer: Awaited<ReturnType<typeof confirmOwnerSession>>;
@@ -139,6 +170,8 @@ export default function RenderedSessionBoundary({
     checkRef.current = check;
 
     const stopLineageWatch = watchLineageEnd(lineage, () => end("signed_out"));
+    // 08-P1: a mounted page component's confirmed end/change observation, through this generation's channel only
+    const detachReports = channel.attach({ ownerId, lineage }, (report) => channelRef.current === channel && end(report.end, report.plan));
     let unsubscribe = () => undefined as void;
     try {
       const { data } = createClient().auth.onAuthStateChange((event, session) => {
@@ -196,6 +229,7 @@ export default function RenderedSessionBoundary({
     return () => {
       live = false;
       checkRef.current = () => undefined;
+      detachReports();
       stopLineageWatch();
       unsubscribe();
       document.removeEventListener("visibilitychange", onVisibility);
@@ -203,7 +237,7 @@ export default function RenderedSessionBoundary({
       window.removeEventListener("click", guard, true);
       window.removeEventListener("submit", guard, true);
     };
-  }, [ownerId, lineage, moved]);
+  }, [ownerId, lineage, moved, channel]);
 
   // A navigation inside the retained dashboard layout (the layout, and this boundary, stay mounted) confirms again.
   useEffect(() => {
@@ -215,12 +249,14 @@ export default function RenderedSessionBoundary({
   }, [pathname]);
 
   const shown = ended ?? (moved ? "account_changed" : null);
-  if (shown !== null) return <EndedView why={shown} />;
+  if (shown !== null) return <EndedView why={shown} plan={ended !== null ? planOutcome : null} />;
   return (
     <>
-      <RenderedSessionProvider ownerId={ownerId} lineage={lineage}>
-        {children}
-      </RenderedSessionProvider>
+      <RenderedViewEndProvider channel={channel}>
+        <RenderedSessionProvider ownerId={ownerId} lineage={lineage}>
+          {children}
+        </RenderedSessionProvider>
+      </RenderedViewEndProvider>
       {refused && <RefusedNotice />}
     </>
   );
@@ -245,7 +281,7 @@ function RefusedNotice() {
   );
 }
 
-function EndedView({ why }: { readonly why: ViewEnd }) {
+function EndedView({ why, plan }: { readonly why: ViewEnd; readonly plan: RenderedPlanOutcome | null }) {
   const copy = ENDED_COPY[why];
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   // the control that had focus was removed with the shell: focus moves to the guidance
@@ -256,7 +292,10 @@ function EndedView({ why }: { readonly why: ViewEnd }) {
     <main data-rendered-session-guidance="ended" className="flex-1 min-w-0 min-h-screen flex items-center justify-center p-6">
       <div className="w-full max-w-sm text-center bg-golf-header border border-white/5 rounded-2xl p-7">
         <h1 ref={headingRef} tabIndex={-1} className="text-white font-bold mb-2 outline-none">{copy.heading}</h1>
-        <p role="alert" className="text-sm text-gray-300 mb-6">{copy.body}</p>
+        <div role="alert" className="text-sm text-gray-300 mb-6 space-y-2">
+          <p>{copy.body}</p>
+          {plan !== null && <p data-rendered-session-plan-outcome={plan}>{PLAN_OUTCOME_COPY[plan]}</p>}
+        </div>
         <div className="flex flex-col gap-3 items-center">
           <button
             type="button"

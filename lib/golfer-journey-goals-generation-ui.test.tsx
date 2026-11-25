@@ -33,6 +33,9 @@ const h = vi.hoisted(() => ({
   // AG-WEB-READY-05-G1: what each client sent as the rendered owner (the form's expected_owner_id entries; the plan view's
   // arguments), and the account Auth verifies for the request (normally the rendered one; another account models the race)
   sent: { submit: [] as unknown[][], generate: [] as unknown[][] },
+  // AG-WEB-READY-08-P1: what the plan view reported to the rendered-session boundary around it (a fixture reporter that
+  // records each report and accepts it; the boundary itself is exercised in web-ready04 and web-ready08)
+  viewEnd: { reports: [] as unknown[] },
   env: {
     verifiedUser: null as string | null,
     auth: "ok" as "ok" | "absent" | "unavailable",
@@ -86,6 +89,12 @@ vi.mock("next/navigation", () => ({
 // F1-A1 (V1): the server-verified account the layout rendered (RenderedSessionProvider's value), and the shared browser
 // client the form confirms it with (the real confirmOwnerSession runs on it)
 vi.mock("@/components/navigation/SessionKeeper", () => ({ useRenderedSession: () => h.rendered }));
+vi.mock("@/components/navigation/RenderedSessionObservation", () => ({
+  useRenderedViewEndReport: () => (report: unknown) => {
+    h.viewEnd.reports.push(report);
+    return true;
+  },
+}));
 vi.mock("@/utils/supabase/client", () => {
   const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const sessionOf = (sub: string, sid: string) => ({
@@ -345,6 +354,7 @@ beforeEach(() => {
   h.rec.queries = [];
   h.sent.submit = [];
   h.sent.generate = [];
+  h.viewEnd.reports = [];
   h.env.verifiedUser = null;
   h.env.auth = "ok";
   h.env.exp = 3600;
@@ -878,6 +888,8 @@ describe("AG-WEB-READY-05-G1: both clients send the account they were rendered f
     expect(guidanceOf("plan")).toBe(true);
     expect(h.nav.refresh).toBe(0);
     expect(h.nav.push).toEqual([]);
+    // 08-P1: the browser still holds A (the confirmation is "ready"): a refusal code alone ends nothing around the view
+    expect(h.viewEnd.reports).toEqual([]);
   });
 
   // AG-WEB-READY-06-P1: the plan view now confirms its rendered owner before using any answer. A rendered owner the browser's
@@ -895,6 +907,9 @@ describe("AG-WEB-READY-05-G1: both clients send the account they were rendered f
     expect(text()).not.toContain(V.summary);
     expect(h.rec.queries).toHaveLength(0);
     expect(h.rec.calls).toBe(0);
+    // 08-P1: the confirmation names another account than the rendered one (a confirmed change): the view around it is told,
+    // with the fixed "refused" outcome (the server's known refusal: nothing saved) and nothing else
+    expect(h.viewEnd.reports).toEqual([{ end: "account_changed", plan: "refused" }]);
   });
 
   it("[G1] a plan view outside the rendered-session provider sends nothing: out-of-date guidance, the plan stays", async () => {
@@ -906,6 +921,7 @@ describe("AG-WEB-READY-05-G1: both clients send the account they were rendered f
     expect(text()).toContain(OUT_OF_DATE);
     expect(text()).toContain(V.summary);
     expect(links()).toContainEqual({ href: "/goals/plan", label: "Reload page" });
+    expect(h.viewEnd.reports).toEqual([]); // 08-P1: nothing was sent, nothing is reported
   });
 
   it("[G1] the same account still gets its result (the ordinary save and generation are unchanged)", async () => {
@@ -918,6 +934,7 @@ describe("AG-WEB-READY-05-G1: both clients send the account they were rendered f
     await regenerate();
     expect(text()).toContain(G.summary);
     expect(h.rec.calls).toBe(2);
+    expect(h.viewEnd.reports).toEqual([]); // 08-P1: an ordinary result reports nothing
   });
 
   it("[G1] the refusal guidance controls keep the 44 px touch-target classes", async () => {
