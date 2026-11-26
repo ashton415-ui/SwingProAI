@@ -166,12 +166,18 @@ describe("a revisited failed analysis shows why, without requesting another anal
   });
 
   it("the report's stored failed view shows the upload-again guidance with no Retry, and keeps Retry otherwise", () => {
-    const unusable = report.slice(report.indexOf("{isFailed && !showProcessing && failedReason === VIDEO_UNUSABLE_STATUS && ("), report.indexOf("{isFailed && !showProcessing && failedReason !== VIDEO_UNUSABLE_STATUS && ("));
+    // AG-WEB-READY-09-P1: any other stored failure is now shown by the report's status panel (its explicit, guarded
+    // "Retry analysis" action), so the two views are read from their own places; the assertions are unchanged.
+    const start = report.indexOf("{isFailed && !showProcessing && failedReason === VIDEO_UNUSABLE_STATUS && (");
+    const unusable = report.slice(start, report.indexOf("{isComplete && !showProcessing && <CoachingReport", start));
+    expect(start).toBeGreaterThan(0);
     expect(unusable).toContain("{VIDEO_UNUSABLE_COPY}");
     expect(unusable).toContain("Upload a new video");
     expect(unusable).not.toContain("Retry");
     expect(unusable).not.toContain("onClick");
-    const other = report.slice(report.indexOf("{isFailed && !showProcessing && failedReason !== VIDEO_UNUSABLE_STATUS && ("));
+    expect(report).toContain("const showProcessing = !isComplete && !(isFailed && failedReason === VIDEO_UNUSABLE_STATUS);");
+    const other = report.slice(report.indexOf('if (storedStatus === "failed") {'));
+    expect(report.indexOf('if (storedStatus === "failed") {')).toBeGreaterThan(0);
     expect(other.slice(0, 1400)).toContain("Retry");
   });
 

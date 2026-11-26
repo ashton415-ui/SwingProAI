@@ -74,4 +74,19 @@ describe("F1-T: measured controls have a 44 px minimum hit area on the element i
     expect(telemetry).toContain(">Upload First Swing</Link>");
     expect(goals).toContain('"Generate My Plan"');
   });
+
+  // AG-WEB-READY-09-P1-A1: the two history links measured under 44 px in 09-P1 (View Status 27.5 px, Full Report 31.5 px
+  // tall) carry the 44 px minimum and a visible keyboard focus outline on the link itself; destination and record id
+  // unchanged. The rendered sizes, hits, Tab focus and Enter are measured in a real browser at 390 and 1280 px (A1 lane).
+  it("Telemetry history links: Full Report and View Status are 44 px targets with a visible focus outline, same destination", () => {
+    const fullReport = tokens(classOf(telemetry, /<Link\s+href=\{`\/analyze\/\$\{log\.id\}`\}\s+/, /^Full Report$/));
+    const viewStatus = tokens(classOf(telemetry, /<Link href=\{`\/analyze\/\$\{log\.id\}`\}\s+/, /^View Status$/));
+    for (const [name, cls] of [["Full Report", fullReport], ["View Status", viewStatus]] as const) {
+      for (const t of ["min-h-11", "min-w-11", "inline-flex", "items-center", "justify-center", "focus-visible:outline", "focus-visible:outline-2", "focus-visible:outline-golf-green"]) {
+        expect(cls.has(t), `${name}: ${t}`).toBe(true);
+      }
+    }
+    // exactly these two history anchors point at a report, each with the row's own record id
+    expect(telemetry.match(/href=\{`\/analyze\/\$\{log\.id\}`\}/g)).toHaveLength(2);
+  });
 });

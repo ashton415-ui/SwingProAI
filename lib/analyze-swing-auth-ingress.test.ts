@@ -27,6 +27,10 @@ import type { NextRequest } from "next/server";
  * whole tree in each pass), the shared browser client is a stand-in whose session reads and events the test controls, and
  * every request the report sends goes to a recording fetch. lib/drill-hub-session.ts confirmOwnerSession / ownerBearer and
  * the ended-lineage notice are the real modules. Synthetic identities only; nothing leaves the process.
+ *
+ * AG-WEB-READY-09-P1: the report no longer sends its request when it opens; it sends it on the golfer's explicit "Analyze
+ * swing" press. openReport() therefore opens the report, checks that nothing was sent, and presses it once; every
+ * identity, Bearer and late-answer assertion below is unchanged.
  */
 
 const rt = vi.hoisted(() => ({
@@ -473,14 +477,26 @@ const COPY = {
   unavailable: "We couldn't check your sign-in just now, so this analysis wasn't started. Try again in a moment.",
   changed: "This browser is now signed in to a different account, so this analysis wasn't started. Refresh the page to continue with the account that's signed in now.",
   afterChange: "This browser's sign-in changed while your swing was being analyzed, so the result isn't shown here. Refresh the page to continue with the account that's signed in now.",
-  network: "We couldn't reach SwingProAI. Check your connection, then tap Retry.",
+  network: "We couldn't reach SwingProAI. Check your connection, then check this swing's status before trying again.", // 09-P1
 };
 
 async function renderedFor(owner: string | null, s?: Session) {
   rt.rendered = owner === null ? null : { ownerId: owner, lineage: s ? await sessionLineageId(s.access_token) : null };
 }
+/** 09-P1: one press of a labelled button, as the golfer's click (then the render it causes). */
+function press(page: ReturnType<typeof mount>, label: string) {
+  const button = page.button(label);
+  expect(button, label).not.toBeNull();
+  (button!.props.onClick as () => void)();
+  page.render();
+}
+/** 09-P1: open the pending report (nothing is sent), then the golfer's one "Analyze swing" press. */
 async function openReport() {
+  const sentBefore = reportCalls().length;
   const page = mount(AnalysisReport as unknown as (p: unknown) => unknown, { analysis: PENDING, videoSignedUrl: null, clubDisplayName: "Synthetic 7i" });
+  await settle(page);
+  expect(reportCalls(), "opening the report sends nothing").toHaveLength(sentBefore);
+  press(page, "Analyze swing");
   await settle(page);
   return page;
 }
@@ -541,7 +557,7 @@ describe("Part 2 — the analysis report sends its execution request only as the
     vi.unstubAllGlobals();
   });
 
-  it("healthy: on mount it sends ONE request with the rendered owner's confirmed Bearer, `credentials: \"omit\"` and the analysis id; the completed report is shown", async () => {
+  it("healthy: opening sends nothing; the golfer's press sends ONE request with the rendered owner's confirmed Bearer, `credentials: \"omit\"` and the analysis id; the completed report is shown", async () => {
     const a = sessionOf(A);
     await renderedFor(A, a);
     holds(a);
@@ -611,6 +627,8 @@ describe("Part 2 — the analysis report sends its execution request only as the
     const read = deferred<SessionAnswer>();
     (browser.client.auth as { getSession: () => Promise<SessionAnswer> }).getSession = () => read.promise;
     const page = mount(AnalysisReport as unknown as (p: unknown) => unknown, { analysis: PENDING, videoSignedUrl: null, clubDisplayName: null });
+    await settle(page);
+    press(page, "Analyze swing"); // 09-P1: the golfer's press starts the confirmation read
     await settle(page);
     browser.emit("SIGNED_IN", sessionOf(B));
     read.resolve({ data: { session: a }, error: null }); // a stale read of A
@@ -693,7 +711,7 @@ describe("Part 2 — the analysis report sends its execution request only as the
     page.render();
     expect(page.text()).not.toContain("Synthetic A feedback");
     expect(page.text()).not.toContain(COPY.afterChange);
-    expect(page.text()).toContain("Analysing Your Swing");
+    expect(page.text()).toContain("Starting Your Analysis"); // 09-P1-A1: the phase-neutral waiting heading
   });
 
   it("control: the same held completion with the report still shown runs its branch (drops the stored metrics) and shows the result", async () => {
@@ -727,14 +745,15 @@ describe("Part 2 — the analysis report sends its execution request only as the
     expect(page.text()).toContain(COPY.afterChange);
   });
 
-  it("the route's honest auth-unavailable 503 reaches the golfer as its fixed copy, with Retry", async () => {
+  it("the route's honest auth-unavailable 503 reaches the golfer as its fixed copy, with a status read (09-P1: every 503 offers a fresh read before a new attempt)", async () => {
     const a = sessionOf(A);
     await renderedFor(A, a);
     holds(a);
     respond = async () => json({ error: "We couldn't confirm your sign-in just now, so nothing was analyzed. Please try again shortly." }, 503);
     const page = await openReport();
     expect(page.text()).toContain("We couldn't confirm your sign-in just now, so nothing was analyzed. Please try again shortly.");
-    expect(page.button("Retry")).not.toBeNull();
+    expect(page.button("Check status")).not.toBeNull();
+    expect(page.button("Retry")).toBeNull();
   });
 
   it("a sign-in whose End Session the server already confirmed (its removal still pending here): nothing is sent; the copy says it was ended (not 'expired')", async () => {
@@ -762,7 +781,7 @@ describe("Part 2 — the analysis report sends its execution request only as the
     expect(wire).toEqual([]);
   });
 
-  it("control: unchanged report behaviour — 409 processing shows 'Still Analysing'; 409 stalled offers no Retry; an unusable video asks for a new upload; a network failure is fixed copy with Retry, and Retry confirms again before resending", async () => {
+  it("control: report behaviour — 409 processing shows 'Still Analysing'; 409 stalled offers no Retry; an unusable video asks for a new upload; a network failure is fixed copy with a status read (09-P1: no resend); after a 401 Retry confirms again before resending", async () => {
     const a = sessionOf(A);
     await renderedFor(A, a);
     holds(a);
@@ -782,23 +801,31 @@ describe("Part 2 — the analysis report sends its execution request only as the
     };
     page = await openReport();
     expect(page.text()).toContain(COPY.network);
+    expect(page.button("Retry")).toBeNull(); // 09-P1: the request may have arrived: a status read comes first
+    expect(page.button("Check status")).not.toBeNull();
+    // a certain outcome where nothing was analyzed (401) keeps its Retry, which confirms again before resending
+    wire = [];
+    respond = async () => json({ error: "Unauthorized" }, 401);
+    page = await openReport();
     const before = browser.state.reads;
     respond = async () => json(COMPLETE("Synthetic A feedback"));
-    (page.button("Retry")!.props.onClick as () => void)();
-    page.render();
+    press(page, "Retry");
     await settle(page);
     expect(browser.state.reads).toBeGreaterThan(before); // re-confirmed for the retry
     expect(reportCalls().map((r) => r.authorization)).toEqual([`Bearer ${a.access_token}`, `Bearer ${a.access_token}`]);
     expect(page.text()).toContain("Synthetic A feedback");
   });
 
-  it("server render (no effects) is unchanged: a pending report renders its processing state without touching the browser client", () => {
+  it("server render (no effects): a pending report renders its saved status and the explicit analysis action without touching the browser client (09-P1: no 'Analysing' claim before a request)", () => {
     rt.rendered = null;
     rt.slots = [];
     rt.pending = [];
     rt.i = 0;
     const markup = renderToStaticMarkup(React.createElement(AnalysisReport as unknown as React.ComponentType<Record<string, unknown>>, { analysis: PENDING, videoSignedUrl: null, clubDisplayName: null }));
-    expect(markup).toContain("Analysing Your Swing");
+    expect(markup).toContain("Not analyzed yet");
+    expect(markup).toContain("Analyze swing");
+    expect(markup).not.toContain("Analysing Your Swing");
+    expect(markup).not.toContain("Starting Your Analysis"); // 09-P1-A1: nothing waits before a press
     expect(wire).toEqual([]);
   });
 });

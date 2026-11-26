@@ -200,7 +200,7 @@ function SwingLogCard({ log }: { log: SwingLog }) {
         {isComplete && (
           <Link
             href={`/analyze/${log.id}`}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-golf-green/10 border border-golf-green/20 text-[9px] font-black uppercase tracking-widest text-golf-green hover:bg-golf-green/20 transition-colors"
+            className="shrink-0 inline-flex items-center justify-center gap-1.5 min-h-11 min-w-11 px-3.5 py-2 rounded-xl bg-golf-green/10 border border-golf-green/20 text-[9px] font-black uppercase tracking-widest text-golf-green hover:bg-golf-green/20 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green"
           >
             Full Report <ChevronRight className="w-3 h-3" />
           </Link>
@@ -292,7 +292,7 @@ function SwingLogCard({ log }: { log: SwingLog }) {
       {!isComplete && (
         <div className="px-5 py-3 flex items-center justify-between border-t border-white/[0.04]">
           <span className="text-[9px] text-gray-700">Analysis {log.status}</span>
-          <Link href={`/analyze/${log.id}`} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-[9px] font-black uppercase tracking-widest text-gray-500 hover:text-white hover:border-white/20 transition-colors">
+          <Link href={`/analyze/${log.id}`} className="inline-flex items-center justify-center gap-1.5 min-h-11 min-w-11 px-3 py-1.5 rounded-lg border border-white/10 text-[9px] font-black uppercase tracking-widest text-gray-500 hover:text-white hover:border-white/20 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green">
             View Status <ChevronRight className="w-3 h-3" />
           </Link>
         </div>

@@ -21,6 +21,13 @@ import { renderToStaticMarkup } from "react-dom/server";
  * (server-rendered, and answered 422); 409 processing; 409 stalled; completed data; identity refusal (nothing sent); a
  * late answer after the report was left. For each: the status pill, the heading/copy, the recovery action, and the
  * exact number of requests (no new request, write, dispatch or retry beyond the golfer's own press).
+ *
+ * AG-WEB-READY-09-P1: opening the report no longer sends anything. Each case that exercises a request's outcome opens the
+ * pending report, checks that nothing was sent, and presses the explicit "Analyze swing" action once (analyzed()); the
+ * outcome, pill and identity assertions are unchanged. After an outcome that may have changed the saved status (a 503,
+ * an unreachable server, an unreadable or malformed answer, a readable 500/400, 404, 409) the recovery is now "Check
+ * status" — a fresh read of the saved status (a page reload; no request) — instead of an immediate Retry; a Retry stays
+ * where nothing was analyzed (identity refusal, 401, an outright refusal such as 403) and on a stored failure.
  */
 
 const rt = vi.hoisted(() => ({
@@ -209,9 +216,10 @@ const AUTH_503 = "We couldn't confirm your sign-in just now, so nothing was anal
 const ROUTE_500 = "Analysis failed. Please try again.";
 const SAVE_400 = "We couldn't save your analysis. Please try again.";
 const COPY = {
-  network: "We couldn't reach SwingProAI. Check your connection, then tap Retry.",
-  unknown: "We couldn't confirm what happened with this request. Your swing is saved. Reload to see its current status, or retry.",
-  attempt: "This attempt didn't complete, so its result isn't confirmed. Your swing is saved. Reload to see this analysis's current status, or retry.",
+  // 09-P1: the copy names the way forward the page now offers after these outcomes (a status read, not a resend)
+  network: "We couldn't reach SwingProAI. Check your connection, then check this swing's status before trying again.",
+  unknown: "We couldn't confirm what happened with this request. Your swing is saved. Check its current status before trying again.",
+  attempt: "This attempt didn't complete, so its result isn't confirmed. Your swing is saved. Check this analysis's current status before trying again.",
   signin: "We couldn't confirm your sign-in for this request, so nothing was analyzed. Sign in again, then retry.",
   changed: "This browser is now signed in to a different account, so this analysis wasn't started. Refresh the page to continue with the account that's signed in now.",
 };
@@ -236,6 +244,41 @@ async function open(analysis: AnalysisData, extra: Record<string, unknown> = {})
   return page;
 }
 
+/** 09-P1: one press of a labelled button, as the golfer's click (then the render it causes). */
+function press(page: Mounted, label: string) {
+  const button = page.button(label);
+  expect(button, label).not.toBeNull();
+  (button!.props.onClick as () => void)();
+  page.render();
+}
+
+/** 09-P1: opening the report sends nothing; the golfer's one "Analyze swing" press sends the request. */
+async function analyzed(analysis: AnalysisData, extra: Record<string, unknown> = {}) {
+  const sentBefore = reportCalls().length;
+  const page = await open(analysis, extra);
+  expect(reportCalls(), "opening the report sends nothing").toHaveLength(sentBefore);
+  press(page, "Analyze swing");
+  await settle(page);
+  return page;
+}
+
+/** 09-P1: "Check status" / "Check again" is a reload of the page (its own server read); returns the reloads it caused. */
+async function pressCheck(page: Mounted, label = "Check status") {
+  let reloads = 0;
+  const g = globalThis as Record<string, unknown>;
+  const had = "window" in g;
+  const previous = g.window;
+  g.window = { location: { reload: () => { reloads += 1; } } }; // only for the click itself (the reload is synchronous)
+  try {
+    press(page, label);
+  } finally {
+    if (had) g.window = previous;
+    else delete g.window;
+  }
+  await settle(page);
+  return reloads;
+}
+
 describe("F1-R: the status pill shows what the page knows about the saved status; a request's outcome is shown separately", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
@@ -257,58 +300,66 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     vi.unstubAllGlobals();
   });
 
-  it("pending + the route's missing-provider-key 503: the pill stays 'pending', the panel says the analysis is unavailable (not 'Analysis Failed'), one request, Retry offered", async () => {
-    const page = await open(PENDING);
+  it("pending + the route's missing-provider-key 503: the pill stays 'pending', the panel says the analysis is unavailable (not 'Analysis Failed'), one request, a status read (not a Retry) offered", async () => {
+    const page = await analyzed(PENDING);
     expect(reportCalls()).toHaveLength(1);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Analysis unavailable right now");
     expect(page.text()).toContain(MISSING_KEY_503);
     expect(page.text()).not.toContain("Analysis Failed");
-    expect(page.button("Retry")).not.toBeNull();
+    // 09-P1: a 503 may follow a recorded change, so a fresh status read comes before any new attempt
+    expect(page.button("Retry")).toBeNull();
+    expect(page.button("Check status")).not.toBeNull();
     // no follow-up request of its own: only the golfer's press sends again
     await vi.advanceTimersByTimeAsync(60_000);
     await settle(page);
     expect(reportCalls()).toHaveLength(1);
+    expect(await pressCheck(page)).toBe(1); // a reload (the page's own server read) ...
+    expect(reportCalls()).toHaveLength(1); // ... and no analysis request
   });
 
   it("pending + an Auth-unavailable 503: same honest unavailable presentation; the status is not changed", async () => {
     respond = async () => json({ error: AUTH_503 }, 503);
-    const page = await open(PENDING);
+    const page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Analysis unavailable right now");
     expect(page.text()).toContain(AUTH_503);
     expect(page.text()).not.toContain("Analysis Failed");
   });
 
-  it("a rejected fetch (no answer): 'Couldn't reach SwingProAI', fixed copy, pill unchanged, Retry", async () => {
+  it("a rejected fetch (no answer): 'Couldn't reach SwingProAI', fixed copy, pill unchanged, a status read offered", async () => {
     respond = () => Promise.reject(new TypeError("Failed to fetch synthetic-internal"));
-    const page = await open(PENDING);
+    const page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Couldn't reach SwingProAI");
     expect(page.text()).toContain(COPY.network);
     expect(page.text()).not.toMatch(/synthetic-internal|TypeError|Analysis Failed/);
-    expect(page.button("Retry")).not.toBeNull();
+    // 09-P1: the request may have arrived: a status read first, never an immediate resend
+    expect(page.button("Retry")).toBeNull();
+    expect(page.button("Check status")).not.toBeNull();
   });
 
-  it("an answer that is not the route's JSON (a gateway page; JSON null): outcome unknown, honest Retry label, pill unchanged", async () => {
+  it("an answer that is not the route's JSON (a gateway page; JSON null): outcome unknown, a status read offered, pill unchanged", async () => {
     respond = async () => new Response("<html>504 Gateway Timeout</html>", { status: 504, headers: { "content-type": "text/html" } });
-    let page = await open(PENDING);
+    let page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Result not confirmed");
     expect(page.text()).toContain(COPY.unknown);
     expect(page.text()).not.toMatch(/Gateway|Analysis Failed/);
-    expect(page.button("Retry")).not.toBeNull(); // the press sends a new request: it is labelled as one
+    // 09-P1: the outcome is unknown, so the action offered is a fresh read of the saved status (no resend)
+    expect(page.button("Retry")).toBeNull();
+    expect(page.button("Check status")).not.toBeNull();
     expect(page.button("Check again")).toBeNull();
     page.unmount();
     respond = async () => json(null, 200);
-    page = await open(PENDING);
+    page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Result not confirmed");
     expect(page.text()).not.toContain("Couldn't reach SwingProAI");
     page.unmount();
     // an error that is not text is not shown (and cannot break the page)
     respond = async () => json({ error: { message: "SYNTHETIC-OBJECT-ERROR" } }, 400);
-    page = await open(PENDING);
+    page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Result not confirmed");
     expect(page.text()).not.toContain("SYNTHETIC-OBJECT-ERROR");
@@ -316,7 +367,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
 
   it("401: fixed sign-in-again copy with Retry and a Sign in link; the pill keeps 'pending' (nothing was analyzed)", async () => {
     respond = async () => json({ error: "Unauthorized" }, 401);
-    const page = await open(PENDING);
+    const page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.text()).toContain("Sign-in not confirmed");
     expect(page.text()).toContain(COPY.signin);
@@ -329,13 +380,15 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [status, body] of [[500, ROUTE_500], [400, SAVE_400]] as const) {
       wire = [];
       respond = async () => json({ error: body }, status);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(reportCalls()).toHaveLength(1);
       expect(page.pill()).toBe("unconfirmed");
       expect(page.text()).toContain("This attempt didn't complete");
       expect(page.text()).toContain(COPY.attempt);
       expect(page.text()).not.toContain("Analysis Failed");
-      expect(page.button("Retry")).not.toBeNull();
+      // 09-P1: a failure may have been recorded: a status read first (a recorded failure then offers its own Retry)
+      expect(page.button("Retry")).toBeNull();
+      expect(page.button("Check status")).not.toBeNull();
       page.unmount();
     }
   });
@@ -343,7 +396,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
   it("refusals that change nothing (403, 404, 409 not startable) keep the stored status and show the route's own copy", async () => {
     for (const [status, body] of [[403, "Putting analysis isn't included with your current plan."], [404, "Analysis record not found."], [409, "This analysis can't be started right now. Please refresh and try again."]] as const) {
       respond = async () => json({ error: body }, status);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(page.pill()).toBe("pending");
       expect(page.text()).toContain("Request not accepted");
       expect(page.text()).toContain(body);
@@ -351,23 +404,22 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     }
   });
 
-  it("an unconfirmed status is cleared only by completed data from a later press", async () => {
+  it("09-P1: an unconfirmed status stays until a fresh read: no in-view resend is offered; 'Check status' reloads and sends nothing", async () => {
     respond = async () => json({ error: ROUTE_500 }, 500);
-    const page = await open(PENDING);
+    const page = await analyzed(PENDING);
     expect(page.pill()).toBe("unconfirmed");
-    respond = async () => json({ message: "Analysis complete", data: { ...PENDING, status: "complete", score: 77, feedback: "Synthetic F1 retry feedback", swing_highlights: [], mechanical_deficiencies: [], metrics: {} } });
-    (page.button("Retry")!.props.onClick as () => void)();
-    page.render();
-    await settle(page);
-    expect(page.pill()).toBe("complete");
+    expect(page.button("Retry")).toBeNull();
+    expect(await pressCheck(page)).toBe(1);
+    expect(reportCalls()).toHaveLength(1);
+    expect(page.pill()).toBe("unconfirmed"); // nothing in this view claims otherwise; the reload's read decides
   });
 
-  it("Retry is the golfer's press: exactly one more request per press, and a later healthy answer completes the report", async () => {
-    const page = await open(PENDING);
+  it("Retry is the golfer's press: after an outright refusal, exactly one more request per press, and a later healthy answer completes the report", async () => {
+    respond = async () => json({ error: "Putting analysis isn't included with your current plan." }, 403);
+    const page = await analyzed(PENDING);
     expect(reportCalls()).toHaveLength(1);
     respond = async () => json({ message: "Analysis complete", data: { ...PENDING, status: "complete", score: 81, feedback: "Synthetic F1 feedback", swing_highlights: [], mechanical_deficiencies: [], metrics: {} } });
-    (page.button("Retry")!.props.onClick as () => void)();
-    page.render();
+    press(page, "Retry");
     await settle(page);
     expect(reportCalls()).toHaveLength(2);
     expect(page.pill()).toBe("complete");
@@ -390,7 +442,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     expect(page.link("Upload a new video")).not.toBeNull();
     page.unmount();
     respond = async () => json({ error: VIDEO_UNUSABLE_COPY, status: VIDEO_UNUSABLE_STATUS }, 422);
-    page = await open(PENDING);
+    page = await analyzed(PENDING);
     expect(reportCalls()).toHaveLength(1);
     expect(page.pill()).toBe("failed"); // the server reported the stored analysis failed
     expect(page.text()).toContain("Analysis Failed");
@@ -400,13 +452,16 @@ describe("F1-R: the status pill shows what the page knows about the saved status
 
   it("409 processing and 409 stalled keep their own states", async () => {
     respond = async () => json({ error: "This analysis is already in progress.", status: "processing" }, 409);
-    let page = await open(PENDING);
+    let page = await analyzed(PENDING);
     expect(page.text()).toContain("Still Analysing");
     expect(page.pill()).toBe("pending");
     expect(page.button("Check again")).not.toBeNull();
+    // 09-P1: "Check again" reads the saved status (a reload); it never sends another analysis request
+    expect(await pressCheck(page, "Check again")).toBe(1);
+    expect(reportCalls()).toHaveLength(1);
     page.unmount();
     respond = async () => json({ error: "This analysis was interrupted and can't be finished.", status: "stalled" }, 409);
-    page = await open(PENDING);
+    page = await analyzed(PENDING);
     expect(page.text()).toContain("Analysis Interrupted");
     expect(page.pill()).toBe("interrupted");
   });
@@ -416,6 +471,9 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     rt.rendered = { ownerId: A, lineage: await sessionLineageId(a.access_token) };
     browser.state.session = sessionOf(B);
     const page = mount(AnalysisReport as unknown as (p: unknown) => unknown, { analysis: PENDING, videoSignedUrl: null, clubDisplayName: null });
+    await settle(page);
+    expect(wire).toEqual([]); // 09-P1: opening sends nothing ...
+    press(page, "Analyze swing"); // ... and the golfer's press is refused before anything is sent
     await settle(page);
     expect(wire).toEqual([]);
     expect(page.pill()).toBe("pending");
@@ -433,7 +491,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
       let release!: (r: Response) => void;
       respond = () => new Promise<Response>((r) => { release = r; });
       wire = [];
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(reportCalls()).toHaveLength(1);
       page.unmount();
       rt.dirty = false;
@@ -447,7 +505,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
 
   // ─── F1-A1 (R1): what the page knows after an ambiguous answer is shown as such ───────────────────────────────────
   const LAST_KNOWN = "Last known status";
-  const NOTE = "Not confirmed since this request. Reload to check.";
+  const NOTE = "Not confirmed since this request. Check status to read it."; // 09-P1: the note names the action offered
   // the route's generic full-swing 503, sent both before a claim and after an undispatched claim was released as failed
   // (dispatchRefused and videoLoadRefused); the page cannot tell them apart and must not try
   const FULL_SWING_503 = "Analysis is temporarily unavailable. Please try again shortly.";
@@ -457,7 +515,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [name, body] of [["missing key", MISSING_KEY_503], ["auth unavailable", AUTH_503], ["post-claim dispatch refused", FULL_SWING_503], ["post-claim video load refused", FULL_SWING_503]] as const) {
       wire = [];
       respond = async () => json({ error: body }, 503);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(page.pill(), name).toBe("pending");
       expect(page.statusLabel(), name).toBe(LAST_KNOWN);
       expect(page.text(), name).toContain(NOTE);
@@ -476,7 +534,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
       async () => new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } }),
     ]) {
       respond = make;
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(page.pill()).toBe("pending");
       expect(page.statusLabel()).toBe(LAST_KNOWN);
       expect(page.text()).toContain(NOTE);
@@ -487,7 +545,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
   it("[A1-R1] refusals that say nothing about the saved analysis (401, 403) keep the plain 'Status' label", async () => {
     for (const [status, body] of [[401, "Unauthorized"], [403, "Putting analysis isn't included with your current plan."]] as const) {
       respond = async () => json({ error: body }, status);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(page.statusLabel(), String(status)).toBe("Status");
       expect(page.text(), String(status)).not.toContain(NOTE);
       expect(page.pill(), String(status)).toBe("pending");
@@ -502,7 +560,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
       [409, { error: "This analysis is already in progress. Please check back shortly.", status: "processing" }],
     ] as const) {
       respond = async () => json(body, status);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       const name = `${status} ${JSON.stringify(body).slice(0, 40)}`;
       expect(page.statusLabel(), name).toBe(LAST_KNOWN);
       expect(page.text(), name).toContain(NOTE);
@@ -526,21 +584,28 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     expect(page.text()).toContain(NOTE);
   });
 
-  it("[A1-R1] a readable 500/400 stays 'unconfirmed' (not weakened by a later 503); only completed data clears what the page knows", async () => {
-    respond = async () => json({ error: ROUTE_500 }, 500);
-    const page = await open(PENDING);
-    expect(page.pill()).toBe("unconfirmed");
-    expect(page.statusLabel()).toBe("Status");
-    respond = async () => json({ error: FULL_SWING_503 }, 503);
-    (page.button("Retry")!.props.onClick as () => void)();
-    page.render();
+  it("[A1-R1] a readable 500/400 stays 'unconfirmed' (09-P1: no in-view resend can weaken it — the way forward is a status read); completed data from a later press shows the plain status", async () => {
+    for (const [status, body] of [[500, ROUTE_500], [400, SAVE_400]] as const) {
+      wire = [];
+      respond = async () => json({ error: body }, status);
+      const page = await analyzed(PENDING);
+      expect(page.pill()).toBe("unconfirmed");
+      expect(page.statusLabel()).toBe("Status");
+      expect(page.button("Retry")).toBeNull();
+      expect(page.button("Analyze swing")).toBeNull();
+      expect(await pressCheck(page)).toBe(1);
+      expect(reportCalls()).toHaveLength(1);
+      expect(page.pill()).toBe("unconfirmed");
+      page.unmount();
+    }
+    // a press that may resend (after an outright refusal) and is answered with completed data: the plain status, no note
+    wire = [];
+    respond = async () => json({ error: "Putting analysis isn't included with your current plan." }, 403);
+    const page = await analyzed(PENDING);
+    respond = async () => json(VALID("A1 synthetic completed feedback"));
+    press(page, "Retry");
     await settle(page);
     expect(reportCalls()).toHaveLength(2);
-    expect(page.pill()).toBe("unconfirmed");
-    respond = async () => json(VALID("A1 synthetic completed feedback"));
-    (page.button("Retry")!.props.onClick as () => void)();
-    page.render();
-    await settle(page);
     expect(page.pill()).toBe("complete");
     expect(page.statusLabel()).toBe("Status");
     expect(page.text()).not.toContain(NOTE);
@@ -548,7 +613,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
   });
 
   // ─── F1-A1 (R2): only the completed analysis this page asked about replaces it ────────────────────────────────────
-  it("[A1-R2] a 2xx that is not a valid completion of THIS analysis replaces nothing: no crash, no score or status invented, 'Result not confirmed', last known status, Retry; one request", async () => {
+  it("[A1-R2] a 2xx that is not a valid completion of THIS analysis replaces nothing: no crash, no score or status invented, 'Result not confirmed', last known status, a status read (09-P1); one request", async () => {
     const OTHER = randomUUID();
     const cases: [string, unknown][] = [
       ["empty object", {}],
@@ -573,13 +638,14 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [name, body] of cases) {
       wire = [];
       respond = async () => json(body, 200);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(page.pill(), name).toBe("pending");
       expect(page.statusLabel(), name).toBe(LAST_KNOWN);
       expect(page.text(), name).toContain("Result not confirmed");
       expect(page.text(), name).toContain(COPY.unknown);
       expect(page.text(), name).not.toMatch(/MALFORMED-MARKER|AI COACHING|Analysis Failed/i);
-      expect(page.button("Retry"), name).not.toBeNull();
+      expect(page.button("Check status"), name).not.toBeNull(); // 09-P1: a status read, not a resend
+      expect(page.button("Retry"), name).toBeNull();
       expect(reportCalls(), name).toHaveLength(1);
       page.unmount();
     }
@@ -596,7 +662,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     ];
     for (const [status, body, pill, label, shown] of cases) {
       respond = async () => json(body, status);
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       const name = `${status} ${JSON.stringify(body).slice(0, 30)}`;
       expect(page.pill(), name).toBe(pill);
       expect(page.statusLabel(), name).toBe(label);
@@ -612,7 +678,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
       async () => new Response("", { status: 200, headers: { "content-type": "application/json" } }),
     ]) {
       respond = make;
-      const page = await open(PENDING);
+      const page = await analyzed(PENDING);
       expect(page.pill()).toBe("pending");
       expect(page.statusLabel()).toBe(LAST_KNOWN);
       expect(page.text()).toContain("Result not confirmed");
@@ -622,12 +688,12 @@ describe("F1-R: the status pill shows what the page knows about the saved status
 
   it("[A1-R2] 'video_unusable' counts as the stored failure only with the route's 422; with another status it is not one", async () => {
     respond = async () => json({ error: VIDEO_UNUSABLE_COPY, status: VIDEO_UNUSABLE_STATUS }, 500);
-    let page = await open(PENDING);
+    let page = await analyzed(PENDING);
     expect(page.pill()).toBe("unconfirmed");
     expect(page.link("Upload a new video")).toBeNull();
     page.unmount();
     respond = async () => json({ error: VIDEO_UNUSABLE_COPY, status: VIDEO_UNUSABLE_STATUS }, 200);
-    page = await open(PENDING);
+    page = await analyzed(PENDING);
     expect(page.pill()).toBe("pending");
     expect(page.statusLabel()).toBe(LAST_KNOWN);
     expect(page.text()).toContain("Result not confirmed");
@@ -644,7 +710,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     };
     const view = serializeAnalysisResult(row, { puttingAnalysis: false, equipmentFitting: false, launchMonitorIntelligence: false } as never);
     respond = async () => json({ message: "Analysis complete", data: view });
-    const page = await open(PENDING);
+    const page = await analyzed(PENDING);
     expect(page.pill()).toBe("complete");
     expect(page.statusLabel()).toBe("Status");
     expect(page.text()).toContain("Serialised synthetic feedback");
@@ -659,7 +725,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [name, filename] of [["object", { bad: true }], ["array", ["a1-r2.webm"]], ["number", 7], ["boolean", true]] as const) {
       wire = [];
       respond = async () => json(completionWith({ swing_video: { id: randomUUID(), storage_path: null, original_filename: filename, club: null, created_at: "2026-11-23T00:00:00Z" } }));
-      const page = await open(PENDING, { videoSignedUrl: VIDEO_URL });
+      const page = await analyzed(PENDING, { videoSignedUrl: VIDEO_URL });
       expect(page.pill(), name).toBe("pending");
       expect(page.statusLabel(), name).toBe(LAST_KNOWN);
       expect(page.text(), name).toContain("Result not confirmed");
@@ -684,7 +750,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [name, coordinate] of cases) {
       wire = [];
       respond = async () => json(completionWith({ mechanical_deficiencies: [deficiency(coordinate)] }));
-      const page = await open(PENDING, { videoSignedUrl: VIDEO_URL });
+      const page = await analyzed(PENDING, { videoSignedUrl: VIDEO_URL });
       expect(page.pill(), name).toBe("pending");
       expect(page.statusLabel(), name).toBe(LAST_KNOWN);
       expect(page.text(), name).toContain("Result not confirmed");
@@ -711,7 +777,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [name, d] of cases) {
       wire = [];
       respond = async () => json(completionWith({ mechanical_deficiencies: [d] }));
-      const page = await open(PENDING, { videoSignedUrl: VIDEO_URL });
+      const page = await analyzed(PENDING, { videoSignedUrl: VIDEO_URL });
       expect(page.pill(), name).toBe("pending");
       expect(page.statusLabel(), name).toBe(LAST_KNOWN);
       const html = page.markup();
@@ -726,7 +792,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [severity, chip] of [["minor", ">Minor<"], ["major", ">Major<"], [null, null]] as const) {
       wire = [];
       respond = async () => json(completionWith({ mechanical_deficiencies: [{ ...deficiency("left hip"), severity }] }));
-      const page = await open(PENDING, { videoSignedUrl: VIDEO_URL });
+      const page = await analyzed(PENDING, { videoSignedUrl: VIDEO_URL });
       const name = String(severity);
       expect(page.pill(), name).toBe("complete");
       const html = page.markup();
@@ -750,7 +816,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
     for (const [name, over, shown] of cases) {
       wire = [];
       respond = async () => json(completionWith(over));
-      const page = await open(PENDING, { videoSignedUrl: VIDEO_URL });
+      const page = await analyzed(PENDING, { videoSignedUrl: VIDEO_URL });
       expect(page.pill(), name).toBe("complete");
       expect(page.statusLabel(), name).toBe("Status");
       const html = page.markup();
@@ -764,7 +830,7 @@ describe("F1-R: the status pill shows what the page knows about the saved status
 
   it("[A1-R2] the valid completion of the requested analysis (nullable containers kept) replaces it, once", async () => {
     respond = async () => json({ message: "Analysis complete", data: { ...PENDING, status: "complete", score: 64, feedback: null, swing_highlights: null, mechanical_deficiencies: null, metrics: null } });
-    const page = await open(PENDING);
+    const page = await analyzed(PENDING);
     expect(page.pill()).toBe("complete");
     expect(page.statusLabel()).toBe("Status");
     expect(reportCalls()).toHaveLength(1);
