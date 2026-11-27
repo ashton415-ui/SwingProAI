@@ -535,8 +535,8 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
 
     const guard = submission.indexOf("isPuttingCapturePresentation(savedClubs, selectedClubId)");
     const preprocessing = submission.indexOf("await getTrimmedBlob()");
-    const storage = submission.indexOf("supabase.storage");
-    const videos = submission.indexOf('.from("swing_videos")');
+    const storage = submission.indexOf("await transferSelection("); // A1: the V1 signed transfer
+    const videos = submission.indexOf('fetch("/api/v1/uploads/finalize"'); // P2: the swing_videos row
     // Analysis request authority closure: the analysis row is created by the
     // trusted doorway, which occupies the old browser insert's step.
     const analysis = submission.indexOf('fetch("/api/v1/analyses"');

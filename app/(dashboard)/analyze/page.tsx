@@ -54,6 +54,18 @@ import {
   selectCameraRecorderMimeType,
 } from "@/lib/analyze-camera-capture";
 import type { DeficiencyItem, HighlightItem } from "@/types/database";
+import {
+  TUS_RESUMABLE_VERSION,
+  UPLOAD_CHUNK_SIZE,
+  buildResumableEndpoint,
+  buildTusUploadMetadata,
+  buildUploadObjectPath,
+  isUploadMimeType,
+  parseSignedUploadGrant,
+  resolveTusUploadUrl,
+  type UploadMimeType,
+} from "@/lib/api/v1-upload-dto";
+import { ADMISSION_DECLARATION_HEADER, ADMISSION_DECLARATION_VALUE } from "@/lib/analysis-attempt-precedence";
 
 /** Browsers open a file input on Space but not on Enter, which is what a
  *  keyboard user presses on a button-like control. Enter opens it too. */
@@ -268,9 +280,189 @@ interface AnalysisResult {
   _upgradeMessage?: string;
 }
 
-const BUCKET = "swing-videos";
 const MAX_FILE_MB = 250;
 const MAX_SEGMENT_SECONDS = 15;
+
+// ── AG-WEB-READY-10-P2: one stable upload identity per deliberate clip selection ─────────────────────────────────
+// The selection is the signed-in owner, the chosen file, its trim and its club. Pressing Run again for the SAME
+// selection (after a lost answer, a dropped connection or a refusal) re-sends the SAME upload id through the V1 upload
+// contract's object key, so Storage (one immutable object key), swing_videos (the id is the primary key), the analysis request (one
+// per video) and the admission (one attempt per analysis) all answer the existing records: no second upload, video,
+// analysis or reservation. Any new selection, or another account, gets a new id. Held in memory for this page only.
+interface UploadIntent {
+  readonly ownerId: string | null;
+  readonly file: File;
+  readonly trimStart: number;
+  readonly trimEnd: number;
+  readonly clubId: string | null;
+  readonly uploadId: string;
+  /** The prepared clip, kept so a repeat sends the identical bytes. */
+  blob: Blob | null;
+  /** An upload of this selection was sent: a repeat asks finalize first whether the object is already stored. */
+  sent: boolean;
+  /** A1: this selection's signed resumable transfer (page memory only), so a repeat resumes it rather than re-sending. */
+  transfer: SignedTransfer | null;
+}
+
+function sameSelection(
+  intent: UploadIntent | null,
+  selection: Pick<UploadIntent, "ownerId" | "file" | "trimStart" | "trimEnd" | "clubId">,
+): intent is UploadIntent {
+  return intent !== null && intent.ownerId !== null && intent.ownerId === selection.ownerId && intent.file === selection.file
+    && intent.trimStart === selection.trimStart && intent.trimEnd === selection.trimEnd && intent.clubId === selection.clubId;
+}
+
+/** The V1 content type of a clip: its MIME base type, or (when a platform reports none) its name's extension; or null. */
+function uploadMimeTypeOf(blob: Blob, fileName: string): UploadMimeType | null {
+  const base = blob.type.split(";")[0].trim().toLowerCase();
+  if (isUploadMimeType(base)) return base;
+  if (base === "") {
+    if (/\.(mp4|m4v)$/i.test(fileName)) return "video/mp4";
+    if (/\.mov$/i.test(fileName)) return "video/quicktime";
+    if (/\.webm$/i.test(fileName)) return "video/webm";
+  }
+  return null;
+}
+
+// ── AG-WEB-READY-10-P2-A1: the V1 signed resumable transfer of one selection ─────────────────────────────────────
+// The first transfer of a selection uses exactly what POST /api/v1/uploads/authorize answered: its endpoint (the
+// project's direct Storage host) and its short-lived, path-scoped signature, over the resumable (TUS) protocol, in the
+// fixed 6 MiB chunks the contract names. Nothing else is trusted: the answer must name this upload id, this owner's
+// object key, this content type and no upsert, at exactly the endpoint this deployment's project URL implies
+// (parseSignedUploadGrant), and the transfer address must stay on the endpoint's own origin and path
+// (resolveTusUploadUrl); no redirect is followed. The signature is kept in page memory for this selection only and is
+// never logged or stored.
+interface SignedTransfer {
+  readonly uploadUrl: string;
+  readonly signature: string;
+  /** When the signature stops being usable (its lifetime less a minute), in epoch ms. */
+  readonly usableUntil: number;
+}
+
+/** What one transfer pass left: the clip is stored; signing or creation was refused (the key may already be stored,
+ *  which V1 finalize decides); or the transfer failed. */
+type TransferResult = "stored" | "maybe_stored" | "failed";
+
+/** Chunks re-read and re-sent after a failed one, per pass. */
+const TRANSFER_RETRIES = 3;
+
+function signedTransferHeaders(signature: string, extra: Readonly<Record<string, string>> = {}): Record<string, string> {
+  return {
+    "Tus-Resumable": TUS_RESUMABLE_VERSION,
+    "x-signature": signature,
+    apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
+    ...extra,
+  };
+}
+
+/** The stored offset of an earlier transfer (HEAD), or null when the server has none to resume. */
+async function signedTransferOffset(transfer: SignedTransfer, size: number, signal: AbortSignal): Promise<number | null> {
+  try {
+    const r = await fetch(transfer.uploadUrl, {
+      method: "HEAD", credentials: "omit", cache: "no-store", redirect: "error", signal, headers: signedTransferHeaders(transfer.signature),
+    });
+    if (r.status !== 200) return null;
+    const offset = Number(r.headers.get("upload-offset"));
+    return Number.isSafeInteger(offset) && offset >= 0 && offset <= size ? offset : null;
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return null;
+  }
+}
+
+/** Sends the clip from `start` in chunks; after a failed chunk the server's offset is read again (bounded retries). */
+async function sendSignedChunks(
+  transfer: SignedTransfer, blob: Blob, start: number, chunkSize: number, signal: AbortSignal, between: () => void,
+): Promise<boolean> {
+  let offset = start;
+  let retries = 0;
+  while (offset < blob.size) {
+    between();
+    let next: number | null = null;
+    try {
+      const r = await fetch(transfer.uploadUrl, {
+        method: "PATCH", credentials: "omit", cache: "no-store", redirect: "error", signal,
+        headers: signedTransferHeaders(transfer.signature, { "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" }),
+        body: blob.slice(offset, Math.min(blob.size, offset + chunkSize)),
+      });
+      const answered = Number(r.headers.get("upload-offset"));
+      if (r.status === 204 && Number.isSafeInteger(answered) && answered > offset && answered <= blob.size) next = answered;
+    } catch (e) {
+      if (signal.aborted) throw e;
+    }
+    if (next === null) {
+      retries += 1;
+      if (retries > TRANSFER_RETRIES) return false;
+      next = await signedTransferOffset(transfer, blob.size, signal);
+      if (next === null) return false;
+    }
+    offset = next;
+  }
+  return true;
+}
+
+/**
+ * One transfer pass for this selection: resumes the selection's own transfer while its signature is usable;
+ * otherwise asks V1 authorize (the page's own request) for a new signature and creates the transfer.
+ */
+async function transferSelection(args: {
+  readonly intent: UploadIntent;
+  readonly blob: Blob;
+  readonly mimeType: UploadMimeType;
+  readonly objectPath: string;
+  /** POST /api/v1/uploads/authorize with the page's confirmed Bearer (it throws when the owner is not confirmed) */
+  readonly authorize: () => Promise<Response>;
+  readonly signal: AbortSignal;
+  /** called before every request: stops the pass when the page's sign-in changed */
+  readonly between: () => void;
+}): Promise<TransferResult> {
+  const { intent, blob, signal, between } = args;
+  if (intent.transfer !== null && Date.now() < intent.transfer.usableUntil) {
+    between();
+    const offset = await signedTransferOffset(intent.transfer, blob.size, signal);
+    if (offset !== null) {
+      return (await sendSignedChunks(intent.transfer, blob, offset, UPLOAD_CHUNK_SIZE, signal, between)) ? "stored" : "failed";
+    }
+  }
+  intent.transfer = null;
+  const answer = await args.authorize();
+  // Storage refuses to sign a key that is already stored (no upsert): V1 finalize decides whether this one is
+  if (answer.status === 503) return "maybe_stored";
+  if (!answer.ok) return "failed";
+  const body = (await answer.json().catch(() => null)) as { data?: unknown } | null;
+  // the endpoint must be exactly the one this deployment's own project URL implies (the server's own rule)
+  const authorization = parseSignedUploadGrant(body?.data, {
+    uploadId: intent.uploadId,
+    objectPath: args.objectPath,
+    contentType: args.mimeType,
+    endpoint: buildResumableEndpoint(process.env.NEXT_PUBLIC_SUPABASE_URL, { allowLoopback: true }),
+  });
+  if (authorization === null) return "failed";
+  between();
+  let created: Response;
+  try {
+    created = await fetch(authorization.endpoint, {
+      method: "POST", credentials: "omit", cache: "no-store", redirect: "error", signal,
+      headers: signedTransferHeaders(authorization.signature, {
+        "Upload-Length": String(blob.size),
+        "Upload-Metadata": buildTusUploadMetadata(authorization),
+        "x-upsert": "false",
+      }),
+    });
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return "failed";
+  }
+  if (created.status === 409) return "maybe_stored";
+  const uploadUrl = created.status === 201 ? resolveTusUploadUrl(created.headers.get("location"), authorization.endpoint) : null;
+  if (uploadUrl === null) return "failed";
+  intent.transfer = {
+    uploadUrl,
+    signature: authorization.signature,
+    usableUntil: Date.now() + Math.max(0, authorization.expiresInSeconds - 60) * 1000,
+  };
+  return (await sendSignedChunks(intent.transfer, blob, 0, authorization.chunkSize, signal, between)) ? "stored" : "failed";
+}
 
 // ─── EQ4-S2 mobile camera capture ─────────────────────────────────────────────
 /** Every member is `ideal`: preferences, never requirements. An `exact` rear
@@ -366,6 +558,8 @@ export default function AnalyzePage() {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
+  // P2: the current selection's stable upload identity (see UploadIntent)
+  const uploadIntentRef = useRef<UploadIntent | null>(null);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -705,6 +899,8 @@ export default function AnalyzePage() {
     // deliberate — it must never be gated on MediaRecorder/captureStream.
     const preprocessingRequired = !(
       trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size <= MAX_ANALYSIS_VIDEO_BYTES
+      // P2: and a content type the V1 upload contract accepts (otherwise the clip is transcoded to WebM)
+      && uploadMimeTypeOf(file, file.name) !== null
     );
     if (!preprocessingRequired) {
       return file;
@@ -936,7 +1132,14 @@ export default function AnalyzePage() {
     // Which step a network failure interrupted decides what the golfer is told.
     let analysisStarted = false;
     try {
-      const blob = await getTrimmedBlob();
+      // P2: the selection's stable upload identity, and its clip prepared once (a repeat sends the identical bytes).
+      const selection = { ownerId: ownerRef.current, file, trimStart, trimEnd, clubId: selectedClubId };
+      const intent: UploadIntent = sameSelection(uploadIntentRef.current, selection)
+        ? uploadIntentRef.current
+        : { ...selection, uploadId: crypto.randomUUID(), blob: null, sent: false, transfer: null };
+      uploadIntentRef.current = intent;
+      const blob = intent.blob ?? await getTrimmedBlob();
+      intent.blob = blob;
       // The route sends at most MAX_ANALYSIS_VIDEO_BYTES to the AI and refuses
       // anything larger, so a clip that is still too large is not uploaded.
       if (blob.size < MIN_VIDEO_BYTES) throw new Error(EMPTY_VIDEO_MESSAGE);
@@ -1003,41 +1206,85 @@ export default function AnalyzePage() {
         validatedClubId = selectedClubId;
       }
 
-      // 1. Upload video to Supabase Storage
-      // ENT-1D: a file name the canonical-key rule accepts, fixed before upload.
+      // 1. Upload the clip (AG-WEB-READY-10-P2; A1: through V1 authorize and its signed transport). The object key is
+      // the V1 upload contract's deterministic key for the verified owner and this selection's upload id
+      // (lib/api/v1-upload-dto.ts buildUploadObjectPath, the same builder authorize signs and V1 finalize verifies
+      // against), so a repeat of the same selection names the same immutable object: Storage refuses to sign or
+      // overwrite it and finalize proves the stored object. ENT-1D: the display file name is canonical.
       const safeFilename = canonicalUploadFileName(file.name);
-      const storagePath = `${userId}/${crypto.randomUUID()}/${safeFilename}`;
-      stopIfIdentityChanged();
-      const { error: uploadErr } = await supabase.storage
-        .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
-      if (uploadErr) {
-        console.error("Video upload failed");
-        // A3: an upload not sent because the page's account could not be confirmed says why
-        const notConfirmed = await ownerNoLongerConfirmed();
-        if (notConfirmed !== null) throw new Error(notConfirmed);
-        throw new Error(UPLOAD_FAILED_MESSAGE);
-      }
+      const mimeType = uploadMimeTypeOf(blob, file.name);
+      if (mimeType === null) throw new Error(PREPROCESSING_FAILED_MESSAGE);
+      const objectPath = buildUploadObjectPath(userId, intent.uploadId, mimeType);
+      // A repeat of this selection asks finalize (step 2) first: its object may already be stored, and a refused
+      // duplicate upload is never sent before finalize. Only "not stored" sends the upload, once (at most two passes).
+      let skipUpload = intent.sent;
+      for (let pass = 0; ; pass++) {
+        if (!skipUpload) {
+          stopIfIdentityChanged();
+          intent.sent = true;
+          const transferred = await transferSelection({
+            intent,
+            blob,
+            mimeType,
+            objectPath,
+            authorize: async () => {
+              // the page's own account's token, confirmed now: the signature is minted for this owner's key only
+              const authorizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+              if (authorizeSession.status !== "ready") throw new Error(refusedFor(authorizeSession.status));
+              stopIfIdentityChanged();
+              return fetch("/api/v1/uploads/authorize", {
+                method: "POST",
+                // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
+                credentials: "omit",
+                headers: { "Content-Type": "application/json", ...ownerBearer(authorizeSession.session) },
+                body: JSON.stringify({ uploadId: intent.uploadId, mimeType, fileSize: blob.size }),
+              });
+            },
+            signal: runAbort.signal,
+            between: stopIfIdentityChanged,
+          });
+          if (transferred === "failed") {
+            console.error("Video upload failed");
+            // A3: an upload not sent because the page's account could not be confirmed says why
+            const notConfirmed = await ownerNoLongerConfirmed();
+            if (notConfirmed !== null) throw new Error(notConfirmed);
+            throw new Error(UPLOAD_FAILED_MESSAGE);
+          }
+        }
 
-      // 2. Create the swing_videos record
-      stopIfIdentityChanged();
-      const { data: videoRow, error: videoErr } = await supabase
-        .from("swing_videos").insert({
-          user_id:           userId,
-          storage_path:      storagePath,
-          video_url:         storagePath,
-          original_filename: safeFilename,
-          file_size:         blob.size,
-          mime_type:         blob.type,
-          trim_start:        trimStart,
-          trim_end:          trimEnd,
-          status:            "uploaded",
-        }).select().single();
-      if (videoErr || !videoRow) {
-        console.error("Failed to register video");
+        // 2. Finalize: exactly one canonical swing_videos row for this upload id (idempotent; V1 finalize derives the
+        // owner, path, size and type on the server), with the clip's display name and trim as this page has always
+        // recorded them.
+        stopIfIdentityChanged();
+        const finalizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+        if (finalizeSession.status !== "ready") throw new Error(refusedFor(finalizeSession.status));
+        stopIfIdentityChanged();
+        const finalizeRes = await fetch("/api/v1/uploads/finalize", {
+          method:  "POST",
+          // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
+          credentials: "omit",
+          headers: { "Content-Type": "application/json", ...ownerBearer(finalizeSession.session) },
+          body:    JSON.stringify({
+            uploadId: intent.uploadId,
+            mimeType,
+            originalFilename: safeFilename,
+            ...(trimEnd > trimStart ? { trimStart, trimEnd } : {}),
+          }),
+        });
+        const finalized = await finalizeRes.json().catch(() => null) as
+          { data?: { swingVideoId?: unknown }; error?: { code?: unknown } } | null;
+        if (finalizeRes.ok && finalized?.data?.swingVideoId === intent.uploadId) break;
+        // a repeat whose object was never stored: upload it now (once)
+        if (skipUpload && pass === 0 && finalizeRes.status === 409 && finalized?.error?.code === "UPLOAD_NOT_FOUND_OR_NOT_READY") {
+          skipUpload = false;
+          continue;
+        }
+        console.error("Failed to register video:", finalizeRes.status);
         const notConfirmed = await ownerNoLongerConfirmed();
         if (notConfirmed !== null) throw new Error(notConfirmed);
         throw new Error(UPLOAD_FAILED_MESSAGE);
       }
+      const videoRow = { id: intent.uploadId };
 
       // 3. Ask the server to create the pending analysis request. The browser
       // holds no INSERT privilege on swing_analysis: the owner, readiness, club
@@ -1089,13 +1336,24 @@ export default function AnalyzePage() {
         method:  "POST",
         // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
         credentials: "omit",
-        headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session) },
+        // P2: this page understands a 202 acceptance (not a security control; the server decides)
+        headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session), [ADMISSION_DECLARATION_HEADER]: ADMISSION_DECLARATION_VALUE },
         body:    JSON.stringify({ analysisId: analysisRow.id }),
       });
       // A2. Finished after the golfer left the page, or after the page's
       // sign-in changed: nothing of it is shown here and nowhere is navigated.
       if (!mountedRef.current) return;
       if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
+
+      // P2: accepted and saved durably (202). The analysis runs in the background; the saved report shows the queued
+      // attempt and can be closed and reopened. Nothing waits here.
+      if (analysisRes.status === 202) {
+        await analysisRes.json().catch(() => null);
+        if (!mountedRef.current) return;
+        if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
+        router.push(`/analyze/${analysisRow.id}`);
+        return;
+      }
 
       if (!analysisRes.ok) {
         const err = await analysisRes.json().catch(() => ({}));
@@ -1104,10 +1362,24 @@ export default function AnalyzePage() {
         if (!mountedRef.current) return;
         if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
         // ENT-1D. Already running for this swing: hand over to its report page,
-        // which shows the in-progress state and can check again. A stalled
-        // analysis falls through to the error banner below, which offers no
-        // retry, with the server's explanation.
+        // which shows the in-progress state and can check again. A synchronous
+        // stall falls through to the error banner below, which offers no retry,
+        // with the server's explanation (A1: an attempt that stopped reporting is
+        // handed over below instead).
         if (analysisRes.status === 409 && err.status === "processing") {
+          router.push(`/analyze/${analysisRow.id}`);
+          return;
+        }
+        // P2: this swing already has an attempt that finished without a result (or a retry refers to an earlier one):
+        // its report shows that attempt and offers the right next step.
+        if (analysisRes.status === 409 && (err.status === "failed" || err.status === "superseded")) {
+          router.push(`/analyze/${analysisRow.id}`);
+          return;
+        }
+        // A1: an answer describing an attempt that stopped reporting (`current ?? attempt`; its outcome is not
+        // confirmed yet; only a job's stall names one) hands over to its report, which shows it and offers a status
+        // read. Nothing is retried; a synchronous stall (no interrupted attempt) stays on this page's banner.
+        if (analysisRes.status === 409 && (err.current ?? err.attempt)?.state === "interrupted") {
           router.push(`/analyze/${analysisRow.id}`);
           return;
         }

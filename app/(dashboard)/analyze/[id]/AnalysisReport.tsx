@@ -19,6 +19,36 @@ import { createClient } from "@/utils/supabase/client";
 import { watchLineageEnd, type OwnerRefusal } from "@/utils/supabase/session-publication";
 import { confirmOwnerSession, drillHubIdentityEndFromEvent, ownerBearer } from "@/lib/drill-hub-session";
 import { useRenderedSession } from "@/components/navigation/SessionKeeper";
+import {
+  ADMISSION_DECLARATION_HEADER,
+  ADMISSION_DECLARATION_VALUE,
+  ADMISSION_PAUSED_COPY,
+  ANALYZING_COPY,
+  ANALYZING_HEADING,
+  FAILED_NO_RETRY_COPY,
+  FAILED_OBSERVED_COPY,
+  QUEUED_COPY,
+  SYNTHETIC_RESULT_NOTICE,
+  SYNTHETIC_UNSCORED_COPY,
+  isSyntheticResult,
+  QUEUED_HEADING,
+  RETRY_OF_ATTEMPT_FIELD,
+  STALLED_COPY,
+  INTERRUPTED_HEADING,
+  INTERRUPTED_UNRESOLVED_COPY,
+  STATUS_UNAVAILABLE,
+  STATUS_UNAVAILABLE_COPY,
+  STATUS_UNAVAILABLE_HEADING,
+  STATUS_UNAVAILABLE_LABEL,
+  acceptedAttempt,
+  describedAttempt,
+  executionOfAttempt,
+  golferStatusLabel,
+  reportViewFor,
+  type GolferAttempt,
+  type GolferJobState,
+  type JobStateRead,
+} from "@/lib/analysis-attempt-precedence";
 
 const NETWORK_FAILURE_COPY = "We couldn't reach SwingProAI. Check your connection, then check this swing's status before trying again.";
 const SERVICE_FAILURE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
@@ -230,6 +260,12 @@ interface Props {
    * be analysed (classifyFailedAnalysisVideo); null for any other failure.
    */
   failedReason?: typeof VIDEO_UNUSABLE_STATUS | null;
+  /**
+   * AG-WEB-READY-10-P2. The durable attempt state the server read on the golfer's own session (golfer-facing values
+   * only). A1: "unavailable" when it could not be read (shown as such, with a fresh read only); null when no read was
+   * made (the saved status then decides, as before).
+   */
+  job?: JobStateRead | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -313,10 +349,26 @@ function ProcessingState({
   onStalled,
   onStoredFailure,
   onStatusNote,
+  job,
+  statusUnavailable = false,
+  onAccepted,
+  onAttemptFailed,
+  onAttemptInterrupted,
 }: {
   analysisId: string;
   /** 09-P1: the analysis's saved status as this page last read it (the server render, or a completed answer) */
   storedStatus: string;
+  /** P2: the durable attempt state as this page last knew it (the server render, or this page's own answers) */
+  job: GolferJobState | null;
+  /** A1: the server render could not read the attempt state, and no answer of this page has replaced it since */
+  statusUnavailable?: boolean;
+  /** P2: the server accepted this page's request durably (202). A1: the attempt the answer describes (its `current`
+   *  when the request's own attempt is an earlier one) */
+  onAccepted: (attempt: GolferAttempt) => void;
+  /** P2: the server reports this swing's latest attempt finished without a result (409 failed): that attempt */
+  onAttemptFailed: (attempt: GolferAttempt) => void;
+  /** A1: the server reports this swing's attempt stopped reporting and its outcome is unresolved (409 stalled) */
+  onAttemptInterrupted?: (attempt: GolferAttempt) => void;
   /** A4: the account this report was rendered for (taken once), or null outside the dashboard layout: nothing is sent */
   ownerId: string | null;
   /** A4: the session lineage the report was rendered for; its End Session ends this report's view */
@@ -363,6 +415,8 @@ function ProcessingState({
   // 09-P1: a request for this analysis sent by an earlier view in this tab (left and opened again while it runs) is
   // still out: this view sends none and offers a status read.
   const [sentEarlier] = useState(() => requestsInFlight.has(analysisId));
+  // P2: a failed swing that never had an attempt, refused a new one by the server (409 failed, no attempt)
+  const [legacyRetryRefused, setLegacyRetryRefused] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -401,7 +455,7 @@ function ProcessingState({
    * again in this tab) sends nothing. This is a guarantee of this page in this tab only; the server's execution claim
    * (lib/analysis-execution-claim.ts) is what keeps simultaneous requests from running the analysis twice.
    */
-  const requestAnalysis = () => {
+  const requestAnalysis = (retryOfAttemptId: string | null = null) => {
     if (sendingRef.current || requestsInFlight.has(analysisId)) return;
     sendingRef.current = true;
     requestsInFlight.add(analysisId);
@@ -450,8 +504,14 @@ function ProcessingState({
           method: "POST",
           // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
           credentials: "omit",
-          headers: { "Content-Type": "application/json", ...ownerBearer(confirmed.session) },
-          body: JSON.stringify({ analysisId, ...(mediapipeMetrics ? { mediapipeMetrics } : {}) }),
+          // P2: this page understands a 202 acceptance (not a security control; the server decides)
+          headers: { "Content-Type": "application/json", ...ownerBearer(confirmed.session), [ADMISSION_DECLARATION_HEADER]: ADMISSION_DECLARATION_VALUE },
+          // P2: a Retry names the failed attempt the golfer saw, so a late or duplicate Retry cannot start another one
+          body: JSON.stringify({
+            analysisId,
+            ...(retryOfAttemptId ? { [RETRY_OF_ATTEMPT_FIELD]: retryOfAttemptId } : {}),
+            ...(mediapipeMetrics ? { mediapipeMetrics } : {}),
+          }),
         })
         // A response that is not JSON (a gateway error page) is the service's
         // failure, not the golfer's connection.
@@ -473,6 +533,41 @@ function ProcessingState({
         .then(({ httpStatus, res, readable }) => {
           // A4 (C1): checked after the whole answer has been read
           if (obsolete()) return;
+          // P2: accepted durably. The attempt is saved and runs in the background; this page shows it queued.
+          if (httpStatus === 202) {
+            // A1: the request's own attempt must be readable; the page then shows the attempt the answer DESCRIBES
+            // (`current` when a later attempt is the live one), so a delayed repeat never moves the state back.
+            const own = acceptedAttempt(res, analysisId);
+            const attempt = own === null ? null : describedAttempt(res);
+            if (attempt === null) {
+              setProblem("unknown");
+              setRecovery("check");
+              setError(UNKNOWN_OUTCOME_COPY);
+              onStatusNote?.("last_known");
+              return;
+            }
+            try { sessionStorage.removeItem(`mediapipe_${analysisId}`); } catch { /* ignore */ }
+            onAccepted(attempt);
+            return;
+          }
+          // P2: the latest attempt finished without a result; its Retry names it. A1: the attempt the answer describes
+          // (`current` when present), so the Retry names the latest attempt, not the request's own earlier one.
+          const failedAttempt = httpStatus === 409 && res.status === "failed" ? describedAttempt(res) : null;
+          if (failedAttempt !== null) {
+            onAttemptFailed(failedAttempt);
+            return;
+          }
+          // A1: an attempt that stopped reporting with its outcome unresolved: shown as not confirmed yet (a late result
+          // may still be saved), never as "can't be finished"
+          const interruptedAttempt = httpStatus === 409 && res.status === "stalled" ? describedAttempt(res) : null;
+          if (interruptedAttempt !== null && interruptedAttempt.state === "interrupted" && onAttemptInterrupted) {
+            onAttemptInterrupted(interruptedAttempt);
+            return;
+          }
+          if (httpStatus === 409 && res.status === "failed" && job?.attempt == null && storedStatus === "failed") {
+            setLegacyRetryRefused(true);
+            return;
+          }
           if (httpStatus === 409 && res.status === "processing") {
             setInProgressNotice(res.error ?? "This analysis is already in progress.");
             onStatusNote?.("last_known"); // the server reports work in progress: the pending shown is only what the page last knew
@@ -501,7 +596,7 @@ function ProcessingState({
             const routeCopy = typeof res.error === "string" && res.error.trim() !== "" ? res.error : null;
             setProblem(kind);
             // 09-P1: only an outcome that changed nothing offers a new attempt here; any other offers a status read first
-            setRecovery(kind === "signin" || (kind === "refused" && httpStatus !== 404 && httpStatus !== 409) ? "retry" : "check");
+            setRecovery(kind === "signin" || (kind === "refused" && httpStatus !== 404 && httpStatus !== 409 && httpStatus !== 429) ? "retry" : "check");
             setError(
               kind === "unknown" ? UNKNOWN_OUTCOME_COPY
               : kind === "attempt" ? ATTEMPT_COPY
@@ -620,7 +715,7 @@ function ProcessingState({
         ) : (
         <button
           type="button"
-          onClick={recovery === "check" ? checkSavedStatus : requestAnalysis}
+          onClick={recovery === "check" ? checkSavedStatus : () => requestAnalysis(job?.execution === "failed" ? job.attempt?.id ?? null : null)}
           className={SECONDARY_ACTION}
         >
           <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> {recovery === "check" ? CHECK_STATUS_LABEL : "Retry"}
@@ -669,6 +764,122 @@ function ProcessingState({
     );
   }
 
+  // A1: the server render could not read the attempt state: say so, and offer only a fresh read (no Analyze: the
+  // swing may already be queued or running)
+  if (statusUnavailable && storedStatus !== "complete") {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-amber-400" />
+        </div>
+        <p className="text-white font-bold mb-2">{STATUS_UNAVAILABLE_HEADING}</p>
+        <p className="text-sm text-gray-400 mb-6" role="status">{STATUS_UNAVAILABLE_COPY}</p>
+        <button type="button" onClick={checkSavedStatus} className={SECONDARY_ACTION}>
+          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> {CHECK_STATUS_LABEL}
+        </button>
+      </div>
+    );
+  }
+
+  // P2: the durable attempt state, by the shared precedence rule (complete > open attempt > finished attempt > none).
+  const view = reportViewFor(storedStatus, job);
+  if (view === "queued" || (view === "processing" && job?.attempt)) {
+    const queued = view === "queued";
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-4 ${queued ? "bg-golf-green/10 border border-golf-green/20" : "bg-amber-500/10 border border-amber-500/20"}`}>
+          {queued ? <CheckCircle2 className="w-7 h-7 text-golf-green" aria-hidden="true" /> : <Loader2 className="w-7 h-7 text-amber-400 animate-spin" aria-hidden="true" />}
+        </div>
+        <h3 className="text-lg font-black italic tracking-tighter uppercase text-white mb-2">{queued ? QUEUED_HEADING : ANALYZING_HEADING}</h3>
+        <p className="text-sm text-gray-400 mb-6" role="status">{queued ? QUEUED_COPY : ANALYZING_COPY}</p>
+        {/* a fresh read of the saved status, never another analysis request */}
+        <button type="button" onClick={checkSavedStatus} className={SECONDARY_ACTION}>
+          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> {CHECK_STATUS_LABEL}
+        </button>
+      </div>
+    );
+  }
+  if (view === "interrupted" && job?.attempt?.state === "interrupted") {
+    // A1: an attempt that stopped reporting: its outcome is unresolved, and a late result may still be saved
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-amber-400" />
+        </div>
+        <p className="text-white font-bold mb-2">{INTERRUPTED_HEADING}</p>
+        <p className="text-sm text-gray-400 mb-6" role="status">{INTERRUPTED_UNRESOLVED_COPY}</p>
+        <button type="button" onClick={checkSavedStatus} className={SECONDARY_ACTION}>
+          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> {CHECK_STATUS_LABEL}
+        </button>
+      </div>
+    );
+  }
+  if (view === "interrupted") {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-amber-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Analysis Interrupted</p>
+        <p className="text-sm text-gray-400 mb-6">{STALLED_COPY}</p>
+        <a href="/analyze" className={SECONDARY_LINK}>Record a new swing</a>
+      </div>
+    );
+  }
+  if (view === "paused") {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-gray-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Analysis paused</p>
+        <p className="text-sm text-gray-400 mb-6" role="status">{ADMISSION_PAUSED_COPY}</p>
+        <button type="button" onClick={checkSavedStatus} className={SECONDARY_ACTION}>
+          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> {CHECK_STATUS_LABEL}
+        </button>
+      </div>
+    );
+  }
+  if (view === "failed_attempt" && job?.attempt) {
+    const attemptId = job.attempt.id;
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-red-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Analysis Failed</p>
+        <p className="text-sm text-gray-500 mb-6">{FAILED_OBSERVED_COPY}</p>
+        <button type="button" onClick={() => requestAnalysis(attemptId)} className={SECONDARY_ACTION}>
+          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> Retry analysis
+        </button>
+      </div>
+    );
+  }
+  if (view === "failed_unusable") {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-red-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Analysis Failed</p>
+        <p className="text-sm text-red-400 mb-6">{VIDEO_UNUSABLE_COPY}</p>
+        <a href="/analyze" className={SECONDARY_LINK}>Upload a new video</a>
+      </div>
+    );
+  }
+  if (legacyRetryRefused) {
+    return (
+      <div className="text-center py-16 max-w-sm mx-auto">
+        <div className="w-14 h-14 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+          <AlertCircle className="w-7 h-7 text-red-400" />
+        </div>
+        <p className="text-white font-bold mb-2">Analysis Failed</p>
+        <p className="text-sm text-gray-500 mb-6">{FAILED_NO_RETRY_COPY}</p>
+        <a href="/analyze" className={SECONDARY_LINK}>Record a new swing</a>
+      </div>
+    );
+  }
+
   // 09-P1: no request from this view yet: the saved status as read, and the one action that fits it.
   if (storedStatus === "pending") {
     return (
@@ -678,7 +889,7 @@ function ProcessingState({
         </div>
         <p className="text-white font-bold mb-2">Not analyzed yet</p>
         <p className="text-sm text-gray-400 mb-6">{PENDING_COPY}</p>
-        <button type="button" onClick={requestAnalysis} className={PRIMARY_ACTION}>
+        <button type="button" onClick={() => requestAnalysis()} className={PRIMARY_ACTION}>
           <Zap className="w-3.5 h-3.5" aria-hidden="true" /> Analyze swing
         </button>
       </div>
@@ -693,7 +904,7 @@ function ProcessingState({
         </div>
         <p className="text-white font-bold mb-2">Analysis Failed</p>
         <p className="text-sm text-gray-500 mb-6">{STORED_FAILURE_COPY}</p>
-        <button type="button" onClick={requestAnalysis} className={SECONDARY_ACTION}>
+        <button type="button" onClick={() => requestAnalysis()} className={SECONDARY_ACTION}>
           <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" /> Retry analysis
         </button>
       </div>
@@ -721,6 +932,7 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
   // S6-R1: a missing score is "not scored", never 0, and no ability label is
   // derived from a score that is an uncalibrated AI rubric estimate.
   const score = presentScore(analysis.score);
+  const synthetic = isSyntheticResult(analysis.feedback);
   const metrics = analysis.metrics ?? {};
   const highlights = analysis.swing_highlights ?? [];
   const deficiencies = analysis.mechanical_deficiencies ?? [];
@@ -744,11 +956,13 @@ function CoachingReport({ analysis }: { analysis: AnalysisData }) {
             <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-2">
               {ASSESSMENT_LABEL}
             </p>
+            {/* P2: a synthetic test result says so, and nothing in it describes a video */}
+            {synthetic && <p className="text-xs font-bold text-amber-300 mb-2" role="note">{SYNTHETIC_RESULT_NOTICE}</p>}
             <p className="text-sm text-gray-300 leading-relaxed">{analysis.feedback}</p>
           </div>
         </div>
         <p className="text-[10px] text-gray-500 leading-relaxed mt-4">
-          {score.scored ? SCORE_BASIS : UNSCORED_COPY}
+          {score.scored ? SCORE_BASIS : synthetic ? SYNTHETIC_UNSCORED_COPY : UNSCORED_COPY}
         </p>
         {metrics.scoring_breakdown && (
           <p className="text-[10px] text-gray-500 leading-relaxed mt-1">
@@ -970,8 +1184,16 @@ function VideoPlayer({ signedUrl, filename }: { signedUrl: string | null; filena
 
 // ── Root component ────────────────────────────────────────────────────────────
 
-export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl, clubDisplayName, failedReason = null }: Props) {
+export default function AnalysisReport({ analysis: initialAnalysis, videoSignedUrl, clubDisplayName, failedReason = null, job: initialJob = null }: Props) {
   const [analysis, setAnalysis] = useState<AnalysisData>(initialAnalysis);
+  // P2: the durable attempt state: the server render, then this page's own accepted or failed answers
+  const [job, setJob] = useState<GolferJobState | null>(initialJob === STATUS_UNAVAILABLE ? null : initialJob);
+  // A1: the server render could not read the attempt state; cleared only by an answer of this page that describes one
+  const [statusUnavailable, setStatusUnavailable] = useState(initialJob === STATUS_UNAVAILABLE);
+  const showAttempt = (attempt: GolferAttempt) => {
+    setStatusUnavailable(false);
+    setJob({ analysisId: analysis.id, execution: executionOfAttempt(attempt), attempt });
+  };
   // A4 (C1). The account (and session lineage) this report was rendered for, as the dashboard layout verified it —
   // taken once, when the report first renders, and never replaced by a session the browser holds
   // (components/navigation/SessionKeeper.tsx RenderedSessionProvider). No account: nothing is sent.
@@ -995,7 +1217,10 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
   // 09-P1: every analysis that is not complete gets the status panel (its saved status and, where eligible, the golfer's
   // explicit analysis action); a stored failure whose video cannot be analysed gets the upload-again guidance instead.
   // Showing either sends nothing.
-  const showProcessing = !isComplete && !(isFailed && failedReason === VIDEO_UNUSABLE_STATUS);
+  const showProcessing = !isComplete && (statusUnavailable || !(isFailed && failedReason === VIDEO_UNUSABLE_STATUS && !job?.attempt));
+  // P2: with an attempt state, the status pill says what the golfer can expect (Queued, Analyzing, ...). A1: an
+  // unreadable state says so.
+  const jobLabel = isComplete ? null : statusUnavailable ? STATUS_UNAVAILABLE_LABEL : job ? golferStatusLabel(analysis.status, job).label : null;
 
   return (
     <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
@@ -1022,7 +1247,7 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
               isFailed || (storedFailedNow && !isStalled) ? "bg-red-500/10 border-red-500/25 text-red-400" :
                            "bg-amber-500/10 border-amber-500/25 text-amber-400"
             }`}>
-              {isStalled ? "interrupted" : storedFailedNow ? "failed" : statusNote === "unconfirmed" ? "unconfirmed" : analysis.status}
+              {isStalled ? "interrupted" : storedFailedNow ? "failed" : statusNote === "unconfirmed" ? "unconfirmed" : jobLabel ?? analysis.status}
             </span>
             {lastKnown && <p id="report-status-note" className="mt-1.5 text-xs text-gray-300 max-w-[11rem] ml-auto">{LAST_KNOWN_NOTE}</p>}
           </div>
@@ -1045,6 +1270,11 @@ export default function AnalysisReport({ analysis: initialAnalysis, videoSignedU
             onStalled={() => setIsStalled(true)}
             onStoredFailure={() => setStoredFailedNow(true)}
             onStatusNote={(note) => setStatusNote((known) => (known === "unconfirmed" ? known : note))}
+            job={job}
+            statusUnavailable={statusUnavailable}
+            onAccepted={(attempt) => { setStatusNote(null); showAttempt(attempt); }}
+            onAttemptFailed={(attempt) => { setStatusNote(null); showAttempt({ ...attempt, state: "failed" }); }}
+            onAttemptInterrupted={(attempt) => { setStatusNote(null); showAttempt(attempt); }}
           />
         )}
 

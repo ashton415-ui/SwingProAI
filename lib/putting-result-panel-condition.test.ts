@@ -322,7 +322,7 @@ describe("the full-swing report survives the family split unchanged", () => {
   it("keeps the status banners family-neutral", () => {
     const shared = pageSource.slice(pageSource.indexOf(SHARED_STATUS_REGION_START));
     expect(shared).toContain("AI analysis in progress");
-    expect(shared).toContain("Analysis queued");
+    expect(shared).toContain("Not analyzed yet"); // P2: replaces "Analysis queued" for a never-admitted swing
     expect(shared, "the shared banners must not re-test the family").not.toContain("isPutt");
   });
 });

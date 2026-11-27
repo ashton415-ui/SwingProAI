@@ -10,6 +10,13 @@ import {
   UPLOAD_CHUNK_SIZE,
   UPLOAD_EXPIRES_IN_SECONDS,
   buildResumableEndpoint,
+  buildUploadAuthorizationDto,
+  LOCAL_LOOPBACK_UPLOAD_ENDPOINT_ENV,
+  TUS_RESUMABLE_VERSION,
+  buildTusUploadMetadata,
+  localLoopbackUploadEndpointAllowed,
+  parseSignedUploadGrant,
+  resolveTusUploadUrl,
   buildUploadObjectPath,
   isUuidV4,
   isValidDeclaredSize,
@@ -611,7 +618,11 @@ describe("frozen read-only dependencies", () => {
     // the analysis call is sent through the cookie-session sender; a late error body is acted on only while current.
     // AG-WEB-READY-03-R1-A4 (C1): the analysis call carries the page's account's Bearer, confirmed just before it is sent,
     // with no cookie (the route verifies the Bearer itself); A3's cookie-session sender and its preflight are retired.
-    ["app/(dashboard)/analyze/page.tsx", "f1031065ee6d3b4d674c6094607cc757ffb0c37102bdc9f7b40b007c6d9b5506"],
+    // AG-WEB-READY-10-P2 (reviewed, retargeted): one stable upload id per clip selection, the Storage upload to the V1
+    // key and V1 finalize (with the clip's display name and trim), the admission declaration, and 202 -> the report.
+    // AG-WEB-READY-10-P2-A1 (retargeted): the first transfer uses the V1 authorize answer and its scoped signed transport
+    // (resumable, path-scoped signature), resumed from the server's offset for a repeat; finalize decides a stored key.
+    ["app/(dashboard)/analyze/page.tsx", "95dac107e7af5d17fd989afc7c3a79bb8181726eae70afdb07a152bfa4280d6b"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
     // ENT-1D video sources: video_url records the canonical key, never a public URL.
     // ENT-1D video sources: canonical file name before upload (video_url already records the key).
@@ -656,5 +667,133 @@ describe("frozen read-only dependencies", () => {
       return text.slice(start, end + 3);
     })].join("\n");
     expect((await import("node:crypto")).createHash("sha256").update(region).digest("hex")).toBe("2aefc9b2952b1dcc829087be5b6b07696a1b3f4ee19a62711d84d157fadcc3dd");
+  });
+});
+
+
+// ─── AG-WEB-READY-10-P2-A1: the local loopback seam and the signed transfer helpers ──────────────────────────────
+
+describe("A1: the local loopback seam leaves production endpoint selection unchanged", () => {
+  it("without the opt-in nothing changes: a loopback project URL has no endpoint and a hosted one keeps its own", () => {
+    expect(buildResumableEndpoint("http://127.0.0.1:54321")).toBeNull();
+    expect(buildResumableEndpoint(TEST_SUPABASE_URL)).toBe(EXPECTED_ENDPOINT);
+    expect(buildResumableEndpoint(TEST_SUPABASE_URL, { allowLoopback: false })).toBe(EXPECTED_ENDPOINT);
+  });
+
+  it("with the opt-in, only an exact loopback project URL maps to its own loopback endpoint; a hosted URL is unchanged", () => {
+    expect(buildResumableEndpoint("http://127.0.0.1:54321", { allowLoopback: true })).toBe("http://127.0.0.1:54321/storage/v1/upload/resumable/sign");
+    expect(buildResumableEndpoint("http://127.0.0.1:54321/", { allowLoopback: true })).toBe("http://127.0.0.1:54321/storage/v1/upload/resumable/sign");
+    expect(buildResumableEndpoint(TEST_SUPABASE_URL, { allowLoopback: true })).toBe(EXPECTED_ENDPOINT);
+    for (const notLoopback of [
+      "http://localhost:54321", "https://127.0.0.1:54321", "http://127.0.0.1", "http://127.0.0.2:54321", "http://127.0.0.1:54321/x",
+      "http://u:p@127.0.0.1:54321", "http://127.0.0.1:54321?x=1", "http://[::1]:54321", "http://127.0.0.1.nip.io:54321", "https://example.com",
+    ]) {
+      expect(buildResumableEndpoint(notLoopback, { allowLoopback: true }), notLoopback).toBeNull();
+    }
+  });
+
+  it("the opt-in is exactly \"1\" in the server's environment", () => {
+    expect(LOCAL_LOOPBACK_UPLOAD_ENDPOINT_ENV).toBe("SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT");
+    expect(localLoopbackUploadEndpointAllowed({ SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT: "1" })).toBe(true);
+    for (const v of [undefined, "", "0", "true", "yes", " 1", "1 "]) {
+      expect(localLoopbackUploadEndpointAllowed({ SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT: v }), String(v)).toBe(false);
+    }
+  });
+
+  it("the route: a loopback project answers 500 without the opt-in and its own endpoint with it; authentication, the key and signing are unchanged", async () => {
+    const before = process.env.SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT;
+    try {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = "http://127.0.0.1:54321";
+      delete process.env.SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT;
+      let client = makeFakeClient(OK_SIGNED);
+      setAuthenticated(client);
+      expect((await authorizePOST(post(validBody()))).status).toBe(500);
+      expect(client.calls).toHaveLength(0);
+      process.env.SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT = "1";
+      client = makeFakeClient(OK_SIGNED);
+      setAuthenticated(client);
+      const response = await authorizePOST(post(validBody()));
+      expect(response.status).toBe(200);
+      const data = (await bodyOf(response) as { data: Record<string, unknown> }).data;
+      expect(data.endpoint).toBe("http://127.0.0.1:54321/storage/v1/upload/resumable/sign");
+      expect(data.objectPath).toBe(`${CALLER_ID}/${UPLOAD_ID}/source.mp4`);
+      expect(client.calls).toHaveLength(2); // the caller's own Storage client: from(bucket), then the path-scoped signing
+      expect(client.calls[0]).toEqual(["from", "swing-videos"]);
+      setUnauthenticated("absent");
+      expect((await authorizePOST(post(validBody()))).status).toBe(401);
+      process.env.NEXT_PUBLIC_SUPABASE_URL = TEST_SUPABASE_URL;
+      setAuthenticated(makeFakeClient(OK_SIGNED));
+      const hosted = (await bodyOf(await authorizePOST(post(validBody()))) as { data: Record<string, unknown> }).data;
+      expect(hosted.endpoint).toBe(EXPECTED_ENDPOINT); // the opt-in never redirects a hosted project
+    } finally {
+      if (before === undefined) delete process.env.SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT;
+      else process.env.SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT = before;
+      process.env.NEXT_PUBLIC_SUPABASE_URL = TEST_SUPABASE_URL;
+    }
+  });
+});
+
+describe("A1: the signed transfer helpers", () => {
+  const objectPath = `${CALLER_ID}/${UPLOAD_ID}/source.mp4`;
+  const grant = buildUploadAuthorizationDto({ uploadId: UPLOAD_ID, objectPath, endpoint: EXPECTED_ENDPOINT, signature: "sig", contentType: "video/mp4" });
+  const expected = { uploadId: UPLOAD_ID, objectPath, contentType: "video/mp4" as const, endpoint: EXPECTED_ENDPOINT };
+
+  it("parseSignedUploadGrant accepts exactly the authorize answer for this request", () => {
+    expect(parseSignedUploadGrant(grant, expected)).toEqual(grant);
+    expect(parseSignedUploadGrant({ ...grant, endpoint: "http://127.0.0.1:54321/storage/v1/upload/resumable/sign" }, { ...expected, endpoint: "http://127.0.0.1:54321/storage/v1/upload/resumable/sign" })?.endpoint)
+      .toBe("http://127.0.0.1:54321/storage/v1/upload/resumable/sign");
+    for (const [label, bad] of [
+      ["another upload id", { ...grant, uploadId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }],
+      ["another key", { ...grant, objectPath: `99999999-9999-4999-8999-999999999999/${UPLOAD_ID}/source.mp4` }],
+      ["another bucket", { ...grant, bucket: "other" }],
+      ["another type", { ...grant, contentType: "video/webm" }],
+      ["upsert", { ...grant, upsert: true }],
+      ["another chunk size", { ...grant, chunkSize: 1 }],
+      ["no signature", { ...grant, signature: "" }],
+      ["no lifetime", { ...grant, expiresInSeconds: 0 }],
+      ["a remote plain-http endpoint", { ...grant, endpoint: "http://storage.example.com/storage/v1/upload/resumable/sign" }],
+      ["another endpoint path", { ...grant, endpoint: "https://abcdefghijklmnop.storage.supabase.co/storage/v1/object" }],
+      ["an endpoint with a query", { ...grant, endpoint: `${EXPECTED_ENDPOINT}?x=1` }],
+      ["not an object", null],
+    ] as const) {
+      expect(parseSignedUploadGrant(bad, expected), label).toBeNull();
+    }
+  });
+
+  it("review: the answer's endpoint must be exactly the one the caller's own project URL implies", () => {
+    const own = buildResumableEndpoint(TEST_SUPABASE_URL, { allowLoopback: true });
+    expect(parseSignedUploadGrant(grant, { ...expected, endpoint: own })).toEqual(grant);
+    const local = "http://127.0.0.1:54321/storage/v1/upload/resumable/sign";
+    expect(parseSignedUploadGrant({ ...grant, endpoint: local }, { ...expected, endpoint: own })).toBeNull(); // hosted page, loopback answer
+    expect(parseSignedUploadGrant({ ...grant, endpoint: "https://zzzzzzzzzzzzzzzz.storage.supabase.co/storage/v1/upload/resumable/sign" }, { ...expected, endpoint: own })).toBeNull();
+    const localOwn = buildResumableEndpoint("http://127.0.0.1:54321", { allowLoopback: true });
+    expect(parseSignedUploadGrant({ ...grant, endpoint: local }, { ...expected, endpoint: localOwn })?.endpoint).toBe(local);
+    expect(parseSignedUploadGrant({ ...grant, endpoint: "http://127.0.0.1:9999/storage/v1/upload/resumable/sign" }, { ...expected, endpoint: localOwn })).toBeNull();
+    expect(parseSignedUploadGrant(grant, { ...expected, endpoint: null })).toBeNull(); // no usable configuration: nothing
+  });
+
+  it("buildTusUploadMetadata names the bucket, the key, the type and the cache control (base64, ASCII only)", () => {
+    const pairs = Object.fromEntries(buildTusUploadMetadata(grant).split(",").map((x) => {
+      const [k, v] = x.split(" ");
+      return [k, Buffer.from(v, "base64").toString("utf8")];
+    }));
+    expect(pairs).toEqual({ bucketName: "swing-videos", objectName: objectPath, contentType: "video/mp4", cacheControl: "3600" });
+    expect(() => buildTusUploadMetadata({ ...grant, objectPath: "é" })).toThrow();
+    expect(TUS_RESUMABLE_VERSION).toBe("1.0.0");
+  });
+
+  it("resolveTusUploadUrl keeps the signature on the authorized endpoint's own origin and path", () => {
+    expect(resolveTusUploadUrl(`${EXPECTED_ENDPOINT}/abc`, EXPECTED_ENDPOINT)).toBe(`${EXPECTED_ENDPOINT}/abc`);
+    expect(resolveTusUploadUrl("/storage/v1/upload/resumable/sign/abc", EXPECTED_ENDPOINT)).toBe(`${EXPECTED_ENDPOINT}/abc`);
+    // review: dot segments resolve before the check, so they can never climb out of the endpoint's path
+    for (const climb of [`${EXPECTED_ENDPOINT}/../../object/swing-videos/x`, `${EXPECTED_ENDPOINT}/%2e%2e/%2e%2e/object/x`, `${EXPECTED_ENDPOINT}/abc/../..`]) {
+      expect(resolveTusUploadUrl(climb, EXPECTED_ENDPOINT), climb).toBeNull();
+    }
+    expect(resolveTusUploadUrl(`${EXPECTED_ENDPOINT}/a/../b`, EXPECTED_ENDPOINT)).toBe(`${EXPECTED_ENDPOINT}/b`);
+    for (const bad of [null, "", "https://evil.example.com/storage/v1/upload/resumable/sign/abc",
+      "https://abcdefghijklmnop.storage.supabase.co/storage/v1/object/abc", `${EXPECTED_ENDPOINT}/`, `${EXPECTED_ENDPOINT}/abc?x=1`,
+      "http://abcdefghijklmnop.storage.supabase.co/storage/v1/upload/resumable/sign/abc"]) {
+      expect(resolveTusUploadUrl(bad, EXPECTED_ENDPOINT), String(bad)).toBeNull();
+    }
   });
 });

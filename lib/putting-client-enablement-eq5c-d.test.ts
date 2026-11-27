@@ -177,7 +177,7 @@ const GUARDS: Guard[] = [
       const body = stripComments(submission(s.analyze));
       return (
         body.indexOf("!canUsePuttingAnalysis(userTier)") >= 0 &&
-        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf("supabase.storage")
+        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf("await transferSelection(") // A1: the V1 signed transfer
       );
     },
   },
@@ -187,7 +187,7 @@ const GUARDS: Guard[] = [
       const body = stripComments(submission(s.analyze));
       return (
         body.indexOf("!canUsePuttingAnalysis(userTier)") >= 0 &&
-        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('.from("swing_videos")')
+        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('fetch("/api/v1/uploads/finalize"') // P2: the swing_videos row
       );
     },
   },
@@ -468,8 +468,8 @@ describe("EQ5C-D — the full-swing path is untouched", () => {
       "await getTrimmedBlob()",
       "await supabase.auth.getSession()",
       "querySavedClubs(supabase, { userId })",
-      ".from(BUCKET).upload(",
-      '.from("swing_videos")',
+      "await transferSelection(", // A1: the V1 signed transfer
+      'fetch("/api/v1/uploads/finalize"',
       'fetch("/api/v1/analyses"',
       'fetch("/api/analyze-swing"',
     ];
@@ -634,8 +634,8 @@ const REGRESSIONS: Regression[] = [
     apply: (s) => ({
       ...s,
       analyze: s.analyze.replace(
-        "      const blob = await getTrimmedBlob();",
-        '      const { data: fresh } = await supabase.from("users").select("subscription_tier").single();\n      const blob = await getTrimmedBlob();',
+        "      const blob = intent.blob ?? await getTrimmedBlob();",
+        '      const { data: fresh } = await supabase.from("users").select("subscription_tier").single();\n      const blob = intent.blob ?? await getTrimmedBlob();',
       ),
     }),
     breaks: ["startAnalysis opens no fresh tier query"],

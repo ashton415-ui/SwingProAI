@@ -642,7 +642,7 @@ describe("EQ5C-C — client Putter execution remains fail-closed", () => {
   it("the analyze page still refuses a selected Putter before anything is mutated", () => {
     const analyze = readSource("app/(dashboard)/analyze/page.tsx");
     const guard = analyze.indexOf("isPuttingCapturePresentation(savedClubs, selectedClubId)");
-    const upload = analyze.indexOf(".upload(");
+    const upload = analyze.indexOf("await transferSelection("); // A1: the V1 signed transfer
     expect(guard, "the EQ3-S2 fail-closed guard is missing").toBeGreaterThanOrEqual(0);
     expect(upload, "the upload call must stay behind the fail-closed guard").toBeGreaterThan(guard);
   });

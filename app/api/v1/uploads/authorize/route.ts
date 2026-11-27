@@ -12,6 +12,7 @@ import {
   buildResumableEndpoint,
   buildUploadAuthorizationDto,
   buildUploadObjectPath,
+  localLoopbackUploadEndpointAllowed,
   parseUploadAuthorizeRequest,
 } from "@/lib/api/v1-upload-dto";
 
@@ -70,7 +71,12 @@ export async function POST(request: Request): Promise<Response> {
     // Derived from configuration, never hard-coded: staging and local
     // environments must address their own project. A malformed value fails
     // closed rather than returning a half-built URL or echoing configuration.
-    const endpoint = buildResumableEndpoint(process.env.NEXT_PUBLIC_SUPABASE_URL);
+    // AG-WEB-READY-10-P2-A1: a disposable local stack's loopback endpoint only
+    // when the server opted in AND the project URL is exactly loopback (the
+    // hosted rule is unchanged; see buildResumableEndpoint).
+    const endpoint = buildResumableEndpoint(process.env.NEXT_PUBLIC_SUPABASE_URL, {
+      allowLoopback: localLoopbackUploadEndpointAllowed(process.env),
+    });
     if (endpoint === null) {
       return v1Error("INTERNAL_ERROR", INTERNAL_MESSAGE, requestId, 500);
     }

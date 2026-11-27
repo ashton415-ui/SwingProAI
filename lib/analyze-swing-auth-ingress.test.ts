@@ -48,6 +48,23 @@ const rt = vi.hoisted(() => ({
 }));
 
 vi.mock("server-only", () => ({}));
+// AG-WEB-READY-10-P2: the durable admission boundary answers as the stored default (`sync_mode`: no job, so the
+// existing synchronous path runs, which is what this suite covers). Admission itself is tested against the real
+// database (supabase/tests/app-integration/analysis-jobs.*.integration.test.ts).
+const admission = vi.hoisted(() => ({
+  calls: [] as Record<string, unknown>[],
+  answer: null as unknown,
+}));
+vi.mock("@/lib/analysis-job-admission", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/analysis-job-admission")>();
+  return {
+    ...actual,
+    admitAnalysisJob: async (request: Record<string, unknown>) => {
+      admission.calls.push(request);
+      return admission.answer ?? { outcome: "decided", disposition: "sync_mode", attempt: null };
+    },
+  };
+});
 vi.mock("next/headers", () => ({ headers: async () => rt.headers }));
 vi.mock("@/utils/supabase/admin", () => ({
   createAdminClient: () => {
@@ -196,7 +213,8 @@ function sessionCookie(access: string, refresh = `rt-${randomUUID()}`) {
 /** The request as the route sees it; `json()` counts whether the body was read. */
 function routeRequest(body: unknown = { analysisId: ANALYSIS_ID }) {
   const read = vi.fn(async () => body);
-  return { req: { json: read } as unknown as NextRequest, bodyRead: () => read.mock.calls.length };
+  // P2: the same headers the ingress reads (the admission declaration is read from the request itself)
+  return { req: { json: read, headers: rt.headers } as unknown as NextRequest, bodyRead: () => read.mock.calls.length };
 }
 async function call(headers: Record<string, string>) {
   rt.headers = new Headers(headers);
@@ -827,5 +845,52 @@ describe("Part 2 — the analysis report sends its execution request only as the
     expect(markup).not.toContain("Analysing Your Swing");
     expect(markup).not.toContain("Starting Your Analysis"); // 09-P1-A1: nothing waits before a press
     expect(wire).toEqual([]);
+  });
+});
+
+describe("P2 — the route's admission boundary", () => {
+  beforeEach(() => {
+    seen = [];
+    authOutage = false;
+    authAnswer = null;
+    labels.clear();
+    rt.adminConstructed = 0;
+    rt.providerCalls = 0;
+    admission.calls = [];
+    admission.answer = null;
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", SUPABASE);
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "synthetic-anon-key-not-a-secret");
+    vi.stubEnv("GEMINI_API_KEY", "synthetic-key-never-used");
+    vi.stubEnv("GOOGLE_AI_API_KEY", "");
+    vi.stubGlobal("fetch", standInFetch);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("`declared` is Bearer AND the declaration header: Bearer with it, Bearer without it, and the header with a cookie session", async () => {
+    const a = token("A", A);
+    await call({ authorization: `Bearer ${a}`, "x-swingproai-admission": "1" });
+    await call({ authorization: `Bearer ${a}` });
+    await call({ cookie: sessionCookie(a), "x-swingproai-admission": "1" });
+    expect(admission.calls.map((c) => [c.userId, c.declared])).toEqual([[A, true], [A, false], [A, false]]);
+  });
+
+  it("an admission that cannot be decided answers 503 before any claim or provider call", async () => {
+    admission.answer = { outcome: "unavailable" };
+    const r = await call({ authorization: `Bearer ${token("A", A)}`, "x-swingproai-admission": "1" });
+    expect(r.status).toBe(503);
+    expect(r.body).toEqual({ error: "Analysis is temporarily unavailable. Please try again shortly." });
+    expect([rt.adminConstructed, rt.providerCalls]).toEqual([0, 0]);
+  });
+
+  it("a cookie session with the header is not declared, so the database's client_update_required answers 409 and nothing runs", async () => {
+    admission.answer = { outcome: "decided", disposition: "client_update_required", attempt: null };
+    const r = await call({ cookie: sessionCookie(token("A", A)), "x-swingproai-admission": "1" });
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ status: "client_update_required" });
+    expect(admission.calls[0]).toMatchObject({ declared: false });
+    expect([rt.adminConstructed, rt.providerCalls]).toEqual([0, 0]);
   });
 });

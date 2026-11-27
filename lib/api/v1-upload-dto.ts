@@ -161,14 +161,26 @@ export function buildUploadObjectPath(userId: string, uploadId: string, mimeType
  * unexpected lets the route fail closed instead of handing a client a
  * half-formed URL or echoing configuration back.
  */
-export function buildResumableEndpoint(supabaseUrl: string | undefined): string | null {
+export function buildResumableEndpoint(
+  supabaseUrl: string | undefined,
+  options: { readonly allowLoopback?: boolean } = {},
+): string | null {
   if (typeof supabaseUrl !== "string" || supabaseUrl.length === 0) return null;
 
-  let host: string;
+  let url: URL;
   try {
-    host = new URL(supabaseUrl).hostname;
+    url = new URL(supabaseUrl);
   } catch {
     return null;
+  }
+  const host = url.hostname;
+
+  // AG-WEB-READY-10-P2-A1 local test seam (see LOCAL_LOOPBACK_UPLOAD_ENDPOINT_ENV): a disposable local stack serves
+  // the same signed resumable endpoint on its own loopback API origin. Honoured only when the server opted in AND the
+  // configured project URL is itself exactly a loopback http origin, so a hosted project URL can never be mapped to a
+  // local endpoint (and the hosted rule below is unchanged for every other value).
+  if (options.allowLoopback === true && isLoopbackApiOrigin(url, supabaseUrl)) {
+    return `http://127.0.0.1:${url.port}/storage/v1/upload/resumable/sign`;
   }
 
   const ref = host.split(".")[0];
@@ -176,6 +188,120 @@ export function buildResumableEndpoint(supabaseUrl: string | undefined): string 
   if (!host.endsWith(".supabase.co")) return null;
 
   return `https://${ref}.storage.supabase.co/storage/v1/upload/resumable/sign`;
+}
+
+/**
+ * AG-WEB-READY-10-P2-A1. The server-only variable that lets the authorize route hand a LOCAL disposable stack's own
+ * signed resumable endpoint to the web upload page (local verification of the signed transport). It is never needed
+ * for a hosted project and changes nothing for one: buildResumableEndpoint honours it only for an exact loopback
+ * project URL. Authentication, the owner-bound object key and the path-scoped signature are the same either way.
+ */
+export const LOCAL_LOOPBACK_UPLOAD_ENDPOINT_ENV = "SWINGPROAI_LOCAL_LOOPBACK_UPLOAD_ENDPOINT";
+
+/** Whether the server opted in to the local loopback endpoint (exactly "1"; anything else is off). */
+export function localLoopbackUploadEndpointAllowed(env: Readonly<Record<string, string | undefined>>): boolean {
+  return env[LOCAL_LOOPBACK_UPLOAD_ENDPOINT_ENV] === "1";
+}
+
+/** `http://127.0.0.1:<port>` exactly: no credentials, path, query or fragment, and a numeric port. */
+function isLoopbackApiOrigin(url: URL, raw: string): boolean {
+  return (
+    url.protocol === "http:" &&
+    url.hostname === "127.0.0.1" &&
+    /^[1-9][0-9]{0,4}$/.test(url.port) &&
+    url.username === "" &&
+    url.password === "" &&
+    raw.replace(/\/$/, "") === `http://127.0.0.1:${url.port}`
+  );
+}
+
+/* ─── A1: the signed resumable (TUS) transport, as the authorize answer describes it ──────────────────────────────── */
+
+/** The TUS protocol version the signed resumable endpoint speaks. */
+export const TUS_RESUMABLE_VERSION = "1.0.0";
+
+/** Cache-Control recorded with the uploaded object (the Storage default). */
+export const UPLOAD_CACHE_CONTROL = "3600";
+
+/**
+ * The authorize answer, read strictly by the uploading client: every field must be exactly what the request asked
+ * for and what the contract promises (same upload id, the caller's own object key, the closed content type, the fixed
+ * chunk size, no upsert, a usable endpoint). Anything else is refused (null) and nothing is sent.
+ */
+export function parseSignedUploadGrant(
+  body: unknown,
+  expected: {
+    readonly uploadId: string;
+    readonly objectPath: string;
+    readonly contentType: UploadMimeType;
+    /** A1 review: the exact endpoint the caller's own configuration implies (required); null refuses every answer. */
+    readonly endpoint: string | null;
+  },
+): UploadAuthorizationDto | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const r = body as Record<string, unknown>;
+  if (r.uploadId !== expected.uploadId || r.bucket !== UPLOAD_BUCKET || r.objectPath !== expected.objectPath) return null;
+  if (r.contentType !== expected.contentType || r.upsert !== false || r.chunkSize !== UPLOAD_CHUNK_SIZE) return null;
+  if (typeof r.signature !== "string" || r.signature.length === 0 || r.signature.length > 4096) return null;
+  if (typeof r.expiresInSeconds !== "number" || !Number.isSafeInteger(r.expiresInSeconds) || r.expiresInSeconds <= 0) return null;
+  if (typeof r.endpoint !== "string") return null;
+  let endpoint: URL;
+  try {
+    endpoint = new URL(r.endpoint);
+  } catch {
+    return null;
+  }
+  if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && endpoint.hostname === "127.0.0.1")) return null;
+  if (!endpoint.pathname.endsWith("/upload/resumable/sign") || endpoint.search !== "" || endpoint.hash !== "") return null;
+  if (endpoint.href !== expected.endpoint) return null;
+  return {
+    uploadId: expected.uploadId,
+    bucket: UPLOAD_BUCKET,
+    objectPath: expected.objectPath,
+    endpoint: endpoint.href,
+    signature: r.signature,
+    expiresInSeconds: r.expiresInSeconds,
+    chunkSize: UPLOAD_CHUNK_SIZE,
+    contentType: expected.contentType,
+    upsert: false,
+  };
+}
+
+/** ASCII-only base64 (every metadata value here is ASCII by construction). */
+function asciiBase64(value: string): string {
+  if (!/^[\x20-\x7e]*$/.test(value)) throw new Error("non-ASCII upload metadata");
+  return btoa(value);
+}
+
+/** The TUS Upload-Metadata header for one authorized object (bucket, object key, content type, cache control). */
+export function buildTusUploadMetadata(authorization: Pick<UploadAuthorizationDto, "bucket" | "objectPath" | "contentType">): string {
+  return [
+    `bucketName ${asciiBase64(authorization.bucket)}`,
+    `objectName ${asciiBase64(authorization.objectPath)}`,
+    `contentType ${asciiBase64(authorization.contentType)}`,
+    `cacheControl ${asciiBase64(UPLOAD_CACHE_CONTROL)}`,
+  ].join(",");
+}
+
+/**
+ * The upload URL a TUS creation answered (its Location), resolved against the authorized endpoint: only a URL on the
+ * endpoint's own origin and under the endpoint's own path is accepted, so the path-scoped signature is never sent to
+ * any other address. Null for anything else.
+ */
+export function resolveTusUploadUrl(location: string | null, endpoint: string): string | null {
+  if (typeof location !== "string" || location.length === 0 || location.length > 2048) return null;
+  let base: URL;
+  let resolved: URL;
+  try {
+    base = new URL(endpoint);
+    resolved = new URL(location, base);
+  } catch {
+    return null;
+  }
+  if (resolved.origin !== base.origin) return null;
+  if (!resolved.pathname.startsWith(`${base.pathname}/`) || resolved.pathname.length <= base.pathname.length + 1) return null;
+  if (resolved.search !== "" || resolved.hash !== "" || resolved.username !== "" || resolved.password !== "") return null;
+  return resolved.href;
 }
 
 export interface UploadAuthorizationDto {
@@ -204,10 +330,27 @@ export interface UploadAuthorizationDto {
 export interface UploadFinalizeRequest {
   readonly uploadId: string;
   readonly mimeType: UploadMimeType;
+  /**
+   * AG-WEB-READY-10-P2 (optional, backwards compatible). What the web upload page records about the chosen clip
+   * today: its display file name and trim bounds. Absent for native clients and any caller that does not send them.
+   */
+  readonly metadata?: UploadClipMetadata;
 }
 
-/** Exactly the keys finalization accepts. Anything else fails the request. */
+export interface UploadClipMetadata {
+  readonly originalFilename: string | null;
+  readonly trimStart: number | null;
+  readonly trimEnd: number | null;
+}
+
+/** Exactly the keys finalization requires. Anything else fails the request. */
 const ALLOWED_FINALIZE_KEYS = ["uploadId", "mimeType"] as const;
+/** P2: the optional web clip metadata keys. */
+const OPTIONAL_FINALIZE_KEYS = ["originalFilename", "trimStart", "trimEnd"] as const;
+/** P2: the display file name uses the canonical object-key charset (lib/swing-video-source.ts canonicalUploadFileName). */
+const CLIP_FILE_NAME = /^[A-Za-z0-9._-]{1,255}$/;
+/** P2: an upper bound on a trim bound, in seconds (24 h: a clip far into a long recording still finalizes). */
+export const MAX_TRIM_SECONDS = 86400;
 
 /**
  * Parses an untrusted finalization body, or returns `null`.
@@ -225,7 +368,7 @@ export function parseUploadFinalizeRequest(body: unknown): UploadFinalizeRequest
   const record = body as Record<string, unknown>;
 
   for (const key of Object.keys(record)) {
-    if (!(ALLOWED_FINALIZE_KEYS as readonly string[]).includes(key)) return null;
+    if (!(ALLOWED_FINALIZE_KEYS as readonly string[]).includes(key) && !(OPTIONAL_FINALIZE_KEYS as readonly string[]).includes(key)) return null;
   }
   for (const key of ALLOWED_FINALIZE_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(record, key)) return null;
@@ -235,7 +378,25 @@ export function parseUploadFinalizeRequest(body: unknown): UploadFinalizeRequest
   if (!isUuidV4(uploadId)) return null;
   if (!isUploadMimeType(mimeType)) return null;
 
-  return { uploadId, mimeType };
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(record, k);
+  if (!OPTIONAL_FINALIZE_KEYS.some(has)) return { uploadId, mimeType };
+  const { originalFilename, trimStart, trimEnd } = record;
+  if (originalFilename !== undefined && originalFilename !== null
+      && (typeof originalFilename !== "string" || !CLIP_FILE_NAME.test(originalFilename) || originalFilename === "." || originalFilename === "..")) {
+    return null;
+  }
+  if (has("trimStart") !== has("trimEnd")) return null;
+  const bound = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= MAX_TRIM_SECONDS;
+  if (has("trimStart") && !(bound(trimStart) && bound(trimEnd) && (trimStart as number) < (trimEnd as number))) return null;
+  return {
+    uploadId,
+    mimeType,
+    metadata: {
+      originalFilename: typeof originalFilename === "string" ? originalFilename : null,
+      trimStart: has("trimStart") ? (trimStart as number) : null,
+      trimEnd: has("trimEnd") ? (trimEnd as number) : null,
+    },
+  };
 }
 
 /**
@@ -334,7 +495,7 @@ export const UPLOAD_FINALIZED_STATUS = "uploaded";
 
 /** The exact `swing_videos` columns finalization reads to decide idempotency. */
 export const FINALIZE_ROW_COLUMNS =
-  "id, user_id, storage_path, video_url, file_size, mime_type, status, created_at";
+  "id, user_id, storage_path, video_url, file_size, mime_type, status, created_at, original_filename, trim_start, trim_end";
 
 /** Postgres unique-violation code. The only error that means "someone won a race". */
 export const PG_UNIQUE_VIOLATION = "23505";
@@ -356,6 +517,9 @@ export function isCanonicalFinalizedRow(
     file_size?: unknown;
     mime_type?: unknown;
     status?: unknown;
+    original_filename?: unknown;
+    trim_start?: unknown;
+    trim_end?: unknown;
   },
   expected: {
     uploadId: string;
@@ -363,8 +527,11 @@ export function isCanonicalFinalizedRow(
     objectPath: string;
     fileSize: number;
     contentType: UploadMimeType;
+    /** P2: compared only when the request carried clip metadata. */
+    metadata?: UploadClipMetadata;
   },
 ): boolean {
+  const sameNumber = (stored: unknown, wanted: number) => stored !== null && stored !== undefined && Number(stored) === wanted;
   return (
     row.id === expected.uploadId &&
     row.user_id === expected.userId &&
@@ -372,7 +539,11 @@ export function isCanonicalFinalizedRow(
     row.video_url === expected.objectPath &&
     Number(row.file_size) === expected.fileSize &&
     row.mime_type === expected.contentType &&
-    row.status === UPLOAD_FINALIZED_STATUS
+    row.status === UPLOAD_FINALIZED_STATUS &&
+    (expected.metadata === undefined ||
+      ((row.original_filename ?? null) === expected.metadata.originalFilename &&
+        (expected.metadata.trimStart === null || sameNumber(row.trim_start, expected.metadata.trimStart)) &&
+        (expected.metadata.trimEnd === null || sameNumber(row.trim_end, expected.metadata.trimEnd))))
   );
 }
 

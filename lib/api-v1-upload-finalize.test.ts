@@ -356,12 +356,9 @@ describe("D2 finalize — request validation", () => {
     "bucket",
     "userId",
     "filename",
-    "originalFilename",
     "title",
     "club",
     "clubId",
-    "trimStart",
-    "trimEnd",
     "tier",
     "role",
     "analysisMode",
@@ -1116,5 +1113,75 @@ describe("D2 route security invariants", () => {
   it("116. does not mint or persist a download URL", () => {
     expect(routeSource).not.toContain("createSignedUrl");
     expect(routeSource).not.toContain("getPublicUrl");
+  });
+});
+
+// ─── AG-WEB-READY-10-P2: optional web clip metadata (backwards compatible) ───
+
+describe("P2 finalize — optional web clip metadata", () => {
+  const META = { originalFilename: "swing_take-2.mp4", trimStart: 1.25, trimEnd: 4.5 };
+
+  it("a clip far into a long recording keeps its trim (bound 24 h)", async () => {
+    const client = makeFakeClient({ insert: { data: null, error: null } });
+    setAuthenticated(client);
+    expect((await finalizePOST(post(validBody({ originalFilename: "long.mp4", trimStart: 3700, trimEnd: 3712.5 })))).status).toBe(200);
+    expect(insertCalls(client)[0][1]).toMatchObject({ trim_start: 3700, trim_end: 3712.5 });
+  });
+
+  it("a request without metadata is unchanged: the seven canonical columns", async () => {
+    expect(parseUploadFinalizeRequest(validBody())).toEqual({ uploadId: UPLOAD_ID, mimeType: "video/mp4" });
+  });
+
+  it("valid metadata is written with the row; identity, size and type stay server-derived", async () => {
+    const client = makeFakeClient({ insert: { data: null, error: null } });
+    setAuthenticated(client);
+    const response = await finalizePOST(post(validBody(META)));
+    expect(response.status).toBe(200);
+    const row = insertCalls(client)[0][1] as Record<string, unknown>;
+    expect(row).toEqual({
+      id: UPLOAD_ID, user_id: CALLER_ID, storage_path: OBJECT_PATH, video_url: OBJECT_PATH, file_size: 1024,
+      mime_type: "video/mp4", status: "uploaded", original_filename: "swing_take-2.mp4", trim_start: 1.25, trim_end: 4.5,
+    });
+  });
+
+  it.each([
+    ["a path", { originalFilename: "a/b.mp4" }],
+    ["a dot name", { originalFilename: ".." }],
+    ["an empty name", { originalFilename: "" }],
+    ["a long name", { originalFilename: "x".repeat(256) }],
+    ["a number as name", { originalFilename: 5 }],
+    ["one trim bound", { trimStart: 1 }],
+    ["the other trim bound", { trimEnd: 1 }],
+    ["an empty trim range", { trimStart: 2, trimEnd: 2 }],
+    ["a reversed trim range", { trimStart: 3, trimEnd: 2 }],
+    ["a negative trim bound", { trimStart: -1, trimEnd: 2 }],
+    ["an oversized trim bound", { trimStart: 0, trimEnd: 86401 }],
+    ["a text trim bound", { trimStart: "0", trimEnd: 2 }],
+  ])("refuses %s before Storage or the database", async (_name, extra) => {
+    const client = makeFakeClient();
+    setAuthenticated(client);
+    const response = await finalizePOST(post(validBody(extra)));
+    expect(response.status).toBe(400);
+    expect(storageCalls(client)).toHaveLength(0);
+    expect(dbCalls(client)).toHaveLength(0);
+  });
+
+  it("a repeat with the same metadata is idempotent; different metadata is a different upload (UPLOAD_CONFLICT)", async () => {
+    const stored = canonicalRow({ original_filename: "swing_take-2.mp4", trim_start: 1.25, trim_end: 4.5 });
+    let client = makeFakeClient({ selects: [{ data: stored, error: null }] });
+    setAuthenticated(client);
+    expect((await finalizePOST(post(validBody(META)))).status).toBe(200);
+    expect(insertCalls(client)).toHaveLength(0);
+    for (const changed of [{ originalFilename: "other.mp4" }, { trimStart: 1, trimEnd: 4.5 }]) {
+      client = makeFakeClient({ selects: [{ data: stored, error: null }] });
+      setAuthenticated(client);
+      const r = await finalizePOST(post(validBody({ ...META, ...changed })));
+      expect(r.status).toBe(409);
+      expect(await bodyOf(r)).toMatchObject({ error: { code: "UPLOAD_CONFLICT" } });
+    }
+    // a native repeat without metadata on the same row is the same upload
+    client = makeFakeClient({ selects: [{ data: stored, error: null }] });
+    setAuthenticated(client);
+    expect((await finalizePOST(post(validBody()))).status).toBe(200);
   });
 });

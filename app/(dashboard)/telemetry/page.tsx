@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { authorizeOwnedAnalysisRows } from "@/lib/analysis-result-read-authority";
+import { golferStatusLabel, readGolferJobStates, type JobStateRead } from "@/lib/analysis-attempt-precedence";
 import {
   ASSESSMENT_LABEL,
   ESTIMATES_DISCLOSURE,
@@ -35,6 +36,8 @@ interface SwingLog {
   id:          string;
   created_at:  string;
   status:      string;
+  /** AG-WEB-READY-10-P2: the golfer-facing attempt state, when it could be read */
+  job?:        JobStateRead | null;
   score:       number | null;
   feedback:    string | null;
   club:        string | null;
@@ -99,7 +102,21 @@ function sessionLabel(type: string) {
 // Status chip
 // ─────────────────────────────────────────────────────────────────────────────
 
-function StatusChip({ status }: { status: string }) {
+function StatusChip({ status, job = null }: { status: string; job?: JobStateRead | null }) {
+  // P2: with an attempt state, the shared precedence rule decides (an open retry is never shown as Failed). A1: an
+  // unreadable state is "Status unavailable" (a stored completed swing stays Complete).
+  if (job) {
+    const { label, tone } = golferStatusLabel(status, job);
+    if (tone !== "complete") {
+      const style =
+        tone === "failed" ? "bg-red-400/10 border-red-400/20 text-red-400"
+        : tone === "active" || tone === "attention" ? "bg-amber-400/10 border-amber-400/20 text-amber-400"
+        : "bg-white/[0.04] border-white/10 text-gray-500";
+      const spinning = job !== "unavailable" && job.execution === "processing";
+      const Icon = tone === "failed" || tone === "attention" ? AlertCircle : spinning ? Loader2 : Clock;
+      return <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-[9px] font-black uppercase tracking-widest ${style}`}><Icon className={`w-2.5 h-2.5${spinning ? " animate-spin" : ""}`} />{label}</span>;
+    }
+  }
   if (status === "complete")   return <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-golf-green/10 border border-golf-green/20 text-[9px] font-black uppercase tracking-widest text-golf-green"><CheckCircle2 className="w-2.5 h-2.5" />Complete</span>;
   if (status === "processing") return <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-400/10 border border-amber-400/20 text-[9px] font-black uppercase tracking-widest text-amber-400"><Loader2 className="w-2.5 h-2.5 animate-spin" />Processing</span>;
   if (status === "failed")     return <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-400/10 border border-red-400/20 text-[9px] font-black uppercase tracking-widest text-red-400"><AlertCircle className="w-2.5 h-2.5" />Failed</span>;
@@ -181,7 +198,7 @@ function SwingLogCard({ log }: { log: SwingLog }) {
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-1">
             <span className="text-base font-black text-white truncate">{label}</span>
-            <StatusChip status={log.status} />
+            <StatusChip status={log.status} job={log.job ?? null} />
             {isComplete && (
               <span className="text-sm font-black font-mono text-white" title={SCORE_BASIS}>
                 {score.scored ? `${score.value} / 100` : UNSCORED_LABEL}
@@ -407,6 +424,10 @@ export default async function TelemetryPage() {
     (r) => r.analysis_family === null || r.analysis_family === "full_swing",
   );
 
+  // AG-WEB-READY-10-P2: golfer-facing attempt states, on the golfer's own session (A1: "unavailable" per swing when
+  // its state cannot be read)
+  const jobStates = await readGolferJobStates(supabase, fullSwingRows.map((r) => r.id));
+
   const swingLogs: SwingLog[] = fullSwingRows.map((r) => {
     const vid    = r.swing_video as unknown as RawVideo | RawVideo[];
     const video  = Array.isArray(vid) ? (vid[0] ?? null) : vid;
@@ -426,6 +447,7 @@ export default async function TelemetryPage() {
       id:           r.id,
       created_at:   r.created_at ?? "",
       status:       r.status,
+      job:          jobStates.get(String(r.id)),
       score:        r.score ?? null,
       feedback:     r.feedback ?? null,
       // EQ5F-A. The immutable equipment snapshot names the club this analysis

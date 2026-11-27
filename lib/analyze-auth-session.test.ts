@@ -69,8 +69,10 @@ const HARD_CODED_AUTH_COOKIE = "sb-atlmnqispyzhsahahpjy-auth-token";
 const ANCHORS = {
   preprocessing: "await getTrimmedBlob()",
   sessionResolution: "auth.getSession()",
-  storageUpload: ".from(BUCKET).upload(",
-  swingVideosInsert: `.from("swing_videos")`,
+  /** A1: the clip goes through V1 authorize and its signed transfer (no Storage client call of its own). */
+  storageUpload: "await transferSelection(",
+  /** P2: V1 finalize writes the swing_videos row (the page holds no swing_videos write of its own). */
+  swingVideosInsert: `fetch("/api/v1/uploads/finalize"`,
   /** Analysis request authority closure: the pending analysis row is created by
    *  the trusted server doorway, which now occupies the old insert's step. */
   swingAnalysisInsert: `fetch("/api/v1/analyses"`,
@@ -159,8 +161,10 @@ describe("Analyze auth/session source contract — managed browser client", () =
     expect(analyzeSource).not.toContain("Authorization");
     expect(analyzeSource).not.toMatch(/Bearer \$\{/);
     expect(analyzeSource).not.toContain("accessToken");
-    expect(analyzeSource.match(/\.\.\.ownerBearer\(/g) ?? []).toHaveLength(2);
+    expect(analyzeSource.match(/\.\.\.ownerBearer\(/g) ?? []).toHaveLength(4); // A1: + the V1 upload authorization
     for (const [confirmation, header, route] of [
+      ["const authorizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(authorizeSession.session)", 'fetch("/api/v1/uploads/authorize"'],
+      ["const finalizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(finalizeSession.session)", 'fetch("/api/v1/uploads/finalize"'],
       ["const requestSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(requestSession.session)", 'fetch("/api/v1/analyses"'],
       ["const analysisSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(analysisSession.session)", 'fetch("/api/analyze-swing"'],
     ] as const) {
@@ -280,22 +284,26 @@ describe("Analyze auth/session source contract — submission ordering", () => {
   });
 
   it("derives storage ownership and both user_id columns from the current session", () => {
-    expect(analyzeSource).toMatch(
-      /const\s+storagePath\s*=\s*`\$\{userId\}\/\$\{crypto\.randomUUID\(\)\}\//
-    );
-    // swing_videos carries the session-derived id. swing_analysis no longer
-    // takes an owner from the browser at all: /api/v1/analyses derives it from
-    // the verified session server-side.
-    expect(analyzeSource).toMatch(/user_id:\s*userId,/);
-    expect(analyzeSource.match(/user_id:\s*userId,/g) ?? []).toHaveLength(1);
+    // P2: the V1 upload contract derives the object key and the swing_videos owner from the verified session on the
+    // server (/api/v1/uploads/authorize and /finalize); the page sends only a per-selection upload id. swing_analysis
+    // takes no owner from the browser either: /api/v1/analyses derives it server-side.
+    expect(analyzeSource).toContain("uploadId: crypto.randomUUID()");
+    expect(analyzeSource).toContain("const objectPath = buildUploadObjectPath(userId, intent.uploadId, mimeType);");
+    expect(analyzeSource).not.toMatch(/const\s+storagePath\s*=/);
+    expect(analyzeSource.match(/user_id:\s*userId,/g) ?? []).toHaveLength(0);
     // No hand-parsed ownership field may survive.
     expect(analyzeSource).not.toContain("user_id: s.user_id");
     expect(analyzeSource).not.toContain("session.user_id");
   });
 
   it("reuses the same page client (managed Auth, owner-bound data) for Storage and swing_videos, and writes no swing_analysis row", () => {
-    expect(analyzeSource).toContain("await supabase.storage");
-    expect(analyzeSource).toMatch(/await\s+supabase\s*\n?\s*\.from\("swing_videos"\)/);
+    // A1: the clip is sent through V1 authorize and its signed transfer, not through the page's Storage client
+    expect(analyzeSource).not.toContain("supabase.storage");
+    expect(analyzeSource).toContain('fetch("/api/v1/uploads/authorize"');
+    expect(analyzeSource).toContain("await transferSelection(");
+    // P2: the swing_videos row is written by V1 finalize; the page holds no swing_videos write of its own
+    expect(analyzeSource).not.toMatch(/\.from\("swing_videos"\)/);
+    expect(analyzeSource).toContain('fetch("/api/v1/uploads/finalize"');
     // Analysis request authority closure: the browser holds no INSERT on
     // swing_analysis; the request goes through the trusted server doorway.
     expect(analyzeSource).not.toMatch(/\.from\("swing_analysis"\)/);
@@ -394,7 +402,7 @@ describe("A3 — every owner-specific dispatch is bound to the account the page 
     expect(submissionSource).toContain('const analysisRes = await fetch("/api/analyze-swing", {');
     const call = submissionSource.slice(submissionSource.indexOf('fetch("/api/analyze-swing", {'), submissionSource.indexOf("});", submissionSource.indexOf('fetch("/api/analyze-swing", {')));
     expect(call).toContain('credentials: "omit",');
-    expect(call).toContain('headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session) },');
+    expect(call).toContain('headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session), [ADMISSION_DECLARATION_HEADER]: ADMISSION_DECLARATION_VALUE },');
     expect(call).not.toContain("signal"); // once sent it runs on, as before A3; an unsent call is dropped before fetch
     expect(indexInSubmission("if (runAbort.signal.aborted || !mountedRef.current) return;")).toBeLessThan(indexInSubmission('const analysisRes = await fetch("/api/analyze-swing", {'));
   });

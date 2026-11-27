@@ -747,7 +747,7 @@ describe("the putting family suppresses every full-swing-only region", () => {
     expect(pageSource).toContain("original_filename");
     const shared = pageSource.slice(pageSource.indexOf(SHARED_STATUS_REGION_START));
     expect(shared).toContain("AI analysis in progress");
-    expect(shared).toContain("Analysis queued");
+    expect(shared).toContain("Not analyzed yet"); // P2: replaces "Analysis queued" for a never-admitted swing
   });
 });
 

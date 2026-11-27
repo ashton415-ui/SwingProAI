@@ -1074,8 +1074,8 @@ describe("AnalyzePage — submission ordering is unchanged", () => {
     const block = isolateStartAnalysisSource(readSource(ANALYZE_PAGE_FILE));
 
     const blobIdx = block.indexOf("await getTrimmedBlob()");
-    const uploadIdx = block.indexOf(".upload(");
-    const videosIdx = block.indexOf('.from("swing_videos")');
+    const uploadIdx = block.indexOf("await transferSelection("); // A1: the V1 signed transfer
+    const videosIdx = block.indexOf('fetch("/api/v1/uploads/finalize"');
     // Analysis request authority closure: the pending analysis row is created by
     // the trusted server doorway, which occupies the old browser insert's step.
     const analysisIdx = block.indexOf('fetch("/api/v1/analyses"');
@@ -1083,8 +1083,8 @@ describe("AnalyzePage — submission ordering is unchanged", () => {
 
     for (const [label, idx] of [
       ["await getTrimmedBlob()", blobIdx],
-      [".upload(", uploadIdx],
-      ['.from("swing_videos")', videosIdx],
+      ["await transferSelection(", uploadIdx],
+      ['fetch("/api/v1/uploads/finalize"', videosIdx],
       ['fetch("/api/v1/analyses"', analysisIdx],
       ['fetch("/api/analyze-swing"', apiIdx],
     ] as [string, number][]) {

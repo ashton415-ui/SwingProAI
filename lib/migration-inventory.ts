@@ -241,6 +241,15 @@ export const ENT1D_SWING_VIDEO_SOURCE_GUARD_FILENAME =
   "20261027120100_ent1d_swing_video_source_guard.sql";
 
 /**
+ * AG-WEB-READY-10-P2 (M1): durable full-swing analysis admission and jobs. New roles analysis_jobs_owner and
+ * analysis_worker; tables analysis_jobs, analysis_admission_control and analysis_spend_ledger; admission, read, worker
+ * and operator functions; a job-claim trigger on swing_analysis that is inert until a job exists. Additive: the
+ * control row defaults to the synchronous mode with every switch off, so no build changes behaviour.
+ */
+export const ANALYSIS_JOBS_P2_FILENAME =
+  "20261127120000_analysis_jobs.sql";
+
+/**
  * Every approved checked-in migration filename, in timestamp order.
  * This is the closed-world set: anything on disk that is not listed here is a
  * failure, and anything listed here that is missing from disk is a failure.
@@ -276,6 +285,7 @@ export const APPROVED_MIGRATIONS: string[] = [
   ENT1D_ANALYSIS_RESULT_PRIVILEGES_FILENAME,
   ENT1D_EXECUTION_CLAIM_GUARD_FILENAME,
   ENT1D_SWING_VIDEO_SOURCE_GUARD_FILENAME,
+  ANALYSIS_JOBS_P2_FILENAME,
 ];
 
 /** The exact number of approved checked-in migrations. */

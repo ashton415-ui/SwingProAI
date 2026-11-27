@@ -44,9 +44,20 @@ import {
 import { decideProviderCompletion } from "@/lib/gemini-completion-policy";
 import {
   PILLAR_RATINGS,
-  buildMetricEvidence,
+  toStoredFullSwingResult,
   validateFullSwingModelResponse,
 } from "@/lib/full-swing-analysis-contract";
+import { clientAngle, clientTempoRatio, sanitizeClientMetrics } from "@/lib/analysis-metrics-validation";
+import {
+  ADMISSION_DECLARATION_HEADER,
+  ADMISSION_DECLARATION_VALUE,
+  IN_PROGRESS_COPY,
+  NOT_FOUND_COPY,
+  NOT_STARTABLE_COPY,
+  STALLED_COPY,
+  type GolferAttempt,
+} from "@/lib/analysis-attempt-precedence";
+import { admissionResponseBody, admitAnalysisJob, readRetryOfAttemptId } from "@/lib/analysis-job-admission";
 import {
   CAMERA_VIEWS,
   DETAIL_VISIBILITY,
@@ -112,6 +123,11 @@ function resolveGeminiKey(): string | undefined {
 interface RequestBody {
   analysisId: string;
   /**
+   * AG-WEB-READY-10-P2. The failed attempt a Retry refers to (the golfer saw it), or null. Only the new-client path
+   * (Bearer and the admission declaration) can create an attempt; the database decides what the reference means.
+   */
+  retryOfAttemptId?: string | null;
+  /**
    * Client-supplied estimates (field name kept for compatibility). The server
    * cannot verify where they came from or how they were produced, so they are
    * unverified: listed to the model as such and stored beside, never in place
@@ -128,14 +144,6 @@ interface RequestBody {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function parseTempoRatioToNumber(s: string): number | null {
-  const parts = s.split(":").map(Number);
-  if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) && parts[1] !== 0) {
-    return parts[0] / parts[1];
-  }
-  return null;
-}
 
 /** Encode an ArrayBuffer to a base64 string without Node's Buffer API.
  *  Uses an indexed loop — no spread operator, so no --downlevelIteration needed. */
@@ -925,6 +933,41 @@ export async function POST(req: NextRequest) {
   }
   const access = entitlement.access;
 
+  // ── AG-WEB-READY-10-P2 durable admission (ADR 10-P1 §5–§6) ───────────────
+  // Every full-swing request is classified by the database in one transaction. A new attempt is a durable job with
+  // its spend reservation, answered 202; a replay, a finished or a refused attempt is answered from what the database
+  // holds. `sync_mode` (no job ever, mode `sync`: the default) runs the existing synchronous path below, unchanged. A
+  // job is created only for a request that is Bearer-authenticated AND declares it understands 202 (not a security
+  // control). Any read error is 503, never the synchronous path. Admission never writes swing_analysis.
+  const retryOf = readRetryOfAttemptId(body.retryOfAttemptId);
+  if (!retryOf.ok) {
+    return NextResponse.json({ error: NOT_FOUND_COPY }, { status: 404 });
+  }
+  const declared = auth.source === "bearer" && req.headers?.get?.(ADMISSION_DECLARATION_HEADER) === ADMISSION_DECLARATION_VALUE;
+  const admission = await admitAnalysisJob({
+    userId: user.id,
+    analysisId,
+    declared,
+    retryOfAttemptId: retryOf.value,
+    clientMetrics: sanitizeClientMetrics(clientMetrics),
+  });
+  if (admission.outcome === "unavailable") {
+    console.error("[analyze-swing] admission could not be decided");
+    return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
+  }
+  console.log("[analyze-swing] admission:", admission.disposition);
+  // A1: `attempt` names the request's own accepted attempt (a delayed repeat of the first press names attempt 1);
+  // `current` is the attempt the answer describes when that is another one.
+  if (admission.disposition === "complete") {
+    return analysisRow.status === "complete"
+      ? await completedResponse(analysisRow, user.id, access, admission.attempt, admission.current)
+      : await answerUnclaimed(supabase, analysisId, user.id, "full_swing", access, admission.attempt, admission.current);
+  }
+  if (admission.disposition !== "sync_mode") {
+    const answer = admissionResponseBody(admission.disposition, analysisId, admission.attempt, VIDEO_UNUSABLE_COPY, admission.current);
+    return NextResponse.json(answer.body, { status: answer.http, headers: answer.headers });
+  }
+
   // A completed analysis is answered from the stored row. Gemini is never re-run
   // for it, so a replayed or repeated request cannot spend a second model call.
   if (analysisRow.status === "complete") {
@@ -1153,55 +1196,12 @@ export async function POST(req: NextRequest) {
     // each one, labelled unverified, and never takes its place. Every value and
     // its source are stored together in metrics.metric_evidence; the score is
     // null when the video could not be scored, never 0 or a default.
-    const metricEvidence = buildMetricEvidence(report, merged);
-
-    const metrics = {
-      scoring_breakdown: report.scoring_breakdown,
-      evidence_limits:   report.evidence_limits,
-      evidence_coverage: report.evidence_coverage,
-      metric_evidence:   metricEvidence,
-      fault_tags:        report.fault_tags,
-      drills:            report.drills,
-      posture:           report.posture,
-      swing_plane:       report.swing_plane,
-      impact:            report.impact,
-      practice_focus:    report.practice_focus,
-      pro_cue:           report.pro_cue,
-      // Internal and versioned: model declarations, item outcomes and the applied
-      // adjustments. Never served: the read authority's metrics allow-list drops it.
-      rubric_assessment: assessment,
-    };
-
-    // S6-R1A. The model assesses no checkpoint, joint position or severity, so
-    // none is stored: these are null ("not assessed"), never the constants this
-    // route used to write ("impact", {general, 0.5, 0.5}, "minor"). The coaching
-    // text is kept as written.
-    const swing_highlights = report.highlights.map((h) => ({
-      checkpoint:         null,
-      positive_movement:  h.title,
-      mechanical_benefit: h.description,
-    }));
-
-    const mechanical_deficiencies = report.deficiencies.map((d) => ({
-      checkpoint:              null,
-      joint_coordinate:        null,
-      fault_description:       d.title,
-      corrective_drill_detail: d.description,
-      severity:                null,
-      corrective_drill_title:  "",
-    }));
-
+    // AG-WEB-READY-10-P2: the mapping moved unchanged to lib/full-swing-analysis-contract.ts
+    // (toStoredFullSwingResult), shared with the background worker. S6-R1A: no
+    // checkpoint, joint position or severity is stored (null, "not assessed").
     const payload = {
       status:            "complete",
-      score:             report.score,
-      feedback:          report.executive_summary,
-      spine_angle:       report.spine_angle,
-      hip_rotation:      report.hip_rotation,
-      shoulder_rotation: report.shoulder_rotation,
-      tempo_ratio:       report.tempo_ratio === null ? null : parseTempoRatioToNumber(report.tempo_ratio),
-      metrics,
-      swing_highlights,
-      mechanical_deficiencies,
+      ...toStoredFullSwingResult(report, assessment, merged),
       // ENT-1D: the holder's claim, proved in the row (migration 20261027120000).
       processing_claim_proof: claimId,
     };
@@ -1256,11 +1256,7 @@ export async function POST(req: NextRequest) {
 const FULL_SWING_UNAVAILABLE_COPY = "Analysis is temporarily unavailable. Please try again shortly.";
 /** A4 (C1): Auth could not be reached to verify the caller (not a sign-out); nothing was read or started. */
 const AUTH_UNAVAILABLE_COPY = "We couldn't confirm your sign-in just now, so nothing was analyzed. Please try again shortly.";
-const IN_PROGRESS_COPY = "This analysis is already in progress. Please check back shortly.";
-const NOT_STARTABLE_COPY = "This analysis can't be started right now. Please refresh and try again.";
-
-const STALLED_COPY =
-  "This analysis was interrupted after it started and can't be finished. Please record the swing again for a new analysis.";
+// IN_PROGRESS_COPY, NOT_STARTABLE_COPY and STALLED_COPY: lib/analysis-attempt-precedence.ts (shared with the pages).
 
 /**
  * ENT-1D. HTTP statuses at which the provider necessarily refused the request
@@ -1313,15 +1309,7 @@ const FAMILY_FILTER: Record<ExecutionFamily, string> = {
   putting: "analysis_family.eq.putting",
 };
 
-/** A client-supplied angle estimate in degrees (unverified), or null when it is not one. */
-function clientAngle(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= -360 && value <= 360 ? value : null;
-}
-
-/** A client-supplied tempo estimate (unverified) in the "N.N:1" form, or null. */
-function clientTempoRatio(value: unknown): string | null {
-  return typeof value === "string" && /^\d{1,2}(\.\d{1,2})?:1$/.test(value) ? value : null;
-}
+// clientAngle / clientTempoRatio: lib/analysis-metrics-validation.ts (moved unchanged; shared with the worker).
 
 /**
  * A stored, completed row as this caller may see it: the owned columns plus
@@ -1332,6 +1320,8 @@ async function completedResponse(
   row: Record<string, unknown>,
   authenticatedUserId: string,
   access: AnalysisAccess,
+  attempt: GolferAttempt | null = null,
+  current: GolferAttempt | null = null,
 ): Promise<NextResponse> {
   // The owner is the verified caller, never a value taken from the row; a row
   // that does not belong to them is refused before any elevated read.
@@ -1344,7 +1334,9 @@ async function completedResponse(
     return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
   }
   const updated = serializeAnalysisResult({ ...row, ...payloads.get(id) }, access);
-  return NextResponse.json({ message: "Analysis complete", data: updated });
+  // P2: a replayed or duplicate request of an attempt that finished is told which attempt it was (additive). A1: its
+  // own attempt, and the completed attempt as `current` when that is another one.
+  return NextResponse.json({ message: "Analysis complete", data: updated, ...(attempt ? { attempt } : {}), ...(current ? { current } : {}) });
 }
 
 function inProgressResponse(): NextResponse {
@@ -1418,6 +1410,8 @@ async function answerUnclaimed(
   authenticatedUserId: string,
   family: ExecutionFamily,
   access: AnalysisAccess,
+  attempt: GolferAttempt | null = null,
+  currentAttempt: GolferAttempt | null = null,
 ): Promise<NextResponse> {
   const state = await readExecutionState({ analysisId, userId: authenticatedUserId, family });
   switch (state) {
@@ -1448,7 +1442,7 @@ async function answerUnclaimed(
     if (error || current?.status !== "complete") {
       return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
     }
-    return await completedResponse(current, authenticatedUserId, access);
+    return await completedResponse(current, authenticatedUserId, access, attempt, currentAttempt);
   } catch {
     return NextResponse.json({ error: FULL_SWING_UNAVAILABLE_COPY }, { status: 503 });
   }

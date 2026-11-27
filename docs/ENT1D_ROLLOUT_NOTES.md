@@ -572,6 +572,13 @@ select id, processing_claim_id from public.swing_analysis
  where status = 'failed' and processing_claim_id is not null and provider_dispatched_at is null;
 ```
 
+**Analyses with a durable job (AG-WEB-READY-10-P2).** If the row has any job in
+`public.analysis_jobs`, do not release it with the statement below: the job would stay
+`outcome_unknown` and keep its dispatch slot and spend held. Reconcile it instead, inside the same
+operator transaction, with `select public.reconcile_analysis_job('<job id>', 'charged' | 'released');`
+(docs/ANALYSIS_JOBS_ROLLOUT.md, Reconcile). Never use `session_replication_role = replica` in these
+sessions.
+
 **Release exactly what was inspected.**
 
 - Run as the database owner, never as an API role. The guard ignores its

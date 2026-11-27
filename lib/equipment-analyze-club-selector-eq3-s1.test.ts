@@ -377,8 +377,8 @@ describe("EQ3-S1 Analyze — submission order and the club revalidation step", (
     preprocessing: "await getTrimmedBlob()",
     session: "await supabase.auth.getSession()",
     revalidation: "querySavedClubs(supabase, { userId })",
-    storage: ".from(BUCKET).upload(",
-    videos: '.from("swing_videos")',
+    storage: "await transferSelection(", // A1: the V1 signed transfer
+    videos: 'fetch("/api/v1/uploads/finalize"', // P2: finalize writes the swing_videos row
     analysis: 'fetch("/api/v1/analyses"',
     api: 'fetch("/api/analyze-swing"',
   } as const;
@@ -736,11 +736,11 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
   });
 
   it("refuses before Storage", () => {
-    expect(at(guard)).toBeLessThan(at("supabase.storage"));
+    expect(at(guard)).toBeLessThan(at("await transferSelection(")); // A1: the V1 signed transfer
   });
 
   it("refuses before both database inserts", () => {
-    expect(at(guard)).toBeLessThan(at(String.raw`.from("swing_videos")`));
+    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/v1/uploads/finalize"`)); // P2: the swing_videos row
     expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/v1/analyses"`));
   });
 
@@ -972,8 +972,8 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
       "isPuttingCapturePresentation(savedClubs, selectedClubId)",
     );
     const preprocessing = submissionSource.indexOf("await getTrimmedBlob()");
-    const storage = submissionSource.indexOf("supabase.storage");
-    const videos = submissionSource.indexOf('.from("swing_videos")');
+    const storage = submissionSource.indexOf("await transferSelection("); // A1: the V1 signed transfer
+    const videos = submissionSource.indexOf('fetch("/api/v1/uploads/finalize"'); // P2: the swing_videos row
     const analysis = submissionSource.indexOf('fetch("/api/v1/analyses"');
     const api = submissionSource.indexOf('fetch("/api/analyze-swing"');
 

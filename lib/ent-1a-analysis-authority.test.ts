@@ -34,6 +34,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 // HTML is detectable. No network, no database, no credential.
 
 vi.mock("server-only", () => ({}));
+// AG-WEB-READY-10-P2: the durable admission boundary answers as the stored default (`sync_mode`: no job, so the
+// existing synchronous path runs, which is what this suite covers). Admission itself is tested against the real
+// database (supabase/tests/app-integration/analysis-jobs.*.integration.test.ts).
+vi.mock("@/lib/analysis-job-admission", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/analysis-job-admission")>();
+  return { ...actual, admitAnalysisJob: async () => ({ outcome: "decided", disposition: "sync_mode", attempt: null }) };
+});
 
 type Row = Record<string, unknown>;
 
@@ -440,8 +447,42 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: unknown }> {
   }
 }
 
+/**
+ * A1: what read_analysis_job_state answers for a job-free analysis in the default control state (sync), mirroring
+ * analysis_jobs_view: complete; pending -> idle; failed; processing -> a live claim (heartbeat within the lease) is
+ * processing, an expired claim that never dispatched is startable (idle), anything else (lease-less, dispatched and
+ * expired, outcome unknown) is interrupted.
+ */
+function jobFreeExecution(row: Row): string {
+  if (row.status === "complete") return "complete";
+  if (row.status === "pending") return "idle";
+  if (row.status === "failed") return "failed";
+  if (row.status !== "processing" || !row.processing_claim_id) return "interrupted";
+  const heartbeat = Date.parse(String(row.processing_heartbeat_at ?? ""));
+  if (Number.isFinite(heartbeat) && heartbeat > Date.now() - ANALYSIS_LEASE_SECONDS * 1000) return "processing";
+  return row.provider_dispatched_at == null ? "idle" : "interrupted";
+}
+
+/** A1: a test's own answer for the status reads (both), or null for the database's job-free answer. */
+let jobReadOverride: null | ((id: string) => { data: unknown; error: unknown }) = null;
+
 function makeSessionClient() {
   return {
+    // A1: the durable status reads on the golfer's own session (owner-bound, as the database binds them)
+    rpc: async (fn: string, args: { p_analysis?: string; p_ids?: string[] }) => {
+      const one = (id: string) => {
+        if (jobReadOverride) return jobReadOverride(id);
+        const row = state.analyses.find((r) => r.id === id && r.user_id === state.sessionUserId);
+        return { data: row ? { analysisId: row.id, execution: jobFreeExecution(row), attempt: null } : null, error: null };
+      };
+      if (fn === "read_analysis_job_state") return one(String(args.p_analysis));
+      if (fn === "read_analysis_job_states") {
+        const answers = (args.p_ids ?? []).map(one);
+        const failed = answers.find((a) => a.error);
+        return failed ? { data: null, error: failed.error } : { data: answers.map((a) => a.data).filter(Boolean), error: null };
+      }
+      return { data: null, error: { message: "unexpected rpc" } };
+    },
     auth: {
       getUser: async () =>
         state.sessionUserId
@@ -2519,7 +2560,7 @@ describe("V2. stalled analyses are presented as stalled, not as in progress", ()
     expect(html).not.toContain("AI analysis in progress");
     state.analyses = [pendingRow()];
     html = renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
-    expect(html).toContain("Analysis queued");
+    expect(html).toContain("Not analyzed yet"); // P2: a pending swing that was never admitted (no longer "Analysis queued")
     expect(html).not.toContain("interrupted");
     expect(html).not.toContain("AI analysis in progress");
   });
@@ -4347,6 +4388,66 @@ describe("AG. D-PILLAR: empty corrections where allowed, precise pillar codes, r
         "One supportable adjustment for what you observed. Required when the rating is needs_work or poor. May be empty when the rating is good, excellent or insufficient_evidence; never invent an adjustment to fill it.",
       );
       expect(pillar.properties.correction.description, key).not.toContain("Empty when the rating is insufficient_evidence.");
+    }
+  });
+});
+
+describe("A1: /swings/<id> and Telemetry with an unreadable status, and an attempt whose outcome is not confirmed", () => {
+  const attemptOf = (state: string) => ({ id: "0a000000-0000-4000-8000-0000000000a1", generation: 1, state, acceptedAt: "2026-11-27T04:00:00.000Z" });
+  const render = async () => renderToStaticMarkup((await SwingDetailPage({ params: { id: ANALYSIS_ID } })) as React.ReactElement);
+
+  it("/swings/<id>: a refused status read says so with a read-only Check status (a reload), never Not analyzed yet; a completed swing keeps its results", async () => {
+    jobReadOverride = () => ({ data: null, error: { message: "permission denied", code: "42501" } });
+    try {
+      for (const row of [pendingRow(), pendingRow({ status: "failed" }), liveClaimRow({ dispatched: true })]) {
+        state.analyses = [row];
+        const html = await render();
+        expect(html, String(row.status)).toContain("We couldn&#x27;t read this analysis&#x27;s status just now.");
+        expect(html, String(row.status)).toContain(`href="/swings/${ANALYSIS_ID}"`);
+        expect(html, String(row.status)).toContain("Check status");
+        expect(html, String(row.status)).not.toMatch(/Not analyzed yet|AI analysis in progress|Record again|retry it from its report/);
+        expect(html).not.toContain("permission denied");
+      }
+      state.analyses = [completeRow()];
+      const done = await render();
+      expect(done).toContain("Quiet head through impact");
+      expect(done).not.toContain("couldn&#x27;t read this analysis");
+    } finally {
+      jobReadOverride = null;
+    }
+  });
+
+  it("/swings/<id>: an interrupted attempt is not confirmed yet (a status read, no record-again); a stall described by a finished attempt keeps the record-again guidance", async () => {
+    state.analyses = [liveClaimRow({ dispatched: true, ageSeconds: STALE })];
+    try {
+      jobReadOverride = (id) => ({ data: { analysisId: id, execution: "interrupted", attempt: attemptOf("interrupted") }, error: null });
+      let html = await render();
+      expect(html).toContain("its outcome isn&#x27;t confirmed yet");
+      expect(html).toContain("Check status");
+      expect(html).not.toContain("Record again");
+      jobReadOverride = (id) => ({ data: { analysisId: id, execution: "interrupted", attempt: { ...attemptOf("failed"), failureKind: "not_finished", finishedAt: "2026-11-27T04:05:00.000Z" } }, error: null });
+      html = await render();
+      expect(html).toContain("This analysis was interrupted and won&#x27;t finish.");
+      expect(html).toContain("Record again");
+      expect(html).not.toContain("isn&#x27;t confirmed yet");
+    } finally {
+      jobReadOverride = null;
+    }
+  });
+
+  it("/telemetry: a pending swing reads Not analyzed yet from a confirmed idle state, and Status unavailable when the read is refused", async () => {
+    state.analyses = [pendingRow()];
+    let html = renderToStaticMarkup(await TelemetryPage());
+    expect(html).toContain("Not analyzed yet");
+    expect(html).not.toContain("Status unavailable");
+    jobReadOverride = () => ({ data: null, error: { message: "permission denied", code: "42501" } });
+    try {
+      html = renderToStaticMarkup(await TelemetryPage());
+      expect(html).toContain("Status unavailable");
+      expect(html).not.toContain("Not analyzed yet");
+      expect(html).not.toContain("permission denied");
+    } finally {
+      jobReadOverride = null;
     }
   });
 });

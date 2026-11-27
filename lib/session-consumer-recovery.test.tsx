@@ -306,12 +306,21 @@ interface Sent {
   readonly credentials: string | null;
   /** A4: whether the request was given a cancel signal (a sent analysis call is never cancelled by the page) */
   readonly cancellable: boolean;
+  /** A1: the signed transfer's own headers (TUS) and the size of a binary body */
+  readonly signature: string | null;
+  readonly uploadOffset: string | null;
+  readonly uploadLength: string | null;
+  readonly uploadMetadata: string | null;
+  readonly bodySize: number | null;
+  /** review: the request's redirect mode (null: the platform default, "follow") */
+  readonly redirect: string | null;
 }
 let sent: Sent[] = [];
 let answer: (request: Sent, signal: AbortSignal | undefined) => Promise<Response>;
 
 function installFetch() {
   sent = [];
+  transfers = new Map();
   answer = async () => new Response(null, { status: 201 });
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -323,6 +332,12 @@ function installFetch() {
       body: typeof init?.body === "string" ? init.body : null,
       credentials: init?.credentials ?? null,
       cancellable: init?.signal !== undefined && init?.signal !== null,
+      signature: headers.get("x-signature"),
+      uploadOffset: headers.get("upload-offset"),
+      uploadLength: headers.get("upload-length"),
+      uploadMetadata: headers.get("upload-metadata"),
+      bodySize: init?.body instanceof Blob ? init.body.size : null,
+      redirect: init?.redirect ?? null,
     };
     sent.push(request);
     return answer(request, init?.signal ?? undefined);
@@ -491,8 +506,23 @@ async function renderedFor(golfer: Golfer | null, s?: Session) {
 
 // What the page's requests are, as they would leave the browser
 const clubReads = () => sent.filter((r) => r.url.startsWith(`${SUPABASE_ORIGIN}/rest/v1/user_equipment`) && r.method === "GET");
-const uploadsSent = () => sent.filter((r) => r.url.startsWith(`${SUPABASE_ORIGIN}/storage/v1/object/`));
-const videoInserts = () => sent.filter((r) => r.url.startsWith(`${SUPABASE_ORIGIN}/rest/v1/swing_videos`));
+// A1: the clip goes through V1 authorize and its signed resumable transfer; one upload is one TUS creation, and its
+// object key travels in the creation's Upload-Metadata (objectName)
+const TUS_ENDPOINT = `${SUPABASE_ORIGIN}/storage/v1/upload/resumable/sign`;
+const SIGNATURE = "synthetic-path-scoped-signature";
+const authorizations = () => sent.filter((r) => r.url === "/api/v1/uploads/authorize");
+const uploadsSent = () => sent.filter((r) => r.url === TUS_ENDPOINT && r.method === "POST");
+const metadataOf = (r: Sent): Record<string, string> =>
+  Object.fromEntries((r.uploadMetadata ?? "").split(",").filter(Boolean).map((pair) => {
+    const [k, v] = pair.split(" ");
+    return [k, Buffer.from(v, "base64").toString("utf8")];
+  }));
+const objectKeyOf = (r: Sent) => metadataOf(r).objectName ?? "";
+const ownerOfBearer = (authorization: string | null) =>
+  (JSON.parse(Buffer.from(String(authorization).replace(/^Bearer /, "").split(".")[1] ?? "", "base64url").toString("utf8") || "{}") as { sub?: string }).sub;
+// P2: the swing_videos row is written by V1 finalize (the page holds no swing_videos write of its own any more)
+const videoInserts = () => sent.filter((r) => r.url === "/api/v1/uploads/finalize");
+
 const doorway = () => sent.filter((r) => r.url === "/api/v1/analyses");
 const analysisCalls = () => sent.filter((r) => r.url === "/api/analyze-swing");
 const HEALTHY_ANALYSIS = { data: { analysis_family: "full_swing", score: 82, feedback: "Synthetic feedback", metrics: {} } };
@@ -505,19 +535,54 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
  */
 /** The clubs the stand-in answers with (one fixed list per test, so a re-check finds the club chosen from it). */
 let bagRows = [clubRow("S7")];
-function healthyNetwork(clubs = bagRows, onAnswered: (kind: "clubs" | "upload" | "insert" | "doorway" | "analysis") => void = () => undefined) {
+type Answered = "clubs" | "authorize" | "create" | "upload" | "insert" | "doorway" | "analysis";
+/** A1: the stand-in's signed transfers, by upload URL: bytes stored and the declared length. */
+let transfers = new Map<string, { offset: number; length: number }>();
+/**
+ * A1: the stand-in for V1 authorize (the caller's own key, signed for that path) and the signed resumable endpoint
+ * (creation, chunk, offset read), exactly as the local stack serves them; null for any other request.
+ */
+function signedStorage(r: Sent, onAnswered: (kind: Answered) => void): Response | null {
+  if (r.url === "/api/v1/uploads/authorize") {
+    onAnswered("authorize");
+    const { uploadId, mimeType } = JSON.parse(r.body ?? "{}") as { uploadId: string; mimeType: string };
+    return json({ data: {
+      uploadId, bucket: "swing-videos", objectPath: `${ownerOfBearer(r.authorization)}/${uploadId}/source.mp4`, endpoint: TUS_ENDPOINT,
+      signature: SIGNATURE, expiresInSeconds: 7200, chunkSize: 6291456, contentType: mimeType, upsert: false,
+    } });
+  }
+  if (r.url === TUS_ENDPOINT && r.method === "POST") {
+    onAnswered("create");
+    const url = `${TUS_ENDPOINT}/upload-${transfers.size + 1}`;
+    transfers.set(url, { offset: 0, length: Number(r.uploadLength) });
+    return new Response(null, { status: 201, headers: { Location: url, "Tus-Resumable": "1.0.0" } });
+  }
+  if (r.url.startsWith(`${TUS_ENDPOINT}/`)) {
+    const t = transfers.get(r.url);
+    if (!t || r.signature !== SIGNATURE) return new Response(null, { status: 404 });
+    if (r.method === "HEAD") return new Response(null, { status: 200, headers: { "Upload-Offset": String(t.offset), "Upload-Length": String(t.length) } });
+    if (r.method === "PATCH") {
+      if (Number(r.uploadOffset) !== t.offset) return new Response(null, { status: 409 });
+      t.offset += r.bodySize ?? 0;
+      onAnswered("upload");
+      return new Response(null, { status: 204, headers: { "Upload-Offset": String(t.offset) } });
+    }
+  }
+  return null;
+}
+function healthyNetwork(clubs = bagRows, onAnswered: (kind: Answered) => void = () => undefined) {
   answer = async (r) => {
     if (r.url.startsWith(`${SUPABASE_ORIGIN}/rest/v1/user_equipment`)) {
       onAnswered("clubs");
       return json(clubs);
     }
-    if (r.url.startsWith(`${SUPABASE_ORIGIN}/storage/v1/object/`)) {
-      onAnswered("upload");
-      return json({ Key: "swing-videos/synthetic", Id: "object-1" });
-    }
-    if (r.url.startsWith(`${SUPABASE_ORIGIN}/rest/v1/swing_videos`)) {
+    const signed = signedStorage(r, onAnswered);
+    if (signed) return signed;
+    // P2: V1 finalize writes the one swing_videos row for the upload id
+    if (r.url === "/api/v1/uploads/finalize") {
       onAnswered("insert");
-      return json({ id: "video-1" }, 201);
+      const { uploadId } = JSON.parse(r.body ?? "{}") as { uploadId: string };
+      return json({ data: { swingVideoId: uploadId, uploadId, status: "uploaded" } });
     }
     if (r.url === "/api/v1/analyses") {
       onAnswered("doorway");
@@ -927,8 +992,9 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
     });
     await startRun(page);
     expect(uploadsSent()).toHaveLength(1);
-    expect(uploadsSent()[0].url).toContain(`/swing-videos/${A.id}/`);
-    expect(uploadsSent()[0].authorization).toBe(`Bearer ${session.access_token}`);
+    expect(objectKeyOf(uploadsSent()[0])).toMatch(new RegExp(`^${A.id}/`)); // A1: A's own key, signed for A
+    expect(authorizations()[0].authorization).toBe(`Bearer ${session.access_token}`);
+    expect(uploadsSent()[0].authorization).toBeNull(); // the transfer carries only the path-scoped signature
     expect(banner(page)).toContain(ANALYZE.changed);
     expect(videoInserts()).toHaveLength(0);
     expect(doorway()).toHaveLength(0);
@@ -979,15 +1045,27 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
     await withVideo(page);
     sent = [];
     await startRun(page);
-    expect(sent.map((r) => r.url.split("?")[0].replace(/\/swing-videos\/.*/, "/swing-videos/…"))).toEqual([
+    expect(sent.map((r) => r.url.split("?")[0])).toEqual([
       `${SUPABASE_ORIGIN}/rest/v1/user_equipment`, // the club re-check
-      `${SUPABASE_ORIGIN}/storage/v1/object/swing-videos/…`,
-      `${SUPABASE_ORIGIN}/rest/v1/swing_videos`,
+      "/api/v1/uploads/authorize", // A1: V1 authorize signs this selection's V1 key
+      TUS_ENDPOINT, // A1: the signed transfer's creation …
+      `${TUS_ENDPOINT}/upload-1`, // … and its chunk
+      "/api/v1/uploads/finalize", // P2: V1 finalize writes the swing_videos row
       "/api/v1/analyses",
       "/api/analyze-swing", // A4 (C1): an ordinary request now, on the wire record
     ]);
-    expect(sent.every((r) => r.authorization === `Bearer ${session.access_token}`)).toBe(true);
-    expect(JSON.parse(doorway()[0].body!)).toEqual({ swingVideoId: "video-1", clubId: expect.any(String) });
+    // A1: every request that carries a credential carries A's; the transfer carries only the path-scoped signature
+    expect(sent.filter((r) => !r.url.startsWith(TUS_ENDPOINT)).every((r) => r.authorization === `Bearer ${session.access_token}`)).toBe(true);
+    expect(sent.filter((r) => r.url.startsWith(TUS_ENDPOINT)).every((r) => r.authorization === null && r.signature === SIGNATURE)).toBe(true);
+    // review: no redirect is ever followed with the signature
+    expect(sent.filter((r) => r.url.startsWith(TUS_ENDPOINT)).map((r) => r.redirect)).toEqual(["error", "error"]);
+    // P2: one upload id from the Storage key to the analysis request; the selection's clip metadata goes with finalize
+    const uploadId = (JSON.parse(videoInserts()[0].body!) as { uploadId: string }).uploadId;
+    expect(objectKeyOf(uploadsSent()[0])).toBe(`${A.id}/${uploadId}/source.mp4`);
+    expect(JSON.parse(authorizations()[0].body!)).toEqual({ uploadId, mimeType: "video/mp4", fileSize: 4096 });
+    expect(JSON.parse(videoInserts()[0].body!)).toEqual({ uploadId, mimeType: "video/mp4", originalFilename: "swing.mp4" });
+    expect(videoInserts()[0].credentials).toBe("omit");
+    expect(JSON.parse(doorway()[0].body!)).toEqual({ swingVideoId: uploadId, clubId: expect.any(String) });
     expect(doorway()[0].credentials).toBe("omit"); // A3 review: the Bearer alone; no cookie (possibly another sign-in's) goes with it
     // A4 (C1): the analysis call likewise — A's confirmed Bearer, `credentials: "omit"`, no cancel signal once sent
     expect(analysisCalls().map(({ method, body, credentials, cancellable }) => ({ method, body, credentials, cancellable }))).toEqual([
@@ -1038,11 +1116,16 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
   // before the page has been told (no event). Nothing may leave with B's credential; the step is not sent at all.
   for (const [step, flipAt, sentBefore, copy] of [
     ["the club re-check", "submission-read", [] as string[], ANALYZE.changed],
-    ["the Storage upload", "clubs", ["user_equipment"], ANALYZE.changed],
-    ["the swing_videos insert", "upload", ["user_equipment", "storage"], ANALYZE.changed],
-    ["the analysis-request doorway", "insert", ["user_equipment", "storage", "swing_videos"], ANALYZE.changed],
+    // A1: the upload starts with V1 authorize, which confirms the owner itself
+    ["the upload authorization", "clubs", ["user_equipment"], ANALYZE.changed],
+    // A1: the signed transfer carries no account credential (only A's path-scoped signature, for A's own key); the next
+    // credentialed request, finalize, is the one that is not sent
+    ["finalize after the signed transfer (B published once A's upload was authorized)", "authorize", ["user_equipment", "/api/v1/uploads/authorize", "storage", "storage"], ANALYZE.changed],
+    // P2: V1 finalize writes the swing_videos row
+    ["finalize (the swing_videos row)", "upload", ["user_equipment", "/api/v1/uploads/authorize", "storage", "storage"], ANALYZE.changed],
+    ["the analysis-request doorway", "insert", ["user_equipment", "/api/v1/uploads/authorize", "storage", "storage", "/api/v1/uploads/finalize"], ANALYZE.changed],
     // A4 (C1): the analysis call confirms the owner itself (it no longer goes to a cookie sender)
-    ["the analysis call", "doorway", ["user_equipment", "storage", "swing_videos", "/api/v1/analyses"], ANALYZE.changed],
+    ["the analysis call", "doorway", ["user_equipment", "/api/v1/uploads/authorize", "storage", "storage", "/api/v1/uploads/finalize", "/api/v1/analyses"], ANALYZE.changed],
   ] as const) {
     it(`A3 forced: B published just before ${step} (no event yet) — that request is not sent, nothing carries B's token, fixed copy`, async () => {
       const { page, session: a } = await analyzeWithClubsFor(A);
@@ -1060,8 +1143,10 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
       });
       await startRun(page);
       expect(carrying(b)).toHaveLength(0);
-      expect(sent.every((r) => r.authorization === `Bearer ${a.access_token}`)).toBe(true);
-      const kinds = sent.map((r) => (r.url.includes("user_equipment") ? "user_equipment" : r.url.includes("/storage/") ? "storage" : r.url.includes("swing_videos") ? "swing_videos" : r.url));
+      // A1: every credentialed request is A's; the signed transfer carries no account credential at all
+      expect(sent.filter((r) => !r.url.includes("/storage/")).every((r) => r.authorization === `Bearer ${a.access_token}`)).toBe(true);
+      expect(sent.filter((r) => r.url.includes("/storage/")).every((r) => r.authorization === null)).toBe(true);
+      const kinds = sent.map((r) => (r.url.includes("user_equipment") ? "user_equipment" : r.url.includes("/storage/") ? "storage" : r.url));
       expect(kinds).toEqual(sentBefore);
       expect(analysisCalls()).toHaveLength(0);
       expect(rt.pushes).toEqual([]);
@@ -1079,7 +1164,7 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
   // own confirmation (the forced schedule above, "the analysis call").
   it("A4 (C1): the run's checks before any side effect are the session read, the rendered owner and its End Session — nothing reads or depends on the cookie's binding", async () => {
     const page = source("app/(dashboard)/analyze/page.tsx");
-    const run = page.slice(page.indexOf("const startAnalysis = async () => {"), page.indexOf("// 1. Upload video to Supabase Storage"));
+    const run = page.slice(page.indexOf("const startAnalysis = async () => {"), page.indexOf("// 1. Upload the clip"));
     expect(run).not.toMatch(/Preflight|binding|document\.cookie/i);
     expect(run).toContain("if (userId !== ownerRef.current) {");
     expect(run).toContain("if (await sessionEndPending(session)) throw new Error(SESSION_EXPIRED_MESSAGE);");
@@ -1181,17 +1266,306 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
     expect(banner(page)).not.toMatch(RAW);
   });
 
+  // ── AG-WEB-READY-10-P2 (C5): one stable upload identity per deliberate selection ─────────────────────────────
+  const finalizeIds = () => videoInserts().map((r) => (JSON.parse(r.body!) as { uploadId: string }).uploadId);
+
+  it("P2: the same selection pressed again after a lost answer re-sends the same upload id: finalize first, no second upload, the same analysis request", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    sent = [];
+    rt.analysisAnswer = async () => { throw new TypeError("Failed to fetch"); }; // the analysis call's answer is lost
+    await startRun(page);
+    expect(analysisCalls()).toHaveLength(1);
+    const first = finalizeIds()[0];
+    expect(objectKeyOf(uploadsSent()[0])).toBe(`${A.id}/${first}/source.mp4`);
+    rt.analysisAnswer = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map((r) => r.url.replace(/\?.*/, ""))).toEqual(["/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing"]);
+    expect(finalizeIds()).toEqual([first]);
+    expect(uploadsSent()).toHaveLength(0);
+    expect(JSON.parse(doorway()[0].body!)).toMatchObject({ swingVideoId: first });
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P2: a repeat whose object was never stored uploads it once after finalize says so", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    sent = [];
+    rt.analysisAnswer = async () => { throw new TypeError("Failed to fetch"); };
+    await startRun(page);
+    const first = finalizeIds()[0];
+    rt.analysisAnswer = null;
+    let finalizes = 0;
+    const healthy = answer;
+    answer = async (r, signal) => {
+      if (r.url === "/api/v1/uploads/finalize" && finalizes++ === 0) {
+        return json({ error: { code: "UPLOAD_NOT_FOUND_OR_NOT_READY", message: "The upload could not be found or is not ready." } }, 409);
+      }
+      return healthy(r, signal);
+    };
+    transfers.clear(); // A1: the earlier transfer is gone too (nothing of it can be resumed)
+    sent = [];
+    await startRun(page);
+    expect(sent.map((r) => (r.url.includes("/storage/") ? `storage ${r.method}` : r.url.replace(/\?.*/, "")))).toEqual(
+      ["/api/v1/uploads/finalize", "storage HEAD", "/api/v1/uploads/authorize", "storage POST", "storage PATCH", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing"]);
+    expect(finalizeIds()).toEqual([first, first]);
+    expect(objectKeyOf(uploadsSent()[0])).toBe(`${A.id}/${first}/source.mp4`); // the same key, signed again
+  });
+
+  it("P2: another file, or another club, is a new deliberate selection with a new upload id", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    sent = [];
+    rt.analysisAnswer = async () => { throw new TypeError("Failed to fetch"); };
+    await startRun(page);
+    const first = finalizeIds()[0];
+    chooseFirstClub(page); // the same file, now with a club
+    rt.analysisAnswer = null;
+    sent = [];
+    await startRun(page);
+    const second = finalizeIds()[0];
+    expect(second).not.toBe(first);
+    expect(uploadsSent()).toHaveLength(1);
+    expect(page.text()).toContain("Analysis Complete");
+    press(page.button("NEW VIDEO")); // the page's own control for another file
+    page.render();
+    await withVideo(page); // another file
+    sent = [];
+    await startRun(page);
+    const third = finalizeIds()[0];
+    expect(new Set([first, second, third]).size).toBe(3);
+    expect(objectKeyOf(uploadsSent()[0])).toBe(`${A.id}/${third}/source.mp4`);
+    // the identity is the page's account's: another account's session never reuses it (the run stops first)
+    expect(source("app/(dashboard)/analyze/page.tsx")).toContain("intent.ownerId !== null && intent.ownerId === selection.ownerId");
+  });
+
   it("a Storage refusal keeps its fixed upload copy (unchanged behaviour)", async () => {
     const { page } = await analyzeWithClubsFor(A);
     await withVideo(page);
+    // A1: the refusal now comes from the signed transfer's creation (authorize itself answered)
     answer = async (r) =>
-      r.url.includes("/storage/v1/object/")
+      r.url === TUS_ENDPOINT && r.method === "POST"
         ? json({ statusCode: "403", error: "Unauthorized", message: "new row violates row-level security policy synthetic-internal" }, 403)
-        : new Response(null, { status: 404 });
+        : signedStorage(r, () => undefined) ?? new Response(null, { status: 404 });
     await startRun(page);
     expect(banner(page)).toContain(ANALYZE.uploadFailed);
     expect(banner(page)).not.toMatch(RAW);
   });
+
+  // ── AG-WEB-READY-10-P2-A1: the V1 authorize answer and its scoped signed transport ─────────────────────────────
+  const tus = () => sent.filter((r) => r.url === TUS_ENDPOINT || r.url.startsWith(`${TUS_ENDPOINT}/`));
+
+  it("A1: the first transfer uses exactly the V1 authorize answer: its endpoint and path-scoped signature over the resumable protocol, then V1 finalize; no Bearer or cookie goes to Storage", async () => {
+    const { page, session } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    sent = [];
+    await startRun(page);
+    const auth = authorizations();
+    expect(auth).toHaveLength(1);
+    const uploadId = finalizeIds()[0];
+    expect(JSON.parse(auth[0].body!)).toEqual({ uploadId, mimeType: "video/mp4", fileSize: 4096 });
+    expect([auth[0].method, auth[0].authorization, auth[0].credentials]).toEqual(["POST", `Bearer ${session.access_token}`, "omit"]);
+    const [create, patch, ...rest] = tus();
+    expect(rest).toEqual([]);
+    expect([create.method, create.url, create.signature, create.uploadLength, create.authorization, create.credentials])
+      .toEqual(["POST", TUS_ENDPOINT, SIGNATURE, "4096", null, "omit"]);
+    expect(metadataOf(create)).toEqual({ bucketName: "swing-videos", objectName: `${A.id}/${uploadId}/source.mp4`, contentType: "video/mp4", cacheControl: "3600" });
+    expect([patch.method, patch.url, patch.signature, patch.uploadOffset, patch.bodySize, patch.authorization, patch.credentials])
+      .toEqual(["PATCH", `${TUS_ENDPOINT}/upload-1`, SIGNATURE, "0", 4096, null, "omit"]);
+    // the order: authorize, the signed transfer, then finalize, the doorway and the analysis call
+    const order = sent.map((r) => r.url);
+    expect(order.indexOf("/api/v1/uploads/authorize")).toBeLessThan(order.indexOf(TUS_ENDPOINT));
+    expect(order.indexOf(`${TUS_ENDPOINT}/upload-1`)).toBeLessThan(order.indexOf("/api/v1/uploads/finalize"));
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  for (const [label, change] of [
+    ["another upload id", (d: Record<string, unknown>) => ({ ...d, uploadId: randomUUID() })],
+    ["another golfer's key", (d: Record<string, unknown>) => ({ ...d, objectPath: `${B.id}/${d.uploadId}/source.mp4` })],
+    ["another content type", (d: Record<string, unknown>) => ({ ...d, contentType: "video/webm" })],
+    ["an upsert", (d: Record<string, unknown>) => ({ ...d, upsert: true })],
+    ["another chunk size", (d: Record<string, unknown>) => ({ ...d, chunkSize: 1024 })],
+    ["no signature", (d: Record<string, unknown>) => ({ ...d, signature: "" })],
+    ["a plain-http remote endpoint", (d: Record<string, unknown>) => ({ ...d, endpoint: "http://storage.invalid/storage/v1/upload/resumable/sign" })],
+    // review: only the endpoint this deployment's project URL implies
+    ["a hosted endpoint this deployment does not use", (d: Record<string, unknown>) => ({ ...d, endpoint: "https://abcdefghijklmnop.storage.supabase.co/storage/v1/upload/resumable/sign" })],
+    ["another loopback port", (d: Record<string, unknown>) => ({ ...d, endpoint: "http://127.0.0.1:54321/storage/v1/upload/resumable/sign" })],
+  ] as const) {
+    it(`A1: an authorize answer with ${label} is refused: nothing is transferred, fixed upload copy`, async () => {
+      const { page } = await analyzeWithClubsFor(A);
+      await withVideo(page);
+      const healthy = answer;
+      answer = async (r, signal) => {
+        if (r.url === "/api/v1/uploads/authorize") {
+          const good = (await (await healthy(r, signal)).json()) as { data: Record<string, unknown> };
+          return json({ data: change(good.data) });
+        }
+        return healthy(r, signal);
+      };
+      sent = [];
+      await startRun(page);
+      expect(tus()).toEqual([]);
+      expect(videoInserts()).toHaveLength(0); // nothing was transferred, so nothing is finalized
+      expect(doorway()).toHaveLength(0);
+      expect(banner(page)).toContain(ANALYZE.uploadFailed);
+    });
+  }
+
+  it("A1: a creation Location on another origin is refused: the signature is never sent there", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    const healthy = answer;
+    answer = async (r, signal) => r.url === TUS_ENDPOINT && r.method === "POST"
+      ? new Response(null, { status: 201, headers: { Location: "http://elsewhere.invalid/storage/v1/upload/resumable/sign/x" } })
+      : healthy(r, signal);
+    sent = [];
+    await startRun(page);
+    expect(sent.filter((r) => r.url.includes("elsewhere.invalid"))).toEqual([]);
+    expect(tus().map((r) => r.method)).toEqual(["POST"]);
+    expect(doorway()).toHaveLength(0);
+    expect(banner(page)).toContain(ANALYZE.uploadFailed);
+  });
+
+  it("A1: the last chunk's acknowledgement is lost after it was stored: the page reads the stored offset and finalizes without re-sending a byte", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    const healthy = answer;
+    answer = async (r, signal) => {
+      if (r.method === "PATCH") {
+        await healthy(r, signal); // stored by the stand-in …
+        throw new TypeError("Failed to fetch"); // … and its answer lost
+      }
+      return healthy(r, signal);
+    };
+    sent = [];
+    await startRun(page);
+    expect(tus().map((r) => r.method)).toEqual(["POST", "PATCH", "HEAD"]);
+    expect(tus().map((r) => r.redirect)).toEqual(["error", "error", "error"]); // review 2: the offset read too
+    expect(authorizations()).toHaveLength(1);
+    expect(videoInserts()).toHaveLength(1);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("A1: a transfer interrupted part-way is resumed by the repeat press from the server's offset: one authorization, one creation, finalize first", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    const healthy = answer;
+    let refuse = true;
+    answer = async (r, signal) => {
+      if (refuse && (r.method === "PATCH" || r.method === "HEAD")) throw new TypeError("Failed to fetch"); // the connection drops
+      // finalize finds nothing stored while the transfer is incomplete (as V1 finalize does)
+      if (r.url === "/api/v1/uploads/finalize" && Array.from(transfers.values()).some((t) => t.offset < t.length)) {
+        return json({ error: { code: "UPLOAD_NOT_FOUND_OR_NOT_READY", message: "The upload could not be found or is not ready." } }, 409);
+      }
+      return healthy(r, signal);
+    };
+    sent = [];
+    await startRun(page);
+    expect(banner(page)).toContain(ANALYZE.uploadFailed);
+    expect(tus().filter((r) => r.method === "POST")).toHaveLength(1);
+    expect(videoInserts()).toHaveLength(0);
+    refuse = false;
+    const firstId = (JSON.parse(authorizations()[0].body!) as { uploadId: string }).uploadId;
+    sent = [];
+    await startRun(page);
+    // the repeat asks finalize first (nothing stored yet), then resumes the same transfer from the server's offset
+    expect(sent.map((r) => (r.url.startsWith(TUS_ENDPOINT) ? `tus ${r.method}` : r.url))).toEqual([
+      "/api/v1/uploads/finalize", "tus HEAD", "tus PATCH", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(finalizeIds()).toEqual([firstId, firstId]);
+    expect(authorizations()).toHaveLength(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("A1 (review): a 13 MiB clip goes in three 6 MiB-bounded chunks; a drop after the first chunk is resumed by the repeat press from the server's offset (mid-file), never from 0", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    const size = 13 * 1_048_576;
+    {
+      const input = findAll(page.nodes(), (n) => n.type === "input" && n.props.type === "file" && n.props.accept === "video/*")[0];
+      const video = new File([new Uint8Array(size)], "swing.mp4", { type: "video/mp4" });
+      (input.props.onChange as (e: unknown) => void)({ target: { files: [video], value: "" } });
+      page.render();
+      const element = findAll(page.nodes(), (n) => n.type === "video" && n.ref !== null)[0];
+      (element.ref as { current: unknown }).current = {
+        readyState: 0, duration: 0, videoWidth: 1280, videoHeight: 720, currentTime: 0,
+        addEventListener: () => undefined, removeEventListener: () => undefined, pause: () => undefined,
+      };
+      page.render();
+    }
+    const healthy = answer;
+    let patches = 0;
+    let drop = true;
+    answer = async (r, signal) => {
+      if (drop && r.method === "PATCH" && ++patches > 1) throw new TypeError("Failed to fetch"); // the second chunk is lost …
+      if (drop && r.method === "HEAD") throw new TypeError("Failed to fetch"); // … and so is the offset read
+      if (r.url === "/api/v1/uploads/finalize" && Array.from(transfers.values()).some((t) => t.offset < t.length)) {
+        return json({ error: { code: "UPLOAD_NOT_FOUND_OR_NOT_READY", message: "The upload could not be found or is not ready." } }, 409);
+      }
+      return healthy(r, signal);
+    };
+    sent = [];
+    await startRun(page);
+    expect(banner(page)).toContain(ANALYZE.uploadFailed);
+    expect(tus().filter((r) => r.method === "PATCH").map((r) => [r.uploadOffset, r.bodySize])).toEqual([["0", 6291456], ["6291456", 6291456]]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: 6291456, length: size }]);
+    drop = false;
+    sent = [];
+    await startRun(page);
+    expect(sent.map((r) => (r.url.startsWith(TUS_ENDPOINT) ? `tus ${r.method} ${r.uploadOffset ?? ""}`.trim() : r.url))).toEqual([
+      "/api/v1/uploads/finalize", "tus HEAD", "tus PATCH 6291456", "tus PATCH 12582912",
+      "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(tus().filter((r) => r.method === "PATCH").map((r) => r.bodySize)).toEqual([6291456, size - 12582912]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: size, length: size }]); // one transfer, every byte once
+    expect(authorizations()).toHaveLength(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("A1 (review): a 409 stalled that names an interrupted attempt hands over to its report; a synchronous stall stays on the banner", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    rt.analysisAnswer = async () => json({ status: "stalled", error: "This analysis started but stopped reporting, so its outcome isn't confirmed yet. Check status later to see whether a result was saved.",
+      attempt: { id: randomUUID(), generation: 1, state: "interrupted", acceptedAt: "2026-11-27T04:00:00.000Z" } }, 409);
+    sent = [];
+    await startRun(page);
+    expect(rt.pushes).toEqual(["/analyze/analysis-1"]);
+    expect(analysisCalls()).toHaveLength(1); // review 2: the handover only navigates; nothing is retried
+    expect(sent.filter((r) => r.url === "/api/analyze-swing" || r.url === "/api/v1/analyses")).toHaveLength(2);
+    rt.pushes = [];
+    // review 2: the DESCRIBED attempt decides — the request's own attempt finished, the current one is interrupted
+    const { page: p1 } = await analyzeWithClubsFor(A);
+    await withVideo(p1);
+    rt.analysisAnswer = async () => json({ status: "stalled", error: "This analysis started but stopped reporting, so its outcome isn't confirmed yet. Check status later to see whether a result was saved.",
+      attempt: { id: randomUUID(), generation: 1, state: "failed", acceptedAt: "2026-11-27T04:00:00.000Z", failureKind: "not_finished", finishedAt: "2026-11-27T04:01:00.000Z" },
+      current: { id: randomUUID(), generation: 2, state: "interrupted", acceptedAt: "2026-11-27T04:02:00.000Z" } }, 409);
+    await startRun(p1);
+    expect(rt.pushes).toEqual(["/analyze/analysis-1"]);
+    rt.pushes = [];
+    const { page: p2 } = await analyzeWithClubsFor(A);
+    await withVideo(p2);
+    rt.analysisAnswer = async () => json({ status: "stalled", error: "This analysis was interrupted after it started and can't be finished. Please record the swing again for a new analysis." }, 409);
+    await startRun(p2);
+    expect(rt.pushes).toEqual([]);
+    expect(banner(p2)).toContain("can't be finished");
+  });
+
+  it("A1: a key that is already stored is not signed again (503): finalize proves it and nothing is transferred", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    await withVideo(page);
+    const healthy = answer;
+    answer = async (r, signal) => r.url === "/api/v1/uploads/authorize"
+      ? json({ error: { code: "SERVER_TEMPORARILY_UNAVAILABLE", message: "Upload authorization is temporarily unavailable. Please retry." } }, 503)
+      : healthy(r, signal);
+    sent = [];
+    await startRun(page);
+    expect(tus()).toEqual([]);
+    expect(sent.map((r) => r.url)).toEqual([
+      "/api/v1/uploads/authorize", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
 });
 
 // ─── A3 (F2): the analysis call's error body is acted on only while the page and its sign-in are still current ─────
@@ -1509,9 +1883,11 @@ describe("source guards", () => {
     expect(page).toContain("sessionAnswer = await settleWithin(async () => await supabase.auth.getSession(), SESSION_READ_DEADLINE_MS);");
     for (const banned of ["document.cookie", "access_token", "Authorization", "accessToken"]) expect(page).not.toContain(banned);
     expect(page).not.toMatch(/Bearer \$\{/); // A3: the Bearer headers come from the confirmed session (ownerBearer)
-    // A4 (C1): two — the doorway and the analysis call — each sent with no cookie
-    expect(page.match(/\.\.\.ownerBearer\(/g)).toHaveLength(2);
-    expect(page.match(/credentials: "omit",/g)).toHaveLength(2);
+    // A4 (C1) + P2 + A1: four Bearer requests — V1 authorize, V1 finalize, the doorway and the analysis call — each sent
+    // with no cookie; and the signed transfer's three request kinds (creation, chunk, offset read), which carry no
+    // account credential at all, likewise with no cookie
+    expect(page.match(/\.\.\.ownerBearer\(/g)).toHaveLength(4);
+    expect(page.match(/credentials: "omit",/g)).toHaveLength(7);
   });
 
   it("A3: Analyze takes its account from the rendered layout once and never adopts the browser's first session", () => {

@@ -536,3 +536,254 @@ describe("09-P1: the saved swing report never sends an analysis request on its o
     }
   });
 });
+
+// ─── AG-WEB-READY-10-P2: the durable attempt on the saved report ─────────────────────────────────────────────────────
+
+describe("10-P2: the saved report shows the durable attempt by the shared precedence rule; reads only, unless the golfer presses", () => {
+  let headers: Record<string, string | null>[] = [];
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    installMicrotaskDigest();
+    browser = managed();
+    rt.client = browser.client;
+    session = sessionOf(A);
+    rt.rendered = { ownerId: A, lineage: await sessionLineageId(session.access_token) };
+    browser.state.session = session;
+    wire = [];
+    headers = [];
+    respond = async () => json({ error: "Analysis is temporarily unavailable. Please try again shortly." }, 503);
+    vi.stubGlobal("BroadcastChannel", undefined);
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const h = new Headers(init?.headers);
+      wire.push({ url, method: init?.method ?? null, authorization: h.get("authorization"), credentials: init?.credentials ?? null, body: typeof init?.body === "string" ? init.body : null });
+      headers.push({ admission: h.get("x-swingproai-admission") });
+      return respond();
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const attempt = (state: string, extra: Record<string, unknown> = {}) => ({
+    id: randomUUID(), generation: 1, state, acceptedAt: "2026-11-27T04:00:00.000Z", ...extra,
+  });
+  const job = (analysisId: string, execution: string, att: ReturnType<typeof attempt> | null) => ({ analysisId, execution, attempt: att });
+
+  it("queued, analyzing, interrupted and paused attempts open with zero requests and offer only a status read", async () => {
+    for (const [execution, analysisStatus, att, heading, pill] of [
+      ["queued", "pending", attempt("queued"), "Queued", "Queued"],
+      ["processing", "processing", attempt("processing", { dispatchedAt: "2026-11-27T04:00:05.000Z" }), "Analyzing", "Analyzing"],
+      // A1: an attempt whose dispatch is unresolved may still be settled: not confirmed yet, and only a status read
+      ["interrupted", "processing", attempt("interrupted"), "Result not confirmed yet", "Interrupted"],
+      ["paused", "pending", null, "Analysis paused", "Paused"],
+    ] as const) {
+      const a = base(analysisStatus);
+      const page = await open(a, { job: job(a.id, execution, att) });
+      await vi.advanceTimersByTimeAsync(120_000);
+      await settle(page);
+      expect(page.text(), execution).toContain(heading);
+      expect(page.pill(), execution).toBe(pill);
+      expect(page.buttons().some((b) => /Analyze swing|Retry/.test(b)), execution).toBe(false);
+      expect(page.text(), execution).not.toMatch(INVENTED_PROGRESS);
+      if (execution === "queued") expect(page.text()).toContain("You can close this tab");
+      if (execution === "interrupted") expect(page.link("Record a new swing")).toBeNull();
+      expect(await pressCheck(page), execution).toBe(1);
+      expect(wire, execution).toEqual([]);
+      page.unmount();
+    }
+  });
+
+  it("a failed attempt's Retry names that attempt, sends the admission declaration with the owner's Bearer, and one press sends one request", async () => {
+    const a = base("failed");
+    const failed = attempt("failed", { failureKind: "not_finished", finishedAt: "2026-11-27T04:01:00.000Z" });
+    const page = await open(a, { job: job(a.id, "failed", failed) });
+    expect(page.text()).toContain("This analysis didn't finish. You can retry it.");
+    expect(wire).toEqual([]);
+    const accepted = attempt("queued", { generation: 2 });
+    respond = async () => json({ status: "queued", analysisId: a.id, attempt: accepted, statusUrl: `/api/v1/analyses/${a.id}`, reportUrl: `/analyze/${a.id}`, replayed: false }, 202);
+    const retry = page.button("Retry analysis")!;
+    (retry.props.onClick as () => void)();
+    (retry.props.onClick as () => void)(); // a second press in the same moment sends nothing more
+    page.render();
+    await settle(page);
+    expect(analysisRequests()).toHaveLength(1);
+    expect(JSON.parse(analysisRequests()[0].body!)).toEqual({ analysisId: a.id, retryOfAttemptId: failed.id });
+    expect(analysisRequests()[0]).toMatchObject({ authorization: `Bearer ${session.access_token}`, credentials: "omit" });
+    expect(headers[0]).toEqual({ admission: "1" });
+    expect(page.text()).toContain("Queued"); // the accepted attempt, shown in place
+    expect(page.pill()).toBe("Queued");
+  });
+
+  it("Analyze swing on a never-analyzed swing: a 202 shows the queued attempt in place, with no reload and no second request", async () => {
+    const a = base("pending");
+    const page = await open(a, { job: job(a.id, "idle", null) });
+    expect(page.text()).toContain("Not analyzed yet");
+    respond = async () => json({ status: "queued", analysisId: a.id, attempt: attempt("queued"), statusUrl: `/api/v1/analyses/${a.id}`, reportUrl: `/analyze/${a.id}`, replayed: false }, 202);
+    press(page, "Analyze swing");
+    await settle(page);
+    expect(analysisRequests()).toHaveLength(1);
+    expect(JSON.parse(analysisRequests()[0].body!)).toEqual({ analysisId: a.id });
+    expect(headers[0]).toEqual({ admission: "1" });
+    expect(page.text()).toContain("Queued");
+    expect(page.text()).toContain("You can close this tab");
+    await vi.advanceTimersByTimeAsync(120_000);
+    await settle(page);
+    expect(analysisRequests()).toHaveLength(1);
+  });
+
+  it("a 202 for another analysis, or of another shape, is not an acceptance", async () => {
+    const a = base("pending");
+    const page = await open(a, { job: job(a.id, "idle", null) });
+    respond = async () => json({ status: "queued", analysisId: randomUUID(), attempt: attempt("queued") }, 202);
+    press(page, "Analyze swing");
+    await settle(page);
+    expect(page.text()).toContain("We couldn't confirm what happened with this request.");
+    expect(page.text()).not.toContain("You can close this tab");
+  });
+
+  it("a 409 failed answer shows that attempt with its own Retry; a refused legacy retry says to record again", async () => {
+    const a = base("failed");
+    const page = await open(a, { job: job(a.id, "failed", null) });
+    const seen = attempt("failed", { failureKind: "not_finished" });
+    respond = async () => json({ status: "failed", attempt: seen, error: "This analysis didn't finish. You can retry it." }, 409);
+    press(page, "Retry analysis");
+    await settle(page);
+    expect(page.text()).toContain("This analysis didn't finish. You can retry it.");
+    respond = async () => json({ status: "queued", analysisId: a.id, attempt: attempt("queued", { generation: 2 }) }, 202);
+    press(page, "Retry analysis");
+    await settle(page);
+    expect(JSON.parse(analysisRequests()[1].body!)).toEqual({ analysisId: a.id, retryOfAttemptId: seen.id });
+    page.unmount();
+    const legacy = base("failed");
+    const p2 = await open(legacy, { job: job(legacy.id, "failed", null) });
+    respond = async () => json({ status: "failed", error: "This analysis didn't finish. You can retry it." }, 409);
+    press(p2, "Retry analysis");
+    await settle(p2);
+    expect(p2.text()).toContain("Record the swing again for a new analysis.");
+    expect(p2.link("Record a new swing")).not.toBeNull();
+  });
+
+  it("a complete analysis with an attempt shows the stored report and sends nothing", async () => {
+    const a = { ...base("complete"), score: null, feedback: "SYNTHETIC TEST RESULT: stored report" };
+    const page = await open(a, { job: job(a.id, "complete", attempt("complete")) });
+    expect(page.text()).toContain("SYNTHETIC TEST RESULT: stored report");
+    expect(page.text()).toContain("Not scored");
+    expect(page.buttons().some((b) => /Analyze swing|Retry|Check status/.test(b))).toBe(false);
+    expect(wire).toEqual([]);
+  });
+
+  // ── AG-WEB-READY-10-P2-A1 ──────────────────────────────────────────────────────────────────────────────────────
+  it("A1: an unreadable status is shown as such with a read-only Check status — never as Not analyzed yet or an Analyze action — for every stored status but complete", async () => {
+    for (const stored of ["pending", "processing", "failed"] as const) {
+      const a = base(stored);
+      const page = await open(a, { job: "unavailable" });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle(page);
+      expect(page.text(), stored).toContain("Status unavailable");
+      expect(page.text(), stored).toContain("We couldn't read this analysis's status just now.");
+      expect(page.text(), stored).not.toContain("Not analyzed yet");
+      expect(page.pill(), stored).toBe("Status unavailable");
+      expect(page.buttons().some((b) => /Analyze swing|Retry/.test(b)), stored).toBe(false);
+      expect(await pressCheck(page), stored).toBe(1); // a reload: the page's own server read
+      expect(wire, stored).toEqual([]);
+      page.unmount();
+    }
+    // a stored completed report stays readable whatever the status read did
+    const done = { ...base("complete"), score: null, feedback: "SYNTHETIC TEST RESULT: stored report" };
+    const page = await open(done, { job: "unavailable" });
+    expect(page.text()).toContain("SYNTHETIC TEST RESULT: stored report");
+    expect(page.text()).not.toContain("Status unavailable");
+    expect(wire).toEqual([]);
+  });
+
+  it("A1: a confirmed absence of work (idle) keeps the Analyze action", async () => {
+    const a = base("pending");
+    const page = await open(a, { job: job(a.id, "idle", null) });
+    expect(page.text()).toContain("Not analyzed yet");
+    expect(page.buttons().some((b) => /Analyze swing/.test(b))).toBe(true);
+    expect(wire).toEqual([]);
+  });
+
+  it("A1: a synchronous stall (no attempt) keeps its record-again guidance; an unresolved attempt does not", async () => {
+    const a = base("processing");
+    const page = await open(a, { job: job(a.id, "interrupted", null) });
+    expect(page.text()).toContain("Analysis Interrupted");
+    expect(page.link("Record a new swing")).not.toBeNull();
+    page.unmount();
+    const b = base("processing");
+    const p2 = await open(b, { job: job(b.id, "interrupted", attempt("interrupted")) });
+    expect(p2.text()).toContain("Result not confirmed yet");
+    expect(p2.text()).toContain("its outcome isn't confirmed yet");
+    expect(p2.text()).not.toMatch(/can't be finished|record the swing again/i);
+    expect(p2.link("Record a new swing")).toBeNull();
+    expect(wire).toEqual([]);
+  });
+
+  it("A1 (review): an interrupted status described by a FINISHED attempt keeps the synchronous guidance; a 409 stalled naming a finished attempt is not shown as not confirmed", async () => {
+    const a = base("processing");
+    const finished = attempt("failed", { failureKind: "not_finished", finishedAt: "2026-11-27T04:05:00.000Z" });
+    const page = await open(a, { job: job(a.id, "interrupted", finished) });
+    expect(page.text()).toContain("Analysis Interrupted");
+    expect(page.text()).not.toContain("Result not confirmed yet");
+    expect(page.link("Record a new swing")).not.toBeNull();
+    page.unmount();
+    const b = base("pending");
+    const p2 = await open(b, { job: job(b.id, "idle", null) });
+    respond = async () => json({ status: "stalled", attempt: finished, error: "This analysis was interrupted after it started and can't be finished. Please record the swing again for a new analysis." }, 409);
+    press(p2, "Analyze swing");
+    await settle(p2);
+    expect(p2.text()).not.toContain("Result not confirmed yet");
+    expect(p2.text()).toContain("can't be finished");
+  });
+
+  it("A1: a 202 naming the request's own earlier attempt shows the CURRENT attempt (never moves the state back)", async () => {
+    const a = base("failed");
+    const own = attempt("failed", { failureKind: "not_finished" });
+    const current = attempt("processing", { generation: 2, dispatchedAt: "2026-11-27T04:02:00.000Z" });
+    const page = await open(a, { job: job(a.id, "failed", own) });
+    respond = async () => json({ status: "processing", analysisId: a.id, attempt: own, current, statusUrl: `/api/v1/analyses/${a.id}`, reportUrl: `/analyze/${a.id}`, replayed: true }, 202);
+    press(page, "Retry analysis");
+    await settle(page);
+    expect(page.text()).toContain("Analyzing");
+    expect(page.pill()).toBe("Analyzing");
+    expect(page.buttons().some((b) => /Retry/.test(b))).toBe(false);
+    // a malformed current is not an acceptance the page can show
+    page.unmount();
+    const b = base("pending");
+    const p2 = await open(b, { job: job(b.id, "idle", null) });
+    respond = async () => json({ status: "queued", analysisId: b.id, attempt: attempt("queued"), current: { id: "x" } }, 202);
+    press(p2, "Analyze swing");
+    await settle(p2);
+    expect(p2.text()).toContain("We couldn't confirm what happened with this request.");
+  });
+
+  it("A1: a 409 failed answer with a current attempt offers Retry naming the CURRENT attempt; a 409 stalled with an attempt is not confirmed yet", async () => {
+    const a = base("failed");
+    const page = await open(a, { job: job(a.id, "failed", null) });
+    const own = attempt("failed", { failureKind: "not_finished" });
+    const latest = attempt("failed", { generation: 2, failureKind: "not_finished" });
+    respond = async () => json({ status: "failed", attempt: own, current: latest, error: "This analysis didn't finish. You can retry it." }, 409);
+    press(page, "Retry analysis");
+    await settle(page);
+    respond = async () => json({ status: "queued", analysisId: a.id, attempt: attempt("queued", { generation: 3 }) }, 202);
+    press(page, "Retry analysis");
+    await settle(page);
+    expect(JSON.parse(analysisRequests()[1].body!)).toEqual({ analysisId: a.id, retryOfAttemptId: latest.id });
+    page.unmount();
+    const b = base("processing");
+    const p2 = await open(b, { job: job(b.id, "processing", attempt("processing")) });
+    expect(p2.buttons().some((x) => /Analyze swing|Retry/.test(x))).toBe(false);
+    p2.unmount();
+    const c = base("pending");
+    const p3 = await open(c, { job: job(c.id, "idle", null) });
+    const unresolved = attempt("interrupted");
+    respond = async () => json({ status: "stalled", attempt: unresolved, error: "This analysis started but stopped reporting, so its outcome isn't confirmed yet. Check status later to see whether a result was saved." }, 409);
+    press(p3, "Analyze swing");
+    await settle(p3);
+    expect(p3.text()).toContain("Result not confirmed yet");
+    expect(p3.link("Record a new swing")).toBeNull();
+    expect(await pressCheck(p3)).toBe(1);
+  });
+});
