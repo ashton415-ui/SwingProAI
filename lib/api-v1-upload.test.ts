@@ -626,7 +626,19 @@ describe("frozen read-only dependencies", () => {
     // empty or malformed Upload-Offset is no position); an unknown position keeps the transfer and sends nothing more.
     // AG-WEB-READY-10-P3-A1 (retargeted): a generic 400/401/403 status answer keeps the transfer (only 404/410 or the
     // signature's known expiry replace it); a 204 status answer is read like a 200.
-    ["app/(dashboard)/analyze/page.tsx", "4bde41cf4debdcaeb5f71a645aaab4480d41e12ff2596e7ae6114480f19d08e3"],
+    // AG-WEB-READY-10-P4 (retargeted): the four application requests go through lib/protected-web-requests.ts: by
+    // default the same requests as before (credentials "omit"); on the protected opt-in, the fixed same-origin web
+    // endpoints with this origin's cookies and no redirect followed. The owner checks before each send are unchanged.
+    ["app/(dashboard)/analyze/page.tsx", "c900ba0a46db967f0b88789912191976d081ca26783efafee9710eb28c9ac550"],
+    // AG-WEB-READY-10-P4 (QA): the four requests' definition left the page, so it is pinned here too — the sender, the
+    // web endpoints' boundary, the four web endpoints and the build-time opt-in in next.config.mjs.
+    ["lib/protected-web-requests.ts", "61a4cf5265eb017745584e404c875c0cbcdf96ee613faca4bf2740b93b1fbd01"],
+    ["lib/api/protected-web-boundary.ts", "e009748b7e75590637817fde8320664785dc1e9111644fbb72e57a4e6c507012"],
+    ["app/api/web/uploads/authorize/route.ts", "e6d1c75e1d259c46a52ef55bf01ce2c6b09b4991ba0e422d079495430131211c"],
+    ["app/api/web/uploads/finalize/route.ts", "1f2c284d60ac084ed09146c1b077d179c4e1e2c23f97563ab3fb9b3eeb086629"],
+    ["app/api/web/analyses/route.ts", "67c867129d8bf94633c562065c4c75f0f269e5afe5358b25cbf37685c76aef7d"],
+    ["app/api/web/analyze-swing/route.ts", "2529b0712cad9a1e6fd3e89fcfdf37f256b6fc25e266a21e921ef0b4375c6eb5"],
+    ["next.config.mjs", "d3b186ccf45b964e98067535bf5021cc2464e1e291e592b658a868607677190b"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
     // ENT-1D video sources: video_url records the canonical key, never a public URL.
     // ENT-1D video sources: canonical file name before upload (video_url already records the key).

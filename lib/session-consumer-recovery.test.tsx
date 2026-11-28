@@ -2478,7 +2478,11 @@ describe("source guards", () => {
     // with no cookie; and the signed transfer's three request kinds (creation, chunk, offset read), which carry no
     // account credential at all, likewise with no cookie
     expect(page.match(/\.\.\.ownerBearer\(/g)).toHaveLength(4);
-    expect(page.match(/credentials: "omit",/g)).toHaveLength(7);
+    // P4 (retargeted): the four Bearer requests go through the sender (lib/protected-web-requests.ts), whose default
+    // branch sends them with `credentials: "omit"`, written once for all four; the page keeps the three transfer kinds
+    expect(page.match(/credentials: "omit",/g)).toHaveLength(3);
+    expect(page.match(/sendAppRequest\("(authorize|finalize|analyses|analyze)", \{/g)).toHaveLength(4);
+    expect(source("lib/protected-web-requests.ts").match(/credentials: "omit",/g)).toHaveLength(1);
   });
 
   it("A3: Analyze takes its account from the rendered layout once and never adopts the browser's first session", () => {
@@ -2490,7 +2494,7 @@ describe("source guards", () => {
     expect(page).toContain("supabaseRef.current = analyzeClientFor(ownerRef.current);");
     // A4 (C1): the analysis call confirms the owner itself and sends its Bearer (no cookie sender any more)
     expect(page).toContain("const analysisSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);");
-    expect(page).toContain('const analysisRes = await fetch("/api/analyze-swing", {');
+    expect(page).toContain('const analysisRes = await sendAppRequest("analyze", {'); // P4 (retargeted)
     expect(page).not.toMatch(/cookieSessionRequests|cookieSessionPreflight/);
   });
 });

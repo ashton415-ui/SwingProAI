@@ -1075,18 +1075,18 @@ describe("AnalyzePage — submission ordering is unchanged", () => {
 
     const blobIdx = block.indexOf("await getTrimmedBlob()");
     const uploadIdx = block.indexOf("await transferSelection("); // A1: the V1 signed transfer
-    const videosIdx = block.indexOf('fetch("/api/v1/uploads/finalize"');
+    const videosIdx = block.indexOf('sendAppRequest("finalize"');
     // Analysis request authority closure: the pending analysis row is created by
     // the trusted server doorway, which occupies the old browser insert's step.
-    const analysisIdx = block.indexOf('fetch("/api/v1/analyses"');
-    const apiIdx = block.indexOf('fetch("/api/analyze-swing"');
+    const analysisIdx = block.indexOf('sendAppRequest("analyses"');
+    const apiIdx = block.indexOf('sendAppRequest("analyze"');
 
     for (const [label, idx] of [
       ["await getTrimmedBlob()", blobIdx],
       ["await transferSelection(", uploadIdx],
-      ['fetch("/api/v1/uploads/finalize"', videosIdx],
-      ['fetch("/api/v1/analyses"', analysisIdx],
-      ['fetch("/api/analyze-swing"', apiIdx],
+      ['sendAppRequest("finalize"', videosIdx],
+      ['sendAppRequest("analyses"', analysisIdx],
+      ['sendAppRequest("analyze"', apiIdx],
     ] as [string, number][]) {
       expect(idx, `${ANALYZE_PAGE_FILE}: startAnalysis is missing "${label}"`).toBeGreaterThanOrEqual(0);
     }

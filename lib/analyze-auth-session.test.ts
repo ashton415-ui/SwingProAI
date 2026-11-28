@@ -72,11 +72,11 @@ const ANCHORS = {
   /** A1: the clip goes through V1 authorize and its signed transfer (no Storage client call of its own). */
   storageUpload: "await transferSelection(",
   /** P2: V1 finalize writes the swing_videos row (the page holds no swing_videos write of its own). */
-  swingVideosInsert: `fetch("/api/v1/uploads/finalize"`,
+  swingVideosInsert: `sendAppRequest("finalize"`,
   /** Analysis request authority closure: the pending analysis row is created by
    *  the trusted server doorway, which now occupies the old insert's step. */
-  swingAnalysisInsert: `fetch("/api/v1/analyses"`,
-  analysisApi: `"/api/analyze-swing"`,
+  swingAnalysisInsert: `sendAppRequest("analyses"`,
+  analysisApi: `sendAppRequest("analyze"`, // P4: the four requests go through the sender
   /** EQ3-S1: the fresh active-bag re-read that guards a stale club selection. */
   clubRevalidation: "querySavedClubs(supabase, { userId })",
 } as const;
@@ -163,20 +163,28 @@ describe("Analyze auth/session source contract — managed browser client", () =
     expect(analyzeSource).not.toContain("accessToken");
     expect(analyzeSource.match(/\.\.\.ownerBearer\(/g) ?? []).toHaveLength(4); // A1: + the V1 upload authorization
     for (const [confirmation, header, route] of [
-      ["const authorizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(authorizeSession.session)", 'fetch("/api/v1/uploads/authorize"'],
-      ["const finalizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(finalizeSession.session)", 'fetch("/api/v1/uploads/finalize"'],
-      ["const requestSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(requestSession.session)", 'fetch("/api/v1/analyses"'],
-      ["const analysisSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(analysisSession.session)", 'fetch("/api/analyze-swing"'],
+      ["const authorizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(authorizeSession.session)", 'sendAppRequest("authorize"'],
+      ["const finalizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(finalizeSession.session)", 'sendAppRequest("finalize"'],
+      ["const requestSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(requestSession.session)", 'sendAppRequest("analyses"'],
+      ["const analysisSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);", "...ownerBearer(analysisSession.session)", 'sendAppRequest("analyze"'],
     ] as const) {
       const confirm = indexInSubmission(confirmation);
       const bearer = indexInSubmission(header);
       const request = submissionSource.indexOf(route);
       const requestEnd = submissionSource.indexOf("});", request);
+      expect(request).toBeGreaterThanOrEqual(0); // P4 (QA): both anchors exist
+      expect(requestEnd).toBeGreaterThan(request);
       expect(confirm).toBeLessThan(request); // confirmed first …
       expect(bearer).toBeGreaterThan(request); // … and that confirmation's token goes inside exactly this request
       expect(bearer).toBeLessThan(requestEnd);
-      expect(submissionSource.slice(request, requestEnd)).toContain('credentials: "omit",');
+      expect(submissionSource.slice(request, requestEnd)).not.toContain("credentials:"); // P4: the sender owns the mode
     }
+    // P4 (retargeted): the page sets no credentials mode of its own; the sender's default branch is the old request
+    // exactly, with `credentials: "omit"` (lib/protected-web-requests.ts; its opt-in branch: lib/protected-web-requests.test.ts)
+    const sender = readSource("lib/protected-web-requests.ts");
+    const defaultBranch = sender.slice(sender.indexOf("if (!protectedWebRequestsEnabled()) {"), sender.indexOf("const origin = window.location.origin;"));
+    expect(defaultBranch).toContain('credentials: "omit",');
+    expect(defaultBranch).toContain("return fetch(APP_REQUEST_PATHS[name], {");
     expect(ownerBindingSource).toContain("return { Authorization: `Bearer ${session.accessToken}` };");
   });
 
@@ -299,15 +307,15 @@ describe("Analyze auth/session source contract — submission ordering", () => {
   it("reuses the same page client (managed Auth, owner-bound data) for Storage and swing_videos, and writes no swing_analysis row", () => {
     // A1: the clip is sent through V1 authorize and its signed transfer, not through the page's Storage client
     expect(analyzeSource).not.toContain("supabase.storage");
-    expect(analyzeSource).toContain('fetch("/api/v1/uploads/authorize"');
+    expect(analyzeSource).toContain('sendAppRequest("authorize"');
     expect(analyzeSource).toContain("await transferSelection(");
     // P2: the swing_videos row is written by V1 finalize; the page holds no swing_videos write of its own
     expect(analyzeSource).not.toMatch(/\.from\("swing_videos"\)/);
-    expect(analyzeSource).toContain('fetch("/api/v1/uploads/finalize"');
+    expect(analyzeSource).toContain('sendAppRequest("finalize"');
     // Analysis request authority closure: the browser holds no INSERT on
     // swing_analysis; the request goes through the trusted server doorway.
     expect(analyzeSource).not.toMatch(/\.from\("swing_analysis"\)/);
-    expect(analyzeSource).toContain('fetch("/api/v1/analyses"');
+    expect(analyzeSource).toContain('sendAppRequest("analyses"');
     // Exactly one client is constructed in the whole page.
     expect(analyzeSource.match(/createClient\(\)/g) ?? []).toHaveLength(1);
   });
@@ -399,12 +407,12 @@ describe("A3 — every owner-specific dispatch is bound to the account the page 
 
   it("A4 (C1): sends the analysis call with the owner's confirmed Bearer and no cookie (the route verifies the Bearer itself); A3's cookie-session sender is gone", () => {
     expect(analyzeSource).not.toMatch(/cookieSessionRequests|cookieSessionPreflight|cookieRequests/);
-    expect(submissionSource).toContain('const analysisRes = await fetch("/api/analyze-swing", {');
-    const call = submissionSource.slice(submissionSource.indexOf('fetch("/api/analyze-swing", {'), submissionSource.indexOf("});", submissionSource.indexOf('fetch("/api/analyze-swing", {')));
-    expect(call).toContain('credentials: "omit",');
+    expect(submissionSource).toContain('const analysisRes = await sendAppRequest("analyze", {');
+    const call = submissionSource.slice(submissionSource.indexOf('sendAppRequest("analyze", {'), submissionSource.indexOf("});", submissionSource.indexOf('sendAppRequest("analyze", {')));
+    expect(call).not.toContain("credentials:"); // P4 (retargeted): the sender's default branch sends credentials: "omit" (asserted above)
     expect(call).toContain('headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session), [ADMISSION_DECLARATION_HEADER]: ADMISSION_DECLARATION_VALUE },');
     expect(call).not.toContain("signal"); // once sent it runs on, as before A3; an unsent call is dropped before fetch
-    expect(indexInSubmission("if (runAbort.signal.aborted || !mountedRef.current) return;")).toBeLessThan(indexInSubmission('const analysisRes = await fetch("/api/analyze-swing", {'));
+    expect(indexInSubmission("if (runAbort.signal.aborted || !mountedRef.current) return;")).toBeLessThan(indexInSubmission('const analysisRes = await sendAppRequest("analyze", {'));
   });
 
   it("maps a request refused for the page's account to fixed copy (never SDK text)", () => {

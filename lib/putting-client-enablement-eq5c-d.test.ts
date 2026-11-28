@@ -89,12 +89,12 @@ function puttingGuard(analyze: string): string {
  * the club id and nothing the database owns.
  */
 function analysisInsert(analyze: string): string {
-  return sliceBetween(submission(analyze), 'fetch("/api/v1/analyses"', "});");
+  return sliceBetween(submission(analyze), 'sendAppRequest("analyses"', "});");
 }
 
 /** The `/api/analyze-swing` request. */
 function analysisRequest(analyze: string): string {
-  return sliceBetween(submission(analyze), 'fetch("/api/analyze-swing"', "});");
+  return sliceBetween(submission(analyze), 'sendAppRequest("analyze"', "});");
 }
 
 /** Everything after the API response is parsed: the success routing decision. */
@@ -187,7 +187,7 @@ const GUARDS: Guard[] = [
       const body = stripComments(submission(s.analyze));
       return (
         body.indexOf("!canUsePuttingAnalysis(userTier)") >= 0 &&
-        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('fetch("/api/v1/uploads/finalize"') // P2: the swing_videos row
+        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('sendAppRequest("finalize"') // P2: the swing_videos row
       );
     },
   },
@@ -197,7 +197,7 @@ const GUARDS: Guard[] = [
       const body = stripComments(submission(s.analyze));
       return (
         body.indexOf("!canUsePuttingAnalysis(userTier)") >= 0 &&
-        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('fetch("/api/v1/analyses"')
+        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('sendAppRequest("analyses"')
       );
     },
   },
@@ -207,7 +207,7 @@ const GUARDS: Guard[] = [
       const body = stripComments(submission(s.analyze));
       return (
         body.indexOf("!canUsePuttingAnalysis(userTier)") >= 0 &&
-        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('fetch("/api/analyze-swing"')
+        body.indexOf("!canUsePuttingAnalysis(userTier)") < body.indexOf('sendAppRequest("analyze"')
       );
     },
   },
@@ -469,9 +469,9 @@ describe("EQ5C-D — the full-swing path is untouched", () => {
       "await supabase.auth.getSession()",
       "querySavedClubs(supabase, { userId })",
       "await transferSelection(", // A1: the V1 signed transfer
-      'fetch("/api/v1/uploads/finalize"',
-      'fetch("/api/v1/analyses"',
-      'fetch("/api/analyze-swing"',
+      'sendAppRequest("finalize"',
+      'sendAppRequest("analyses"',
+      'sendAppRequest("analyze"',
     ];
     let previous = -1;
     for (const anchor of order) {

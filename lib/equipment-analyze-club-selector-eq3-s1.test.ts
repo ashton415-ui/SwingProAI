@@ -83,7 +83,7 @@ const submissionSource = submissionBody();
  * is now that request rather than a direct `swing_analysis` INSERT.
  */
 function analysisInsertSource(): string {
-  const start = submissionSource.indexOf('fetch("/api/v1/analyses"');
+  const start = submissionSource.indexOf('sendAppRequest("analyses"');
   expect(start, "expected startAnalysis to request an analysis").toBeGreaterThan(-1);
   const end = submissionSource.indexOf("});", start);
   expect(end, "expected the analysis request to close").toBeGreaterThan(start);
@@ -92,7 +92,7 @@ function analysisInsertSource(): string {
 
 /** The `/api/analyze-swing` request, isolated. */
 function analysisRequestSource(): string {
-  const start = submissionSource.indexOf('fetch("/api/analyze-swing"');
+  const start = submissionSource.indexOf('sendAppRequest("analyze"');
   expect(start, "expected startAnalysis to call the analysis API").toBeGreaterThan(-1);
   const end = submissionSource.indexOf("});", start);
   expect(end, "expected the analysis request to close").toBeGreaterThan(start);
@@ -378,9 +378,9 @@ describe("EQ3-S1 Analyze — submission order and the club revalidation step", (
     session: "await supabase.auth.getSession()",
     revalidation: "querySavedClubs(supabase, { userId })",
     storage: "await transferSelection(", // A1: the V1 signed transfer
-    videos: 'fetch("/api/v1/uploads/finalize"', // P2: finalize writes the swing_videos row
-    analysis: 'fetch("/api/v1/analyses"',
-    api: 'fetch("/api/analyze-swing"',
+    videos: 'sendAppRequest("finalize"', // P2: finalize writes the swing_videos row
+    analysis: 'sendAppRequest("analyses"',
+    api: 'sendAppRequest("analyze"',
   } as const;
 
   function at(anchor: string): number {
@@ -740,12 +740,12 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
   });
 
   it("refuses before both database inserts", () => {
-    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/v1/uploads/finalize"`)); // P2: the swing_videos row
-    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/v1/analyses"`));
+    expect(at(guard)).toBeLessThan(at(String.raw`sendAppRequest("finalize"`)); // P2: the swing_videos row
+    expect(at(guard)).toBeLessThan(at(String.raw`sendAppRequest("analyses"`));
   });
 
   it("refuses before the analysis API call", () => {
-    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/analyze-swing"`));
+    expect(at(guard)).toBeLessThan(at(String.raw`sendAppRequest("analyze"`));
   });
 
   it("uses fixed golfer-facing copy that explains rather than blames", () => {
@@ -973,9 +973,9 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
     );
     const preprocessing = submissionSource.indexOf("await getTrimmedBlob()");
     const storage = submissionSource.indexOf("await transferSelection("); // A1: the V1 signed transfer
-    const videos = submissionSource.indexOf('fetch("/api/v1/uploads/finalize"'); // P2: the swing_videos row
-    const analysis = submissionSource.indexOf('fetch("/api/v1/analyses"');
-    const api = submissionSource.indexOf('fetch("/api/analyze-swing"');
+    const videos = submissionSource.indexOf('sendAppRequest("finalize"'); // P2: the swing_videos row
+    const analysis = submissionSource.indexOf('sendAppRequest("analyses"');
+    const api = submissionSource.indexOf('sendAppRequest("analyze"');
 
     for (const idx of [guard, preprocessing, storage, videos, analysis, api]) {
       expect(idx).toBeGreaterThanOrEqual(0);

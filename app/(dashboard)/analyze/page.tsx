@@ -66,6 +66,7 @@ import {
   type UploadMimeType,
 } from "@/lib/api/v1-upload-dto";
 import { ADMISSION_DECLARATION_HEADER, ADMISSION_DECLARATION_VALUE } from "@/lib/analysis-attempt-precedence";
+import { sendAppRequest } from "@/lib/protected-web-requests";
 
 /** Browsers open a file input on Space but not on Enter, which is what a
  *  keyboard user presses on a button-like control. Enter opens it too. */
@@ -103,6 +104,13 @@ function getUserTier(): SubscriptionTier {
 // any writer after the confirmation — travels with them. A request whose owner
 // is not confirmed is never sent with another account's credential — it is not
 // sent at all.
+// P4. A build that opts into the protected browser path (a deployment behind a
+// platform sign-in, which admits only requests that carry its own cookie) sends
+// these four requests to fixed web endpoints on this exact origin instead, with
+// this origin's cookies and no redirect followed; each endpoint refuses a request
+// without the Bearer, whose verification never consults the cookie
+// (lib/protected-web-requests.ts, lib/api/protected-web-boundary.ts). The owner
+// confirmation before each send is unchanged.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
 // A2. The managed client refuses a session read it cannot confirm (another
 // sign-in's write not visible here yet, a write from outside the browser's own
@@ -1299,10 +1307,10 @@ export default function AnalyzePage() {
               if (authorizeSession.status !== "ready") throw new Error(refusedFor(authorizeSession.status));
               stopIfIdentityChanged();
               stopIfLeft(runAbort.signal); // P3: the golfer left while the owner check ran: no signature is minted
-              return fetch("/api/v1/uploads/authorize", {
-                method: "POST",
-                // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
-                credentials: "omit",
+              // P4: the Bearer alone identifies the request — by default with no cookie (possibly another sign-in's) at
+              // all; on the protected opt-in with only this origin's cookies, to an endpoint that refuses it without
+              // the Bearer and never follows a redirect (lib/protected-web-requests.ts)
+              return sendAppRequest("authorize", {
                 headers: { "Content-Type": "application/json", ...ownerBearer(authorizeSession.session) },
                 body: JSON.stringify({ uploadId: intent.uploadId, mimeType, fileSize: blob.size }),
               });
@@ -1327,10 +1335,8 @@ export default function AnalyzePage() {
         const finalizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
         if (finalizeSession.status !== "ready") throw new Error(refusedFor(finalizeSession.status));
         stopIfIdentityChanged();
-        const finalizeRes = await fetch("/api/v1/uploads/finalize", {
-          method:  "POST",
-          // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
-          credentials: "omit",
+        // P4: the Bearer alone identifies the request (by default no cookie; the protected opt-in: lib/protected-web-requests.ts)
+        const finalizeRes = await sendAppRequest("finalize", {
           headers: { "Content-Type": "application/json", ...ownerBearer(finalizeSession.session) },
           body:    JSON.stringify({
             uploadId: intent.uploadId,
@@ -1367,10 +1373,9 @@ export default function AnalyzePage() {
       const requestSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
       if (requestSession.status !== "ready") throw new Error(refusedFor(requestSession.status));
       stopIfIdentityChanged();
-      const createRes = await fetch("/api/v1/analyses", {
-        method:  "POST",
-        // A3 review: the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
-        credentials: "omit",
+      // A3 review, P4: the Bearer alone identifies the request (by default no cookie; the protected opt-in:
+      // lib/protected-web-requests.ts)
+      const createRes = await sendAppRequest("analyses", {
         headers: { "Content-Type": "application/json", ...ownerBearer(requestSession.session) },
         body:    JSON.stringify({ swingVideoId: videoRow.id, clubId: validatedClubId }),
       });
@@ -1400,10 +1405,9 @@ export default function AnalyzePage() {
       stopIfIdentityChanged();
       if (runAbort.signal.aborted || !mountedRef.current) return;
       analysisStarted = true;
-      const analysisRes = await fetch("/api/analyze-swing", {
-        method:  "POST",
-        // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
-        credentials: "omit",
+      // P4: the Bearer alone identifies the request (by default no cookie; the protected opt-in:
+      // lib/protected-web-requests.ts); once sent it runs on: no cancel signal
+      const analysisRes = await sendAppRequest("analyze", {
         // P2: this page understands a 202 acceptance (not a security control; the server decides)
         headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session), [ADMISSION_DECLARATION_HEADER]: ADMISSION_DECLARATION_VALUE },
         body:    JSON.stringify({ analysisId: analysisRow.id }),

@@ -1942,8 +1942,13 @@ describe("A4 (C1): a page's requests carry an explicit owner credential; A3's co
     for (const caller of ["app/(dashboard)/analyze/page.tsx", "app/(dashboard)/analyze/[id]/AnalysisReport.tsx"]) {
       const page = source(caller);
       expect(page, caller).not.toMatch(/cookieSessionRequests|cookieSessionPreflight|ownerRefusalReason/);
-      const call = page.slice(page.indexOf('fetch("/api/analyze-swing", {'), page.indexOf("body:", page.indexOf('fetch("/api/analyze-swing", {')));
-      expect(call, caller).toContain('credentials: "omit"');
+      // P4 (retargeted): the Analyze page sends it through the sender (default branch: credentials "omit", asserted in
+      // lib/analyze-auth-session.test.ts); the saved report (AnalysisReport.tsx) is unchanged
+      const anchor = caller.endsWith("page.tsx") ? 'sendAppRequest("analyze", {' : 'fetch("/api/analyze-swing", {';
+      const call = page.slice(page.indexOf(anchor), page.indexOf("body:", page.indexOf(anchor)));
+      expect(page.indexOf(anchor), caller).toBeGreaterThan(-1);
+      if (caller.endsWith("page.tsx")) expect(call, caller).not.toContain("credentials:");
+      else expect(call, caller).toContain('credentials: "omit"');
       expect(call, caller).toMatch(/\.\.\.ownerBearer\((analysisSession|confirmed)\.session\)/);
     }
   });

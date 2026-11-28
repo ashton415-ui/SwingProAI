@@ -452,7 +452,8 @@ describe("EQ4-S2 Analyze — recorded File handoff performs no submission", () =
 
   it("performs no analysis API call when camera recording stops", () => {
     const lifecycle = cameraLifecycleSource();
-    expect(lifecycle).not.toContain('fetch("/api/analyze-swing"');
+    expect(lifecycle).not.toContain('sendAppRequest("analyze"');
+    expect(lifecycle).not.toContain('fetch("/api/analyze-swing"'); // P4 (QA): the old form stays absent too
     expect(lifecycle).not.toContain("startAnalysis(");
   });
 
@@ -536,11 +537,11 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
     const guard = submission.indexOf("isPuttingCapturePresentation(savedClubs, selectedClubId)");
     const preprocessing = submission.indexOf("await getTrimmedBlob()");
     const storage = submission.indexOf("await transferSelection("); // A1: the V1 signed transfer
-    const videos = submission.indexOf('fetch("/api/v1/uploads/finalize"'); // P2: the swing_videos row
+    const videos = submission.indexOf('sendAppRequest("finalize"'); // P2: the swing_videos row
     // Analysis request authority closure: the analysis row is created by the
     // trusted doorway, which occupies the old browser insert's step.
-    const analysis = submission.indexOf('fetch("/api/v1/analyses"');
-    const api = submission.indexOf('fetch("/api/analyze-swing"');
+    const analysis = submission.indexOf('sendAppRequest("analyses"');
+    const api = submission.indexOf('sendAppRequest("analyze"');
 
     for (const idx of [guard, preprocessing, storage, videos, analysis, api]) {
       expect(idx).toBeGreaterThanOrEqual(0);
@@ -560,7 +561,7 @@ describe("EQ4-S2 Analyze — Putter and equipment boundaries hold", () => {
     // The browser no longer inserts swing_analysis; the analysis request it
     // sends is the surface that must carry no family.
     expect(analyzeSource).not.toMatch(/\.from\("swing_analysis"\)/);
-    const requestIdx = analyzeSource.indexOf('fetch("/api/v1/analyses"');
+    const requestIdx = analyzeSource.indexOf('sendAppRequest("analyses"');
     expect(requestIdx).toBeGreaterThan(-1);
     const request = analyzeSource.slice(requestIdx, analyzeSource.indexOf("});", requestIdx));
     expect(request).not.toContain("analysis_family");
