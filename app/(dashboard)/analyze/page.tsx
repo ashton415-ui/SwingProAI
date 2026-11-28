@@ -250,6 +250,9 @@ const CLIP_TOO_LARGE_MESSAGE =
   "This clip is too large to analyse. Trim it to just the swing — a few seconds — and try again.";
 const UPLOAD_FAILED_MESSAGE =
   "We couldn't upload your video. Check your connection, then tap Run Analyzer again — your video is still selected.";
+/** AG-WEB-READY-10-P3: the transfer is kept, but Storage has not confirmed how much of the clip arrived. */
+const UPLOAD_UNCONFIRMED_MESSAGE =
+  "Your upload was interrupted and we couldn't confirm how much of your video arrived. Check your connection, then tap Run Analyzer again to continue — your video is still selected.";
 const ANALYSIS_CONNECTION_LOST_MESSAGE =
   "We lost the connection while your swing was being analysed. Check History in a moment; if it isn't there, run it again.";
 
@@ -340,8 +343,9 @@ interface SignedTransfer {
 }
 
 /** What one transfer pass left: the clip is stored; signing or creation was refused (the key may already be stored,
- *  which V1 finalize decides); or the transfer failed. */
-type TransferResult = "stored" | "maybe_stored" | "failed";
+ *  which V1 finalize decides); the transfer is kept but Storage has not confirmed how much of the clip it holds (P3:
+ *  nothing more is sent until the golfer retries); or the transfer failed. */
+type TransferResult = "stored" | "maybe_stored" | "unconfirmed" | "failed";
 
 /** Chunks re-read and re-sent after a failed one, per pass. */
 const TRANSFER_RETRIES = 3;
@@ -355,50 +359,93 @@ function signedTransferHeaders(signature: string, extra: Readonly<Record<string,
   };
 }
 
-/** The stored offset of an earlier transfer (HEAD), or null when the server has none to resume. */
-async function signedTransferOffset(transfer: SignedTransfer, size: number, signal: AbortSignal): Promise<number | null> {
+/**
+ * AG-WEB-READY-10-P3: a byte position Storage stated explicitly in an Upload-Offset header — a plain nonnegative
+ * decimal integer no larger than the transfer's length. An explicit "0" is a position. An absent or empty header, and
+ * any value with a sign, a decimal point, an exponent, a hexadecimal prefix or any other character, or beyond the
+ * length, is none (null). (`Number()` reads an absent or empty header as 0, which resent the clip from its start.)
+ */
+function confirmedOffset(value: string | null, length: number): number | null {
+  if (value === null || !/^[0-9]{1,16}$/.test(value)) return null;
+  const offset = Number(value);
+  return Number.isSafeInteger(offset) && offset <= length ? offset : null;
+}
+
+/** P3: what an authoritative status read (HEAD) of a transfer said. */
+type TransferStatus =
+  /** Storage confirmed it holds exactly this many bytes of the clip */
+  | { readonly offset: number }
+  /** Storage confirmed the transfer is gone (404, 410): the replacement flow applies */
+  | "gone"
+  /** P3-A1: anything else is not known — no answer; a generic 400, 401 or 403 (no reliable terminal signal: it may come
+   *  from an intermediary while the transfer is still live); 5xx, 429, …; or a 200/204 without a readable offset. The
+   *  transfer and the selection are kept. */
+  | "unknown";
+
+async function readTransferStatus(transfer: SignedTransfer, size: number, signal: AbortSignal): Promise<TransferStatus> {
+  stopIfLeft(signal);
   try {
     const r = await fetch(transfer.uploadUrl, {
       method: "HEAD", credentials: "omit", cache: "no-store", redirect: "error", signal, headers: signedTransferHeaders(transfer.signature),
     });
-    if (r.status !== 200) return null;
-    const offset = Number(r.headers.get("upload-offset"));
-    return Number.isSafeInteger(offset) && offset >= 0 && offset <= size ? offset : null;
+    if (r.status === 404 || r.status === 410) return "gone";
+    // P3-A1: a successful status answer is 200 or 204, read with the same strict offset rule
+    if (r.status !== 200 && r.status !== 204) return "unknown";
+    const offset = confirmedOffset(r.headers.get("upload-offset"), size);
+    return offset === null ? "unknown" : { offset };
   } catch (e) {
     if (signal.aborted) throw e;
-    return null;
+    return "unknown";
   }
 }
 
-/** Sends the clip from `start` in chunks; after a failed chunk the server's offset is read again (bounded retries). */
+/** P3: what sending chunks left: every byte confirmed stored; the stored position unknown (nothing more was sent);
+ *  the bounded retries spent at a confirmed position; or the transfer confirmed gone. */
+type ChunksResult = "stored" | "unconfirmed" | "failed" | "gone";
+
+/** P3: once the page is left (the run's signal is aborted) the transfer sends nothing more. */
+function stopIfLeft(signal: AbortSignal): void {
+  if (signal.aborted) throw new DOMException("The upload was stopped.", "AbortError");
+}
+
+/**
+ * Sends the clip from `start` in chunks. A chunk counts only when its acknowledgement (204) names exactly the end of the
+ * chunk just sent (P3). Any other answer — none, another status, no readable offset, or an offset that contradicts the
+ * chunk — is reconciled with an authoritative status read before anything else is sent, a bounded number of times per
+ * pass. A position the status read cannot confirm stops the pass with the transfer kept.
+ */
 async function sendSignedChunks(
   transfer: SignedTransfer, blob: Blob, start: number, chunkSize: number, signal: AbortSignal, between: () => void,
-): Promise<boolean> {
+): Promise<ChunksResult> {
   let offset = start;
   let retries = 0;
   while (offset < blob.size) {
+    stopIfLeft(signal);
     between();
+    const end = Math.min(blob.size, offset + chunkSize);
     let next: number | null = null;
     try {
       const r = await fetch(transfer.uploadUrl, {
         method: "PATCH", credentials: "omit", cache: "no-store", redirect: "error", signal,
         headers: signedTransferHeaders(transfer.signature, { "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" }),
-        body: blob.slice(offset, Math.min(blob.size, offset + chunkSize)),
+        body: blob.slice(offset, end),
       });
-      const answered = Number(r.headers.get("upload-offset"));
-      if (r.status === 204 && Number.isSafeInteger(answered) && answered > offset && answered <= blob.size) next = answered;
+      if (r.status === 204 && confirmedOffset(r.headers.get("upload-offset"), blob.size) === end) next = end;
     } catch (e) {
       if (signal.aborted) throw e;
     }
     if (next === null) {
       retries += 1;
-      if (retries > TRANSFER_RETRIES) return false;
-      next = await signedTransferOffset(transfer, blob.size, signal);
-      if (next === null) return false;
+      if (retries > TRANSFER_RETRIES) return "failed";
+      between();
+      const status = await readTransferStatus(transfer, blob.size, signal);
+      if (status === "gone") return "gone";
+      if (status === "unknown") return "unconfirmed";
+      next = status.offset;
     }
     offset = next;
   }
-  return true;
+  return "stored";
 }
 
 /**
@@ -419,12 +466,19 @@ async function transferSelection(args: {
   const { intent, blob, signal, between } = args;
   if (intent.transfer !== null && Date.now() < intent.transfer.usableUntil) {
     between();
-    const offset = await signedTransferOffset(intent.transfer, blob.size, signal);
-    if (offset !== null) {
-      return (await sendSignedChunks(intent.transfer, blob, offset, UPLOAD_CHUNK_SIZE, signal, between)) ? "stored" : "failed";
+    const status = await readTransferStatus(intent.transfer, blob.size, signal);
+    // P3: while the stored position is unknown the transfer is kept and nothing more is sent — no chunk, no new
+    // authorization or creation — until the golfer retries; only a transfer Storage confirmed gone is replaced
+    if (status === "unknown") return "unconfirmed";
+    if (status !== "gone") {
+      const sent = await sendSignedChunks(intent.transfer, blob, status.offset, UPLOAD_CHUNK_SIZE, signal, between);
+      if (sent !== "gone") return sent;
     }
   }
+  // no transfer yet, its signature's known lifetime has passed, or Storage confirmed it gone (404, 410): a new
+  // authorization and transfer
   intent.transfer = null;
+  stopIfLeft(signal);
   const answer = await args.authorize();
   // Storage refuses to sign a key that is already stored (no upsert): V1 finalize decides whether this one is
   if (answer.status === 503) return "maybe_stored";
@@ -461,7 +515,8 @@ async function transferSelection(args: {
     signature: authorization.signature,
     usableUntil: Date.now() + Math.max(0, authorization.expiresInSeconds - 60) * 1000,
   };
-  return (await sendSignedChunks(intent.transfer, blob, 0, authorization.chunkSize, signal, between)) ? "stored" : "failed";
+  const sent = await sendSignedChunks(intent.transfer, blob, 0, authorization.chunkSize, signal, between);
+  return sent === "gone" ? "failed" : sent;
 }
 
 // ─── EQ4-S2 mobile camera capture ─────────────────────────────────────────────
@@ -516,6 +571,7 @@ const PAGE_MESSAGES: ReadonlySet<string> = new Set([
   EMPTY_VIDEO_MESSAGE,
   CLIP_TOO_LARGE_MESSAGE,
   UPLOAD_FAILED_MESSAGE,
+  UPLOAD_UNCONFIRMED_MESSAGE,
   PREPROCESSING_FAILED_MESSAGE,
 ]);
 
@@ -837,6 +893,16 @@ export default function AnalyzePage() {
   }, []);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // AG-WEB-READY-10-P3 (UX review): the preview's error message sits below the preview; when it appears it is brought
+  // into view at once (nearest edge, no animation) clear of the fixed header and the phone's bottom tabs.
+  const previewErrorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!error || !previewUrl) return;
+    const el = previewErrorRef.current;
+    if (!el || typeof el.scrollIntoView !== "function") return;
+    el.scrollIntoView({ block: "nearest" });
+  }, [error, previewUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1232,6 +1298,7 @@ export default function AnalyzePage() {
               const authorizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
               if (authorizeSession.status !== "ready") throw new Error(refusedFor(authorizeSession.status));
               stopIfIdentityChanged();
+              stopIfLeft(runAbort.signal); // P3: the golfer left while the owner check ran: no signature is minted
               return fetch("/api/v1/uploads/authorize", {
                 method: "POST",
                 // the Bearer alone identifies the request; no cookie (possibly another sign-in's) goes with it
@@ -1243,12 +1310,13 @@ export default function AnalyzePage() {
             signal: runAbort.signal,
             between: stopIfIdentityChanged,
           });
-          if (transferred === "failed") {
+          if (transferred === "failed" || transferred === "unconfirmed") {
             console.error("Video upload failed");
             // A3: an upload not sent because the page's account could not be confirmed says why
             const notConfirmed = await ownerNoLongerConfirmed();
             if (notConfirmed !== null) throw new Error(notConfirmed);
-            throw new Error(UPLOAD_FAILED_MESSAGE);
+            // P3: the selection, its upload id and its transfer are kept: the next press resumes from what Storage confirms
+            throw new Error(transferred === "unconfirmed" ? UPLOAD_UNCONFIRMED_MESSAGE : UPLOAD_FAILED_MESSAGE);
           }
         }
 
@@ -1932,20 +2000,6 @@ export default function AnalyzePage() {
               );
             })()}
 
-            {/* Error banner */}
-            {error && (
-              <div className="absolute top-16 left-4 right-4 z-50">
-                <div role="alert" className="bg-red-500/10 border border-red-500/40 backdrop-blur-xl p-4 rounded-xl flex items-start gap-3">
-                  <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
-                  <p className="text-sm text-white">{error}</p>
-                  <button onClick={() => setError(null)} aria-label="Dismiss message"
-                    className="ml-auto -my-3 -mr-3 shrink-0 flex items-center justify-center min-w-11 min-h-11 text-gray-500 hover:text-white">
-                    <X size={16} />
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* Loading overlay */}
             {(isAnalyzing || isTrimming) && (
               <div className="absolute inset-0 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center text-white z-50">
@@ -2006,6 +2060,23 @@ export default function AnalyzePage() {
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Error banner. AG-WEB-READY-10-P3: in the page flow directly below the preview (every width), not overlaid
+            on it: at phone width the overlay covered the Run Analyzer control its own copy points to. The file-refused
+            case without a preview keeps its own banner above. */}
+        {previewUrl && error && (
+          <div ref={previewErrorRef}
+            className="px-4 pt-3 pb-3 bg-black scroll-mt-[calc(4.5rem+env(safe-area-inset-top))] scroll-mb-[calc(5rem+env(safe-area-inset-bottom))]">
+            <div role="alert" className="bg-red-500/10 border border-red-500/40 p-4 rounded-xl flex items-start gap-3">
+              <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+              <p className="text-sm text-white">{error}</p>
+              <button onClick={() => setError(null)} aria-label="Dismiss message"
+                className="ml-auto -my-3 -mr-3 shrink-0 flex items-center justify-center min-w-11 min-h-11 text-gray-500 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
           </div>
         )}
 

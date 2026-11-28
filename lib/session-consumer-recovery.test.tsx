@@ -166,6 +166,9 @@ const ANALYZE = {
   afterChange:
     "This browser's sign-in changed while your swing was being analyzed, so the result isn't shown here. Refresh the page to continue with the account that's signed in now.",
   uploadFailed: "We couldn't upload your video. Check your connection, then tap Run Analyzer again — your video is still selected.",
+  // AG-WEB-READY-10-P3: the transfer is kept, but Storage has not confirmed how much of the clip arrived
+  uploadUnconfirmed:
+    "Your upload was interrupted and we couldn't confirm how much of your video arrived. Check your connection, then tap Run Analyzer again to continue — your video is still selected.",
 };
 const ADD = {
   signedOut: "You're signed out, so this club wasn't added. Sign in again to add it to your bag.",
@@ -1462,7 +1465,8 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
     };
     sent = [];
     await startRun(page);
-    expect(banner(page)).toContain(ANALYZE.uploadFailed);
+    // P3: the status read was lost too, so how much arrived is not confirmed: the transfer is kept for the repeat
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
     expect(tus().filter((r) => r.method === "POST")).toHaveLength(1);
     expect(videoInserts()).toHaveLength(0);
     refuse = false;
@@ -1506,7 +1510,8 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
     };
     sent = [];
     await startRun(page);
-    expect(banner(page)).toContain(ANALYZE.uploadFailed);
+    // P3: the status read was lost too, so how much arrived is not confirmed: the transfer is kept for the repeat
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
     expect(tus().filter((r) => r.method === "PATCH").map((r) => [r.uploadOffset, r.bodySize])).toEqual([["0", 6291456], ["6291456", 6291456]]);
     expect(Array.from(transfers.values())).toEqual([{ offset: 6291456, length: size }]);
     drop = false;
@@ -1564,6 +1569,592 @@ describe("Analyze submission — no upload without the page's confirmed golfer; 
       "/api/v1/uploads/authorize", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
     ]);
     expect(page.text()).toContain("Analysis Complete");
+  });
+
+  // ── AG-WEB-READY-10-P3: the resume position is one Storage stated explicitly; an unknown one keeps the transfer ──
+  const CHUNK = 6291456;
+  const P3_SIZE = 13 * 1_048_576; // three chunks: 6 MiB, 6 MiB, 1 MiB
+  /** Selects a 13 MiB clip. */
+  function withLargeVideo(page: Mounted) {
+    const input = findAll(page.nodes(), (n) => n.type === "input" && n.props.type === "file" && n.props.accept === "video/*")[0];
+    const video = new File([new Uint8Array(P3_SIZE)], "swing.mp4", { type: "video/mp4" });
+    (input.props.onChange as (e: unknown) => void)({ target: { files: [video], value: "" } });
+    page.render();
+    const element = findAll(page.nodes(), (n) => n.type === "video" && n.ref !== null)[0];
+    (element.ref as { current: unknown }).current = {
+      readyState: 0, duration: 0, videoWidth: 1280, videoHeight: 720, currentTime: 0,
+      addEventListener: () => undefined, removeEventListener: () => undefined, pause: () => undefined,
+    };
+    page.render();
+  }
+  /** Each request as the network saw it: the transfer's as "tus <method> [offset]", the app's by path. */
+  const p3Label = (r: Sent) => (r.url === TUS_ENDPOINT || r.url.startsWith(`${TUS_ENDPOINT}/`)
+    ? `tus ${r.method}${r.method === "PATCH" ? ` ${r.uploadOffset}` : ""}` : r.url);
+  const tusTrace = () => tus().map((r) => (r.method === "PATCH" ? `PATCH ${r.uploadOffset}` : r.method));
+  const patchesFrom = (url: string) => tus().filter((r) => r.method === "PATCH" && r.url === url).map((r) => r.uploadOffset);
+  /** The stand-in Storage's faults: the connection drops (after the first stored chunk, or before any chunk is stored);
+   *  `status` answers the transfer's status reads (HEAD) instead of Storage (null: Storage answers); `ack` replaces the
+   *  first chunk acknowledgement's Upload-Offset after Storage stored the chunk (null value: header omitted). */
+  let drop: "after-first" | "all" | "patches-after-first" | "last-ack" | null = null;
+  let status: ((r: Sent) => Response | null | Promise<Response | null>) | null = null;
+  let beforeHead: (() => void) | null = null;
+  let onDrop: (() => void) | null = null;
+  let ack: ((offset: number, size: number) => string | null) | null = null;
+  let expiresInSeconds: number | null = null;
+  let conflicts = 0;
+  function installP3Network() {
+    drop = null; status = null; ack = null; expiresInSeconds = null; conflicts = 0; beforeHead = null; onDrop = null;
+    const healthy = answer;
+    let patches = 0;
+    answer = async (r, signal) => {
+      if (r.method === "HEAD" && beforeHead !== null) beforeHead();
+      if (drop === "patches-after-first" && r.method === "PATCH" && ++patches > 1) throw new TypeError("Failed to fetch");
+      if (drop === "last-ack" && r.method === "PATCH" && Number(r.uploadOffset) + (r.bodySize ?? 0) === P3_SIZE) {
+        await healthy(r, signal); // the last chunk is stored …
+        throw new TypeError("Failed to fetch"); // … and its acknowledgement lost
+      }
+      if ((drop === "after-first" || drop === "all") && r.method === "PATCH" && (drop === "all" || ++patches > 1)) {
+        if (onDrop !== null) onDrop();
+        throw new TypeError("Failed to fetch");
+      }
+      if ((drop === "after-first" || drop === "all" || drop === "last-ack") && r.method === "HEAD") throw new TypeError("Failed to fetch");
+      if (status !== null && r.method === "HEAD") {
+        const answered = await status(r);
+        if (answered !== null) return answered;
+      }
+      // V1 finalize finds the object only once the selection's latest transfer is complete
+      if (r.url === "/api/v1/uploads/finalize") {
+        const latest = Array.from(transfers.values()).pop();
+        if (!latest || latest.offset < latest.length) {
+          return json({ error: { code: "UPLOAD_NOT_FOUND_OR_NOT_READY", message: "The upload could not be found or is not ready." } }, 409);
+        }
+      }
+      const res = await healthy(r, signal);
+      if (r.url === "/api/v1/uploads/authorize" && expiresInSeconds !== null) {
+        const body = (await res.json()) as { data: Record<string, unknown> };
+        return json({ data: { ...body.data, expiresInSeconds } });
+      }
+      if (r.method === "PATCH" && res.status === 409) conflicts += 1;
+      if (r.method === "PATCH" && res.status === 204 && ack !== null) {
+        const value = ack(Number(r.uploadOffset), r.bodySize ?? 0);
+        ack = null; // the first acknowledgement only
+        return new Response(null, { status: 204, headers: value === null ? {} : { "Upload-Offset": value } });
+      }
+      return res;
+    };
+  }
+  const statusAnswer = (offset: string | null) => () =>
+    new Response(null, { status: 200, headers: offset === null ? { "Upload-Length": String(P3_SIZE) } : { "Upload-Offset": offset, "Upload-Length": String(P3_SIZE) } });
+  /** The first press: the first 6 MiB are stored and acknowledged, then the connection drops (the second chunk and the
+   *  status read never reach Storage). Returns the transfer's address and the selection's upload id. */
+  async function firstPressStoresSixMiB(page: Mounted) {
+    installP3Network();
+    drop = "after-first";
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "HEAD"]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(runButton(page)).not.toBeNull(); // the retry control: the selection is kept
+    drop = null;
+    return {
+      uploadUrl: tus().find((r) => r.method === "PATCH")!.url,
+      uploadId: (JSON.parse(authorizations()[0].body!) as { uploadId: string }).uploadId,
+    };
+  }
+  const RESUMED = [
+    "/api/v1/uploads/finalize", "tus HEAD", "tus PATCH 6291456", "tus PATCH 12582912",
+    "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+  ];
+
+  it("P3: a status read that answers 200 with the offset omitted, then empty, keeps the transfer and sends nothing more; once Storage confirms 6 MiB the retry continues there on the same transfer and upload id", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl, uploadId } = await firstPressStoresSixMiB(page);
+    for (const offset of [null, ""]) {
+      status = statusAnswer(offset);
+      sent = [];
+      await startRun(page);
+      // finalize first (nothing stored yet), then ONE status read: no chunk, no authorization, no creation
+      expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+      expect(tus().every((r) => r.url === uploadUrl && r.redirect === "error")).toBe(true);
+      expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+      expect(runButton(page)).not.toBeNull();
+      expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    }
+    status = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(RESUMED);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(tus().filter((r) => r.method === "PATCH").map((r) => r.bodySize)).toEqual([CHUNK, P3_SIZE - 2 * CHUNK]);
+    expect(finalizeIds()).toEqual([uploadId, uploadId]);
+    expect(authorizations()).toHaveLength(0);
+    expect(uploadsSent()).toHaveLength(0);
+    expect(Array.from(transfers.values())).toEqual([{ offset: P3_SIZE, length: P3_SIZE }]); // one transfer, every byte once
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it.each([
+    ["a decimal point", "6291456.0"],
+    ["an exponent", "6.291456e6"],
+    ["a hexadecimal prefix", "0x600000"],
+    ["a plus sign", "+6291456"],
+    ["a minus sign", "-1"],
+    ["two values", "6291456, 6291456"],
+    ["inner spaces", "6 291 456"],
+    ["a value past the clip's length", String(13 * 1_048_576 + 1)],
+    ["a value past the safe integer range", "99999999999999999999"],
+  ])("P3: a status read whose Upload-Offset has %s is not a position: the transfer is kept and nothing more is sent", async (_label, value) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    status = statusAnswer(value);
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+  });
+
+  it.each([
+    ["answers 503", 503],
+    ["answers 500", 500],
+    ["answers 429", 429],
+    ["answers a generic 400 (P3-A1: no reliable terminal signal)", 400],
+    ["answers a generic 401 (P3-A1)", 401],
+    ["answers a generic 403 (P3-A1)", 403],
+  ])("P3: a status read that %s on a usable transfer keeps it: no new authorization or creation, recoverable copy; once Storage answers, the retry continues from its confirmed offset", async (_label, code) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    status = () => new Response(null, { status: code });
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(authorizations()).toHaveLength(0);
+    expect(uploadsSent()).toHaveLength(0);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(runButton(page)).not.toBeNull(); // P3-A1 (QA): the retry control and the transfer survive the press
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    // the connection then fails outright on the next retry: still kept, still nothing more
+    status = () => { throw new TypeError("Failed to fetch"); };
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    // once Storage answers, the next retry continues from its confirmed 6 MiB on the same transfer
+    status = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(RESUMED);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3: an explicit zero that Storage's own state contradicts is reconciled: the conflicting chunk is followed by a status read, never by a new authorization or creation", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    let once = true;
+    status = () => (once ? ((once = false), statusAnswer("0")()) : null); // the first read says 0; Storage holds 6 MiB
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual([
+      "/api/v1/uploads/finalize", "tus HEAD", "tus PATCH 0", "tus HEAD", "tus PATCH 6291456", "tus PATCH 12582912",
+      "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(conflicts).toBe(1); // Storage refused the chunk from 0 (409); nothing it holds was overwritten
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(authorizations()).toHaveLength(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it.each([400, 401, 403])("P3-A1 (review): mid-resume, a chunk fails and the reconciliation status read answers a generic %s: the transfer is kept, no authorization, recoverable copy; the next press resumes it", async (code) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    drop = "patches-after-first"; // the resumed chunk is lost; status reads reach Storage
+    let reads = 0;
+    status = () => (++reads === 1 ? null : new Response(null, { status: code })); // 6 MiB confirmed, then the generic answer
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD", "tus PATCH 6291456", "tus HEAD"]);
+    expect(authorizations()).toHaveLength(0);
+    expect(uploadsSent()).toHaveLength(0);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(runButton(page)).not.toBeNull();
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    drop = null;
+    status = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(RESUMED);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it.each([400, 401, 403])("P3-A1 (review): in the first pass, a chunk fails and the status read answers a generic %s: unconfirmed (not failed), the transfer is kept; the next press resumes it", async (code) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "patches-after-first"; // the first 6 MiB are stored; the next chunk is lost
+    status = () => new Response(null, { status: code });
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "HEAD"]);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(banner(page)).not.toContain(ANALYZE.uploadFailed);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    const uploadUrl = tus()[1].url;
+    drop = null;
+    status = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(RESUMED);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(authorizations()).toHaveLength(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3-A1 (review): a refusal that persists keeps the transfer while its signature is live; once the signature's known lifetime has passed, the existing replacement applies (one authorization, one creation from byte 0)", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    expiresInSeconds = 61; // usable for 1 s once the page's one-minute margin is taken
+    drop = "after-first";
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "HEAD"]);
+    const first = tus()[1].url;
+    drop = null;
+    status = (r) => (r.url === first ? new Response(null, { status: 403 }) : null);
+    sent = [];
+    await startRun(page); // still live: kept
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 2_000); // the 1 s lifetime has passed
+    try {
+      sent = [];
+      await startRun(page);
+      expect(sent.map(p3Label)).toEqual([
+        "/api/v1/uploads/finalize", "/api/v1/uploads/authorize", "tus POST", "tus PATCH 0", "tus PATCH 6291456",
+        "tus PATCH 12582912", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+      ]);
+      expect(tus().some((r) => r.url === first)).toBe(false);
+      expect(page.text()).toContain("Analysis Complete");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("P3-A1: a status answer of 204 with a valid offset is read like a 200: the retry continues from it on the same transfer", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    status = () => new Response(null, { status: 204, headers: { "Upload-Offset": String(CHUNK), "Upload-Length": String(P3_SIZE) } });
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(RESUMED);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(authorizations()).toHaveLength(0);
+    expect(Array.from(transfers.values())).toEqual([{ offset: P3_SIZE, length: P3_SIZE }]);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it.each([
+    ["no Upload-Offset", null],
+    ["an empty Upload-Offset", ""],
+    ["a decimal point", "6291456.0"],
+    ["a minus sign", "-1"],
+    ["a hexadecimal prefix", "0x600000"],
+    ["a value past the clip's length", String(13 * 1_048_576 + 1)],
+  ])("P3-A1: a status answer of 204 with %s is not a position: the transfer is kept and nothing more is sent", async (_label, value) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    status = () => new Response(null, { status: 204, headers: value === null ? { "Upload-Length": String(P3_SIZE) } : { "Upload-Offset": value, "Upload-Length": String(P3_SIZE) } });
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(authorizations()).toHaveLength(0);
+    expect(uploadsSent()).toHaveLength(0);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+  });
+
+  it("P3-A1: a status answer of 204 with an explicit zero is a position: when Storage holds nothing yet, the retry sends the clip from byte 0 on the same transfer", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "all";
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "HEAD"]);
+    const uploadUrl = tus()[1].url;
+    drop = null;
+    status = () => new Response(null, { status: 204, headers: { "Upload-Offset": "0", "Upload-Length": String(P3_SIZE) } });
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual([
+      "/api/v1/uploads/finalize", "tus HEAD", "tus PATCH 0", "tus PATCH 6291456", "tus PATCH 12582912",
+      "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(patchesFrom(uploadUrl)).toEqual(["0", "6291456", "12582912"]);
+    expect(authorizations()).toHaveLength(0);
+    expect(conflicts).toBe(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3: an explicit zero is a position: when Storage confirms it holds nothing yet, the retry sends the clip from byte 0 on the same transfer", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "all"; // even the first chunk is lost before Storage stored it, and so is the status read
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "HEAD"]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: 0, length: P3_SIZE }]);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    const uploadUrl = tus()[1].url;
+    drop = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual([
+      "/api/v1/uploads/finalize", "tus HEAD", "tus PATCH 0", "tus PATCH 6291456", "tus PATCH 12582912",
+      "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(patchesFrom(uploadUrl)).toEqual(["0", "6291456", "12582912"]);
+    expect(authorizations()).toHaveLength(0);
+    expect(conflicts).toBe(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it.each([
+    [404, "gone"], [410, "gone"],
+  ])("P3: a transfer Storage confirmed gone (%s: %s) is replaced through the existing flow: one new authorization and creation, the clip from byte 0, the same upload id", async (code) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl, uploadId } = await firstPressStoresSixMiB(page);
+    status = (r) => (r.url === uploadUrl ? new Response(null, { status: code }) : null);
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual([
+      "/api/v1/uploads/finalize", "tus HEAD", "/api/v1/uploads/authorize", "tus POST", "tus PATCH 0", "tus PATCH 6291456",
+      "tus PATCH 12582912", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    const replacement = tus().find((r) => r.method === "PATCH")!.url;
+    expect(replacement).not.toBe(uploadUrl);
+    expect(patchesFrom(replacement)).toEqual(["0", "6291456", "12582912"]);
+    expect((JSON.parse(authorizations()[0].body!) as { uploadId: string }).uploadId).toBe(uploadId);
+    expect(finalizeIds()).toEqual([uploadId, uploadId]);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3: once the signature's lifetime has passed, the existing replacement flow applies without a status read of the old transfer", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    expiresInSeconds = 60; // usable for 0 s once the page's one-minute margin is taken
+    drop = "after-first";
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "HEAD"]);
+    const first = tus()[1].url;
+    drop = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual([
+      "/api/v1/uploads/finalize", "/api/v1/uploads/authorize", "tus POST", "tus PATCH 0", "tus PATCH 6291456",
+      "tus PATCH 12582912", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(tus().some((r) => r.url === first)).toBe(false);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it.each([
+    ["names a position past the chunk's end", (o: number, n: number): string | null => String(o + n + 1)],
+    ["names a position inside the chunk", (o: number, n: number): string | null => String(o + n - 1)],
+    ["names the chunk's start (no progress)", (o: number): string | null => String(o)],
+    ["has an empty offset", (): string | null => ""],
+    ["has no offset", (): string | null => null],
+  ])("P3: a chunk acknowledgement that %s does not confirm the chunk: a status read decides where the next chunk starts", async (_label, ackOf) => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    ack = ackOf;
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "HEAD", "PATCH 6291456", "PATCH 12582912"]);
+    expect(conflicts).toBe(0); // no chunk was sent from a position Storage did not confirm
+    expect(Array.from(transfers.values())).toEqual([{ offset: P3_SIZE, length: P3_SIZE }]);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3: a contradicting acknowledgement whose status read confirms no position stops the pass: the transfer is kept and nothing more is sent", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    ack = (o, n) => String(o + n + 1);
+    status = statusAnswer(null);
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "HEAD"]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    expect(videoInserts()).toHaveLength(0);
+    expect(runButton(page)).not.toBeNull();
+  });
+
+  it("P3 (review): the retries of one pass are bounded: a chunk that keeps failing at a confirmed position is tried 4 times with 3 status reads, then the pass stops with the transfer kept; the next press resumes it", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "patches-after-first"; // every chunk after the first is lost; Storage's status reads answer (6 MiB)
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "HEAD", "PATCH 6291456", "HEAD", "PATCH 6291456", "HEAD", "PATCH 6291456"]);
+    expect(banner(page)).toContain(ANALYZE.uploadFailed); // the position is known: the existing copy
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    const uploadUrl = tus()[1].url;
+    drop = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(RESUMED);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(authorizations()).toHaveLength(0);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3 (review): the last chunk is stored but its acknowledgement and the status read are lost: the next press asks finalize first, which proves the object, and sends nothing to Storage", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "last-ack";
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "PATCH 12582912", "HEAD"]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: P3_SIZE, length: P3_SIZE }]); // all stored
+    expect(banner(page)).toContain(ANALYZE.uploadUnconfirmed);
+    drop = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing"]);
+    expect(tus()).toEqual([]);
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3 (review): an account change noticed at the resume's status read stops it: no chunk is sent, the account-changed copy shows", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    status = () => {
+      shared.emit("SIGNED_IN", sessionOf(B)); // B's session appears while A's status read is answered (6 MiB)
+      return null;
+    };
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(tus().every((r) => r.url === uploadUrl)).toBe(true);
+    expect(banner(page)).toContain(ANALYZE.changed);
+    // the page is now B's: a further press sends nothing at all (A's transfer is never touched again)
+    status = null;
+    sent = [];
+    await startRun(page);
+    expect(sent).toEqual([]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+  });
+
+  it("P3 (review 2): an account change noticed in a failed chunk's answer stops the pass before the reconciliation status read", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "after-first";
+    onDrop = () => shared.emit("SIGNED_IN", sessionOf(B)); // B's session appears while A's second chunk fails
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456"]); // no status read of A's transfer after the change
+    expect(banner(page)).toContain(ANALYZE.changed);
+  });
+
+  it("P3 (review 2): leaving the page while the replacement's owner check is pending sends no authorization", async () => {
+    const { page, session } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    await firstPressStoresSixMiB(page);
+    status = () => {
+      shared.auto.held = 1; // the next session read — the replacement authorize's owner check — is held
+      return new Response(null, { status: 404 }); // Storage confirms the transfer gone: replacement
+    };
+    sent = [];
+    press(runButton(page));
+    await settle(page, 40);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    page.unmount();
+    rt.dirty = false;
+    shared.sessionReads.at(-1)!.resolve({ data: { session }, error: null });
+    await settle(page, 80);
+    expect(authorizations()).toHaveLength(0);
+    expect(uploadsSent()).toHaveLength(0);
+  });
+
+  it("P3 (review): when the page's account can no longer be confirmed, that refusal outranks the unconfirmed-upload copy", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    installP3Network();
+    drop = "after-first";
+    beforeHead = () => browserHolds(refusedRead()); // the session read after the lost status read is refused
+    sent = [];
+    await startRun(page);
+    expect(tusTrace()).toEqual(["POST", "PATCH 0", "PATCH 6291456", "HEAD"]);
+    expect(banner(page)).toContain(ANALYZE.unconfirmed);
+    expect(banner(page)).not.toContain(ANALYZE.uploadUnconfirmed);
+  });
+
+  it("P3 (review): a transfer confirmed gone whose replacement finds the account unconfirmed sends no authorization; once confirmed, the next press authorizes a new transfer without touching the old one", async () => {
+    const { page, session } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    const { uploadUrl } = await firstPressStoresSixMiB(page);
+    status = (r) => {
+      if (r.url !== uploadUrl) return null;
+      browserHolds(refusedRead()); // the owner check before authorize is refused
+      return new Response(null, { status: 404 });
+    };
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(banner(page)).toContain(ANALYZE.unconfirmed);
+    browserHolds(session);
+    status = null;
+    sent = [];
+    await startRun(page);
+    expect(sent.map(p3Label)).toEqual([
+      "/api/v1/uploads/finalize", "/api/v1/uploads/authorize", "tus POST", "tus PATCH 0", "tus PATCH 6291456",
+      "tus PATCH 12582912", "/api/v1/uploads/finalize", "/api/v1/analyses", "/api/analyze-swing",
+    ]);
+    expect(tus().some((r) => r.url === uploadUrl)).toBe(false); // the gone transfer was dropped
+    expect(page.text()).toContain("Analysis Complete");
+  });
+
+  it("P3 (review): leaving the page while the resume's status read is pending sends nothing more", async () => {
+    const { page } = await analyzeWithClubsFor(A);
+    withLargeVideo(page);
+    await firstPressStoresSixMiB(page);
+    const gate = deferred<Response | null>();
+    status = () => gate.promise;
+    sent = [];
+    press(runButton(page));
+    await settle(page, 40);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    page.unmount();
+    rt.dirty = false;
+    gate.resolve(statusAnswer(String(CHUNK))()); // Storage answers after the golfer left: 6 MiB
+    await settle(page, 80);
+    expect(sent.map(p3Label)).toEqual(["/api/v1/uploads/finalize", "tus HEAD"]);
+    expect(Array.from(transfers.values())).toEqual([{ offset: CHUNK, length: P3_SIZE }]);
+    expect(rt.pushes).toEqual([]);
   });
 
 });

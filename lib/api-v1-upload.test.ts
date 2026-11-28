@@ -622,7 +622,11 @@ describe("frozen read-only dependencies", () => {
     // key and V1 finalize (with the clip's display name and trim), the admission declaration, and 202 -> the report.
     // AG-WEB-READY-10-P2-A1 (retargeted): the first transfer uses the V1 authorize answer and its scoped signed transport
     // (resumable, path-scoped signature), resumed from the server's offset for a repeat; finalize decides a stored key.
-    ["app/(dashboard)/analyze/page.tsx", "95dac107e7af5d17fd989afc7c3a79bb8181726eae70afdb07a152bfa4280d6b"],
+    // AG-WEB-READY-10-P3 (retargeted): a resume position counts only when Storage states it explicitly (an absent,
+    // empty or malformed Upload-Offset is no position); an unknown position keeps the transfer and sends nothing more.
+    // AG-WEB-READY-10-P3-A1 (retargeted): a generic 400/401/403 status answer keeps the transfer (only 404/410 or the
+    // signature's known expiry replace it); a 204 status answer is read like a 200.
+    ["app/(dashboard)/analyze/page.tsx", "4bde41cf4debdcaeb5f71a645aaab4480d41e12ff2596e7ae6114480f19d08e3"],
     ["app/(dashboard)/analyze/SwingUploader.tsx", "745dab9ed8261b0b24d1ba7055f27026d57afdf1663cdcd55cb36a0539b8fdf5"],
     // ENT-1D video sources: video_url records the canonical key, never a public URL.
     // ENT-1D video sources: canonical file name before upload (video_url already records the key).
