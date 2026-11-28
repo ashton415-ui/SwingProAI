@@ -1,8 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
+import { acquireDrillHubSession, clientForDrillHubSession, drillHubSessionUserId } from "@/lib/drill-hub-session";
+import { sessionEndPending } from "@/utils/supabase/session-publication";
 import type { ClubType } from "@/components/swing/VirtualBag";
 import type { ClubDesignation } from "@/types/database";
 import {
@@ -65,6 +68,32 @@ type UserEquipmentInsert = {
   is_primary: boolean;
 };
 
+/**
+ * A2. What the golfer is told when a club could not be added. Fixed text: no SDK, database or provider wording, error
+ * name or code ever reaches the page, and every message says whether the club was added and what to do. The entered
+ * details stay in the form in every case.
+ */
+const ADD_CLUB_COPY = {
+  signedOut: "You're signed out, so this club wasn't added. Sign in again to add it to your bag.",
+  unconfirmed:
+    "We couldn't confirm which account is signed in on this device, so this club wasn't added. Your details are still here — try again, or sign in again.",
+  unavailable:
+    "We couldn't check your sign-in just now, so this club wasn't added. Your details are still here — try again in a moment.",
+  accountChanged:
+    "This browser is now signed in to a different account, so this club wasn't added. Refresh the page to add clubs for the account that's signed in now.",
+  refused: "Your sign-in wasn't accepted for this change, so this club wasn't added. Refresh the page, then try again.",
+  failed: "We couldn't add this club right now. Your details are still here — try again in a moment.",
+  unknown: "We couldn't tell whether this club was added. Check your bag before you add it again.",
+  addedThenChanged:
+    "This club was added, but this browser's sign-in changed meanwhile. Refresh the page to see the bag for the account that's signed in now.",
+} as const;
+
+/** The one action offered with a message (a link or a reload; never an automatic retry). */
+type AddClubAction = "sign_in" | "refresh" | "bag" | null;
+
+/** How long the add request may run before its outcome is reported as unknown (it may still have been stored). */
+const ADD_CLUB_DEADLINE_MS = 15_000;
+
 /** Byte comparison, so ordering never varies with the browser's ICU data. */
 function compareStrings(a: string, b: string): number {
   if (a < b) return -1;
@@ -76,6 +105,37 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorAction, setErrorAction] = useState<AddClubAction>(null);
+  // A2. Set synchronously: a second press (or Enter) before React re-renders the disabled button adds nothing more.
+  const submittingRef = useRef(false);
+  // A2. False once the form has left the page: an add still running then shows nothing and navigates nowhere.
+  const mountedRef = useRef(true);
+  // A2. Identity generation, bumped when the browser signs out or now belongs to another account than this form was
+  // rendered for (`userId`): an add started earlier stops at its next step, and one that finishes afterwards does not
+  // present itself as the current account's result.
+  const identityRef = useRef(0);
+  const identityEndRef = useRef<"signed_out" | "account_changed" | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    let unsubscribe = () => {};
+    try {
+      const { data } = createClient().auth.onAuthStateChange((event, session) => {
+        const seen = drillHubSessionUserId(session);
+        const why = event === "SIGNED_OUT" ? "signed_out" : seen !== null && seen !== userId ? "account_changed" : null;
+        if (why === null) return;
+        identityRef.current += 1;
+        identityEndRef.current = why;
+      });
+      unsubscribe = () => data.subscription.unsubscribe();
+    } catch {
+      // no events: the confirmation made before every add still decides
+    }
+    return () => {
+      mountedRef.current = false;
+      unsubscribe();
+    };
+  }, [userId]);
 
   const options = catalog.status === "ready" ? catalog.options : [];
 
@@ -163,7 +223,9 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current) return; // an add is already running (or has succeeded and is navigating)
     setError(null);
+    setErrorAction(null);
 
     // Two disjoint literals. Neither spreads `form`, and each names every
     // identity-bearing column, so a value belonging to the other mode cannot
@@ -226,16 +288,76 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
       };
     }
 
+    submittingRef.current = true;
     setLoading(true);
-
-    const supabase = createClient();
-    const { error: err } = await supabase.from("user_equipment").insert(payload);
-
-    if (err) {
-      setError(err.message);
+    const generation = identityRef.current;
+    /** Ends this attempt with fixed copy; the entered details stay and Add to Bag works again. */
+    const stop = (message: string, action: AddClubAction) => {
+      submittingRef.current = false;
+      if (!mountedRef.current) return;
+      setError(message);
+      setErrorAction(action);
       setLoading(false);
+    };
+    const identityChanged = () =>
+      identityEndRef.current === "signed_out"
+        ? stop(ADD_CLUB_COPY.signedOut, "sign_in")
+        : stop(ADD_CLUB_COPY.accountChanged, "refresh");
+
+    // A2. Confirm who is signed in before anything is sent: the club is added only for the account this form was
+    // rendered for, with that account's confirmed session. A refused read (unconfirmed), a failed one (unavailable) or
+    // no session (signed out) sends nothing, and none of them is shown as SDK text.
+    const acquired = await acquireDrillHubSession(createClient);
+    if (!mountedRef.current) {
+      submittingRef.current = false;
       return;
     }
+    if (identityRef.current !== generation) return identityChanged();
+    if (acquired.status === "signed_out") return stop(ADD_CLUB_COPY.signedOut, "sign_in");
+    if (acquired.status !== "ready") {
+      return acquired.unconfirmed === true
+        ? stop(ADD_CLUB_COPY.unconfirmed, "sign_in")
+        : stop(ADD_CLUB_COPY.unavailable, null);
+    }
+    if (acquired.session.userId !== userId) return stop(ADD_CLUB_COPY.accountChanged, "refresh");
+    // A session the server already ended (its removal from this browser is still pending) adds nothing: its access
+    // token is still signature-valid, but its owner ended it.
+    const ended = await sessionEndPending({ access_token: acquired.session.accessToken });
+    if (!mountedRef.current) {
+      submittingRef.current = false;
+      return;
+    }
+    if (ended) return stop(ADD_CLUB_COPY.signedOut, "sign_in");
+    if (identityRef.current !== generation) return identityChanged();
+
+    // The add carries exactly the confirmed session's access token: no anonymous fallback, never another account's
+    // session (a client bound to that one session; RLS still decides). Bounded: an add that does not answer in time is
+    // reported as unknown — it may have been stored — never as failed.
+    const bound = clientForDrillHubSession(acquired.session, process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), ADD_CLUB_DEADLINE_MS);
+    let outcome: "added" | "refused" | "failed" | "unknown";
+    try {
+      const { error: err, status } = await bound.from("user_equipment").insert(payload).abortSignal(deadline.signal);
+      // no answer in time, or a request that never got an answer (status 0: it may still have been stored), is unknown
+      outcome = deadline.signal.aborted || (err && status === 0) ? "unknown"
+        : !err ? "added" : status === 401 || status === 403 || err.code === "42501" ? "refused" : "failed";
+    } catch {
+      outcome = deadline.signal.aborted ? "unknown" : "failed";
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!mountedRef.current) {
+      submittingRef.current = false;
+      return; // the form left the page meanwhile: nothing is shown and nowhere is navigated
+    }
+    if (outcome === "unknown") return stop(ADD_CLUB_COPY.unknown, "bag");
+    if (outcome === "refused") return stop(ADD_CLUB_COPY.refused, "refresh");
+    if (outcome === "failed") return stop(ADD_CLUB_COPY.failed, null);
+    // Added for the account this form was rendered for. If the browser's sign-in changed meanwhile, that is said
+    // instead of continuing into the bag as if it were the current account's.
+    if (identityRef.current !== generation) return stop(ADD_CLUB_COPY.addedThenChanged, "refresh");
 
     router.push("/bag");
     router.refresh();
@@ -459,23 +581,40 @@ export default function AddClubForm({ userId, catalog }: AddClubFormProps) {
       </div>
 
       {error && (
-        <p className="text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-xl px-4 py-3">
-          {error}
-        </p>
+        <div role="alert" className="text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-xl px-4 py-3">
+          <p>{error}</p>
+          {errorAction === "sign_in" && (
+            <Link href="/login" className="mt-2 inline-flex items-center min-h-11 font-semibold text-white underline">
+              Sign in again
+            </Link>
+          )}
+          {errorAction === "bag" && (
+            <Link href="/bag" className="mt-2 inline-flex items-center min-h-11 font-semibold text-white underline">
+              Check your bag
+            </Link>
+          )}
+          {errorAction === "refresh" && (
+            <button type="button" onClick={() => window.location.reload()}
+              className="mt-2 inline-flex items-center min-h-11 font-semibold text-white underline">
+              Refresh page
+            </button>
+          )}
+        </div>
       )}
 
       <div className="flex gap-3 pt-2">
         <button
           type="button"
           onClick={() => router.back()}
-          className="flex-1 px-4 py-2.5 rounded-xl border border-white/10 text-sm font-medium text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+          className="flex-1 min-h-11 px-4 py-2.5 rounded-xl border border-white/10 text-sm font-medium text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={loading}
-          className="flex-1 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-sm font-semibold text-white transition-colors"
+          aria-busy={loading}
+          className="flex-1 min-h-11 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-sm font-semibold text-white transition-colors"
         >
           {loading ? "Adding…" : "Add to Bag"}
         </button>

@@ -32,6 +32,11 @@ import {
  * No probe write, no privileged client, no schema change. No automatic retry anywhere: the provider
  * client is built with `maxRetries: 0`, and every read uses `.retry(false)` (installed postgrest-js
  * retries GETs by default). Membership: the owner chose no new gate (OD-1), so no tier is read.
+ *
+ * Ownership (AG-WEB-READY-05-G1): both entry points require the account the page was rendered for and refuse, before any
+ * goal read or write and before the provider is constructed or called, when the verified caller is not that account. The
+ * intent only restricts the verified caller; it is never identity, credentials or a query target (see "rendered-owner
+ * intent").
  */
 
 // ── engineering values (AG-PLAN-01-R1 §7: offline candidate inputs, not hosted evidence) ─────────────
@@ -72,7 +77,10 @@ export type GenerationOutcome =
   | "invalid_input"
   | "time_insufficient"
   | "provider_not_configured"
-  | "provider_failed";
+  | "provider_failed"
+  // AG-WEB-READY-05-G1: refused before any goal or provider work (see "rendered-owner intent" below)
+  | "owner_mismatch"
+  | "owner_intent_invalid";
 export type SubmitOutcome = GenerationOutcome | "goal_save_failed" | "goal_save_unconfirmed";
 
 /** What the plan view shows after an attempt: the persisted plan, no plan, the unreadable state, the
@@ -119,6 +127,8 @@ export const PLAN_COPY = {
   invalid_miss: "Choose one of the listed misses.",
   invalid_goal: `Keep your goal to ${TARGET_GOAL_MAX} characters or fewer.`,
   invalid_stored: "Your saved answers can't be used for a plan. Set new goals to build one.",
+  owner_mismatch: "This page was opened for a different account than the one signed in now, so nothing was saved or generated. Reload the page to continue with the account that's signed in.",
+  owner_intent_invalid: "This page is out of date, so nothing was saved or generated. Reload the page to continue.",
 } as const;
 
 // ── answers ───────────────────────────────────────────────────────────────────────────────────────────
@@ -287,6 +297,44 @@ async function classifiedRead(run: () => PromiseLike<GoalReadResponse>): Promise
 
 const refusal = (outcome: GenerationOutcome, message: string): GenerationResult => ({ outcome, message, display: "keep", plan: null, observed: false });
 
+// ── rendered-owner intent (AG-WEB-READY-05-G1) ────────────────────────────────────────────────────────
+
+/**
+ * Both entry points act only for the account the page was rendered for. Its client sends that account (the server-verified
+ * owner the dashboard layout rendered: the form as exactly one EXPECTED_OWNER_FIELD entry, the plan view as
+ * generateSyllabus's one argument). It is untrusted intent, never credential authority: it is checked here, then compared
+ * with the caller Auth has just verified, and if they differ nothing is read, written, constructed or called and no goal or
+ * plan data is returned. It never selects a client, a row, a token or an account, and nothing looks it up: every step after
+ * the comparison runs as that same verified caller, and identity is never resolved again.
+ * - Required at runtime: absent, non-text, padded, empty, duplicated or otherwise malformed intent is refused
+ *   (owner_intent_invalid) before Auth is asked. There is no default owner and no fallback to the cookie's account: a client
+ *   that sends none (including a page loaded before this change) gets the fixed fresh-page guidance and nothing is done.
+ * - A different verified caller is refused (owner_mismatch) after Auth answers — that one verification is the only request.
+ * - The same account with a refreshed or newer session is the same owner. A request verified as one account before the
+ *   browser signs in to another finishes as the account it was verified as.
+ * - Logged as the outcome code only; neither account id is logged.
+ */
+export const EXPECTED_OWNER_FIELD = "expected_owner_id";
+
+/** One canonical UUID in text (8-4-4-4-12 hex, either case), normalised to lower case — the form verified Auth user ids
+ *  have. Anything else (absent, null, a number, an object, a File, empty, padded, braced or unhyphenated text) is null. */
+export function normalizeOwnerId(value: unknown): string | null {
+  return typeof value === "string" && UUID.test(value) ? value.toLowerCase() : null;
+}
+
+/** The form's intent: exactly one EXPECTED_OWNER_FIELD entry holding a canonical UUID; none, several or a File is null. */
+function formOwnerIntent(formData: unknown): string | null {
+  if (!(formData instanceof FormData)) return null;
+  const entries = formData.getAll(EXPECTED_OWNER_FIELD);
+  return entries.length === 1 ? normalizeOwnerId(entries[0]) : null;
+}
+
+/** Whether the verified caller is the rendered owner (both normalised; a verified id not in that form never matches). */
+function isExpectedOwner(intent: string, caller: Verified): boolean {
+  const actual = normalizeOwnerId(caller.userId);
+  return actual !== null && actual === intent;
+}
+
 // ── generation steps 6–10 for a known goal row ────────────────────────────────────────────────────────
 
 async function generateForRow(
@@ -394,8 +442,8 @@ async function generateForRow(
 
 // ── public entry points (called only by the two Server Actions) ───────────────────────────────────────
 
-/** Generate or regenerate the plan for the golfer's latest goal. */
-export async function generateGoalPlan(): Promise<GenerationResult> {
+/** Generate or regenerate the plan for the golfer's latest goal — only for the account the plan view was rendered for. */
+export async function generateGoalPlan(expectedOwnerId: unknown): Promise<GenerationResult> {
   const t0 = now();
   const log: Log = { action: "generate", outcome: "not_authenticated", entitlementGate: "none", providerCalled: false, totalMs: 0, requestId: crypto.randomUUID() };
   const finish = (result: GenerationResult) => {
@@ -405,9 +453,15 @@ export async function generateGoalPlan(): Promise<GenerationResult> {
     return result;
   };
 
+  // G1: the rendered owner is required; without a well-formed one nothing is done (not even an Auth request)
+  const intent = normalizeOwnerId(expectedOwnerId);
+  if (intent === null) return finish(refusal("owner_intent_invalid", PLAN_COPY.owner_intent_invalid));
+
   const who = await identity();
   if (!who.ok) return finish(refusal(who.outcome, PLAN_COPY[who.outcome]));
   const { caller } = who;
+  // G1: before any goal read and before the provider is constructed or called, the verified caller must be the rendered owner
+  if (!isExpectedOwner(intent, caller)) return finish(refusal("owner_mismatch", PLAN_COPY.owner_mismatch));
   // 3. membership: OD-1 = no new gate (owner, offline candidate) — nothing is read
 
   // 4. the latest goal, scoped to the verified owner before its id is known
@@ -425,7 +479,8 @@ export async function generateGoalPlan(): Promise<GenerationResult> {
   return finish(await generateForRow(caller, id, checked.answers, t0, log));
 }
 
-/** Save the three answers for the verified golfer, then generate a plan for that new goal row. */
+/** Save the three answers for the verified golfer, then generate a plan for that new goal row — only for the account the
+ *  form was rendered for (its one EXPECTED_OWNER_FIELD entry). */
 export async function submitGoalAnswers(formData: FormData): Promise<SubmitResult> {
   const t0 = now();
   const log: Log = { action: "submit", outcome: "not_authenticated", entitlementGate: "none", providerCalled: false, totalMs: 0, requestId: crypto.randomUUID() };
@@ -437,9 +492,15 @@ export async function submitGoalAnswers(formData: FormData): Promise<SubmitResul
   };
   const notSaved = (outcome: SubmitOutcome, message: string): SubmitResult => ({ outcome, message, display: "keep", plan: null, observed: false, goalSaved: false });
 
+  // G1: the rendered owner is required; without a well-formed one nothing is done (not even an Auth request)
+  const intent = formOwnerIntent(formData);
+  if (intent === null) return finish(notSaved("owner_intent_invalid", PLAN_COPY.owner_intent_invalid));
+
   const who = await identity();
   if (!who.ok) return finish(notSaved(who.outcome, PLAN_COPY[who.outcome]));
   const { caller } = who;
+  // G1: before the answers are inserted and before any provider work, the verified caller must be the rendered owner
+  if (!isExpectedOwner(intent, caller)) return finish(notSaved("owner_mismatch", PLAN_COPY.owner_mismatch));
 
   const checked = parseSubmittedAnswers(formData);
   if (!checked.ok) return finish(notSaved("invalid_input", checked.message));

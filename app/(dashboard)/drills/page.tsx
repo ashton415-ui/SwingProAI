@@ -1,37 +1,44 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 import {
   CheckCircle2, AlertTriangle, Clock, Upload, Loader2,
-  ChevronRight, Zap, Target, RotateCcw, Award,
+  ChevronRight, Zap, Target, RotateCcw, Award, LogIn,
 } from "lucide-react";
-import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { createClient as createSharedBrowserClient } from "@/utils/supabase/client";
+import { watchSessionEnd } from "@/utils/supabase/session-publication";
+import { DRILL_HUB_UNAVAILABLE_COPY, type DrillHubLoader } from "@/lib/golfer-journey-read-state";
 import {
-  createDrillHubLoader, readDrillHub, DRILL_HUB_UNAVAILABLE_COPY, type DrillHubLoader,
-} from "@/lib/golfer-journey-read-state";
+  acquireDrillHubSession, createDrillHubSessionLoader, clientForDrillHubSession, readDrillVerifyResult,
+  drillHubIdentityEnd, drillHubIdentityEndFromEvent, drillHubSessionUserId, drillUploadRefusal, drillVerifyRefusal,
+  DRILL_VERIFY_COPY, DRILL_HUB_IDENTITY_COPY, DRILL_HUB_UNCONFIRMED_COPY, type DrillHubSessionResult,
+  type DrillHubSession, type DrillHubIdentityEnd, type DrillVerifyMessage, type DrillVerifyResult,
+} from "@/lib/drill-hub-session";
 
-// ─── Auth helpers (match analyze/page.tsx pattern) ─────────────────────────────
-function getSessionFromCookie(): { access_token: string; user_id: string } | null {
-  if (typeof document === "undefined") return null;
-  try {
-    const name = `sb-${new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).hostname.split(".")[0]}-auth-token`;
-    const match = document.cookie.split("; ").find((c) => c.startsWith(`${name}=`));
-    if (!match) return null;
-    const parsed = JSON.parse(decodeURIComponent(match.split("=").slice(1).join("=")));
-    return { access_token: parsed.access_token, user_id: parsed.user?.id };
-  } catch { return null; }
+// ─── Session (AG-WEB-READY-01) ─────────────────────────────────────────────────
+// The session comes from the shared browser client, which owns the session cookie (whole or chunked) and refreshes a
+// session that is about to expire. This page never reads a cookie itself (see lib/drill-hub-session.ts).
+function sharedClient() {
+  return createSharedBrowserClient();
 }
 
-function getAuthClient() {
-  const s = getSessionFromCookie();
-  return createSupabaseClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      global: { headers: s ? { Authorization: `Bearer ${s.access_token}` } : {} },
-      auth: { persistSession: false, autoRefreshToken: false },
-    }
-  );
+/** The page's listener for each acquisition's outcome (set while the page is mounted): an unconfirmed sign-in. */
+let noteAcquisition: ((result: DrillHubSessionResult) => void) | null = null;
+
+function currentSession() {
+  return acquireDrillHubSession(sharedClient).then((result) => {
+    noteAcquisition?.(result);
+    return result;
+  });
+}
+
+/**
+ * A client bound to exactly one acquired session: its reads and the upload carry that access token, with no
+ * anonymous fallback and no session storage or Auth client of its own.
+ */
+function clientForSession(session: DrillHubSession) {
+  return clientForDrillHubSession(session, process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
 }
 
 /** Attaches a read's cancellation signal (the client's own `.abortSignal`) without changing the query. */
@@ -53,12 +60,6 @@ interface UserDrill {
   drill_id: string;
   status: "pending" | "submitted" | "verified" | "needs_work";
   latest_ai_feedback: string | null;
-}
-
-interface VerifyResult {
-  pass: boolean;
-  status: "verified" | "needs_work";
-  feedback: string;
 }
 
 // ─── Status helpers ─────────────────────────────────────────────────────────────
@@ -86,38 +87,93 @@ export default function DrillsPage() {
   const [userDrills, setUserDrills] = useState<UserDrill[]>([]);
   // Catalog + progress read state. "unavailable" shows no drills, statuses or
   // counts: unknown progress is never presented as pending or zero verified.
-  const [hubPhase, setHubPhase]       = useState<"loading" | "ready" | "unavailable">("loading");
+  // "signed_out" / "account_changed" (R1): the browser's sign-in ended or now
+  // belongs to another account; nothing of the previous golfer's is shown.
+  const [hubPhase, setHubPhase]       = useState<"loading" | "ready" | "unavailable" | DrillHubIdentityEnd>("loading");
   const [failedLoads, setFailedLoads] = useState(0);
   const [retryRefused, setRetryRefused] = useState(false);
+  const [notSent, setNotSent]         = useState(false);
+  // The last session read was refused because the browser could not confirm its sign-in: say that signing in again helps
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const hubLoaderRef = useRef<DrillHubLoader | null>(null);
   const headingRef   = useRef<HTMLHeadingElement>(null);
+  const endHeadingRef = useRef<HTMLHeadingElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Set once, synchronously, when the hub ends; read after every await so nothing started earlier shows afterwards.
+  const identityEndRef = useRef<DrillHubIdentityEnd | null>(null);
 
   const [selectedId, setSelectedId]       = useState<string | null>(null);
   const [videoFile, setVideoFile]         = useState<File | null>(null);
   const [isVerifying, setIsVerifying]     = useState(false);
-  const [uploadPhase, setUploadPhase]     = useState<"uploading" | "analyzing" | null>(null);
-  const [verifyResult, setVerifyResult]   = useState<VerifyResult | null>(null);
+  const [uploadPhase, setUploadPhase]     = useState<"checking" | "uploading" | "analyzing" | null>(null);
+  const [verifyResult, setVerifyResult]   = useState<DrillVerifyResult | null>(null);
   const [verifyError, setVerifyError]     = useState<string | null>(null);
+  // Set synchronously: a second press before React re-renders the disabled button must not start a second submission.
+  const verifyingRef = useRef(false);
+  // The golfer whose drills and progress are shown (set by the first load that had a session, never changed after).
+  // A session that belongs to anyone else ends the hub instead of mixing into this golfer's list.
+  const hubUserRef = useRef<string | null>(null);
+  // The golfer the browser was last seen signed in as (shared-client events and session checks), so a change that
+  // happens before the first load finishes still ends the hub instead of letting that load show the old golfer.
+  const seenUserRef = useRef<string | null>(null);
+  // The drill on screen now, so a check that finishes after the golfer moved on is not shown under another drill.
+  const selectedIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // ── Sign-out or account change: clear everything at once, for good ────────
+  // The load in flight is cancelled and can never publish; a submission still
+  // running shows nothing when it finishes (it reads identityEndRef after every await).
+  const endIdentity = useCallback((end: DrillHubIdentityEnd, videoNotSent = false) => {
+    if (identityEndRef.current !== null) return;
+    identityEndRef.current = end;
+    hubLoaderRef.current?.dispose();
+    hubLoaderRef.current = null;
+    setDrills([]);
+    setUserDrills([]);
+    setSelectedId(null);
+    setVideoFile(null);
+    setVerifyResult(null);
+    setVerifyError(null);
+    setRetryRefused(false);
+    setNotSent(videoNotSent);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setHubPhase(end);
+  }, []);
+
+  useEffect(() => {
+    noteAcquisition = (result) => setUnconfirmed(result.status === "unavailable" && result.unconfirmed === true);
+    return () => {
+      noteAcquisition = null;
+    };
+  }, []);
 
   // ── Fetch data on mount; "Try again" reuses this loader (reads only) ───────
   useEffect(() => {
-    const loader = createDrillHubLoader<Drill, UserDrill>(
-      (signal) => readDrillHub((readSignal) => {
-        // Progress belongs to a signed-in golfer. Without a readable session the
-        // progress read would run anonymously and return no rows — every drill
-        // "pending", 0 verified — so that is treated as unavailable instead.
-        if (!getSessionFromCookie()) throw new Error("no readable session");
-        const supabase = getAuthClient();
-        // readSignal cancels a read once its companion has failed (or on unmount).
+    const loader = createDrillHubSessionLoader<Drill, UserDrill>(
+      // Progress belongs to a signed-in golfer. Both reads wait for one session
+      // from the shared client and then carry exactly its access token. Without
+      // a usable session neither read starts: an anonymous progress read would
+      // return no rows — every drill "pending", 0 verified.
+      currentSession,
+      (session, readSignal) => {
+        const supabase = clientForSession(session);
+        // readSignal cancels a read once its companion has failed (or on unmount, or when the hub ends).
         return {
           catalog: () => cancellable(supabase.from("drills").select("id, name, target_metric, the_why, the_how, the_feel").eq("drill_family", "full_swing").order("name"), readSignal),
           progress: () => cancellable(supabase.from("user_drills").select("drill_id, status, latest_ai_feedback"), readSignal),
         };
-      }, signal),
+      },
+      () => hubUserRef.current ?? seenUserRef.current,
       (state) => {
+        if (identityEndRef.current !== null) return; // an ended hub's loader is disposed; never restore anything
+        if (state.phase === "signed_out" || state.phase === "account_changed") {
+          endIdentity(state.phase);
+          return;
+        }
         if (state.phase === "ready") {
+          hubUserRef.current = state.userId;
           setDrills(state.drills);
           setUserDrills(state.progress);
           if (state.drills.length > 0) {
@@ -137,15 +193,84 @@ export default function DrillsPage() {
       loader.dispose();
       hubLoaderRef.current = null;
     };
-  }, []);
+  }, [endIdentity]);
 
-  // After a successful retry the Try again button is gone; if focus went with
-  // it, put it on the heading (never pull focus from where the golfer moved it).
+  // ── Notice a sign-out or account change made elsewhere ────────────────────
+  // Events from the shared client (its own sign-outs, including one after a
+  // refresh it could not complete, and other tabs' through the SDK), plus a
+  // fresh session read whenever the golfer comes back to this tab (End Session
+  // in another tab is a server sign-out that sends no event).
   useEffect(() => {
-    if (hubPhase === "ready" && failedLoads > 0 && (!document.activeElement || document.activeElement === document.body)) {
-      headingRef.current?.focus();
+    const check = () => {
+      if (identityEndRef.current !== null) return;
+      void currentSession().then((observed) => {
+        const end = drillHubIdentityEnd(hubUserRef.current ?? seenUserRef.current, observed);
+        if (end !== null) endIdentity(end);
+        else if (observed.status === "ready") seenUserRef.current = observed.session.userId;
+      });
+    };
+    let unsubscribe = () => {};
+    // A2: End Session of the session lineage this hub is signed in with (in this tab or another) ends the hub at once,
+    // also when the SDK's SIGNED_OUT could not be announced (a removal whose lineage record did not land); the end of
+    // any other lineage — a newer sign-in, even of the same golfer — changes nothing here.
+    let stopWatch = () => {};
+    const watchLineage = (session: unknown) => {
+      if (session === null || session === undefined || identityEndRef.current !== null) return;
+      stopWatch();
+      stopWatch = watchSessionEnd(session, () => endIdentity("signed_out"));
+    };
+    try {
+      const { data } = sharedClient().auth.onAuthStateChange((event, session) => {
+        const end = drillHubIdentityEndFromEvent(hubUserRef.current ?? seenUserRef.current, event, session);
+        if (end !== null) {
+          endIdentity(end);
+          return;
+        }
+        const seen = drillHubSessionUserId(session);
+        if (seen !== null) seenUserRef.current = seen;
+        watchLineage(session);
+      });
+      unsubscribe = () => data.subscription.unsubscribe();
+    } catch {
+      // no shared client: the hub's own load reports that as unavailable
     }
+    const onVisible = () => {
+      if (document.visibilityState === "visible") check();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) check();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", check);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      unsubscribe();
+      stopWatch();
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", check);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [endIdentity]);
+
+  // After a successful retry the Try again button is gone, and when the hub
+  // ends whatever had focus is gone; if focus went with it, put it on the
+  // page heading, or on the ended panel's own heading (never pull focus from
+  // where the golfer moved it).
+  useEffect(() => {
+    if (document.activeElement && document.activeElement !== document.body) return;
+    if (hubPhase === "signed_out" || hubPhase === "account_changed") endHeadingRef.current?.focus();
+    else if (hubPhase === "ready" && failedLoads > 0) headingRef.current?.focus();
   }, [hubPhase, failedLoads]);
+
+  // "Submit Another Attempt" goes away with the verdict: once the picker shows its fresh label, keyboard focus goes
+  // there (after the re-render, so the picker is announced with its new label, not the previous file's).
+  const focusPickerRef = useRef(false);
+  useEffect(() => {
+    if (focusPickerRef.current && !verifyResult && !videoFile) {
+      focusPickerRef.current = false;
+      fileInputRef.current?.focus();
+    }
+  }, [verifyResult, videoFile]);
 
   function handleRetryLoad() {
     const started = hubLoaderRef.current?.load() ?? false;
@@ -174,57 +299,113 @@ export default function DrillsPage() {
   // ── Submit video for AI verification ──────────────────────────────────────
   async function handleVerify() {
     if (!videoFile || !selectedId) return;
-
-    const session = getSessionFromCookie();
-    if (!session) { setVerifyError("Not authenticated. Please sign in."); return; }
+    if (verifyingRef.current || identityEndRef.current !== null) return;
+    verifyingRef.current = true;
+    const drillId = selectedId;
+    // Nothing from this submission shows once the hub has ended (signed out, or another account), and an outcome
+    // shows only while the submitted drill is still the one on screen.
+    const show = (message: DrillVerifyMessage) => {
+      if (identityEndRef.current === null && selectedIdRef.current === drillId) setVerifyError(DRILL_VERIFY_COPY[message]);
+    };
 
     setIsVerifying(true);
-    setUploadPhase("uploading");
+    setUploadPhase("checking");
     setVerifyResult(null);
     setVerifyError(null);
 
+    // Which step an unexpected failure interrupted decides the (fixed) message.
+    let step: "session" | "upload" | "check" = "session";
     try {
+      // The current session from the shared client, before anything is uploaded.
+      const acquired = await currentSession();
+      // The hub ended while the sign-in was being checked: nothing was sent, and the panel says so.
+      if (identityEndRef.current !== null) {
+        setNotSent(true);
+        return;
+      }
+      if (acquired.status === "signed_out") {
+        endIdentity("signed_out", true);
+        return;
+      }
+      if (acquired.status !== "ready") {
+        show("sessionUnavailable");
+        return;
+      }
+      const { session } = acquired;
+      // A session that now belongs to someone other than the golfer whose drills are shown ends the hub, unsent.
+      if (session.userId !== hubUserRef.current) {
+        endIdentity("account_changed", true);
+        return;
+      }
+
       // Phase 1 — upload directly to Supabase Storage (bypasses Vercel 4.5 MB limit)
-      const supabase = getAuthClient();
+      step = "upload";
+      setUploadPhase("uploading");
+      const supabase = clientForSession(session);
       const safeFilename = videoFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const storagePath  = `${session.user_id}/${Date.now()}_${safeFilename}`;
+      const storagePath  = `${session.userId}/${Date.now()}_${safeFilename}`;
 
       const { error: uploadErr } = await supabase.storage
         .from("drill_videos")
         .upload(storagePath, videoFile, { contentType: videoFile.type || "video/mp4", upsert: false });
 
-      if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`);
+      if (uploadErr) {
+        // the size limit, an unsupported format and a permission refusal cannot be fixed by trying again
+        show(drillUploadRefusal(uploadErr));
+        return;
+      }
+      // The hub ended during the upload: send no verification request.
+      if (identityEndRef.current !== null) return;
 
       // Phase 2 — send storage path to backend; backend downloads + calls Gemini File API
+      step = "check";
       setUploadPhase("analyzing");
 
       const res = await fetch("/api/verify-drill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ drillId: selectedId, userId: session.user_id, videoStoragePath: storagePath }),
+        body: JSON.stringify({ drillId, userId: session.userId, videoStoragePath: storagePath }),
       });
-      const data = await res.json();
+      const data: unknown = await res.json().catch(() => null);
+      // Only a successful answer of the expected shape is shown; no answer text reaches the golfer otherwise.
+      const result = res.ok ? readDrillVerifyResult(data) : null;
+      if (!result) {
+        // The endpoint refusing its caller may mean the sign-in changed meanwhile: look again before saying anything.
+        if (res.status === 401 || res.status === 403) {
+          const again = await currentSession();
+          if (identityEndRef.current !== null) return;
+          const end = drillHubIdentityEnd(hubUserRef.current, again);
+          if (end !== null) {
+            endIdentity(end);
+            return;
+          }
+        }
+        // no usable answer from a success means the page cannot know whether the check ran
+        show(drillVerifyRefusal(res.ok ? null : res.status));
+        return;
+      }
 
-      if (!res.ok) throw new Error(data.error ?? `Verification failed (${res.status})`);
+      // A verdict that arrives after the hub ended restores nothing: no verdict, no badge.
+      if (identityEndRef.current !== null) return;
+      if (selectedIdRef.current === drillId) setVerifyResult(result);
 
-      const result = data as VerifyResult;
-      setVerifyResult(result);
-
-      // Optimistically update local userDrills state so the list badge refreshes
+      // Optimistically update local userDrills state so the submitted drill's badge refreshes
       setUserDrills((prev) => {
-        const existing = prev.find((ud) => ud.drill_id === selectedId);
+        const existing = prev.find((ud) => ud.drill_id === drillId);
         if (existing) {
           return prev.map((ud) =>
-            ud.drill_id === selectedId
+            ud.drill_id === drillId
               ? { ...ud, status: result.status, latest_ai_feedback: result.feedback }
               : ud
           );
         }
-        return [...prev, { drill_id: selectedId, status: result.status, latest_ai_feedback: result.feedback }];
+        return [...prev, { drill_id: drillId, status: result.status, latest_ai_feedback: result.feedback }];
       });
-    } catch (err) {
-      setVerifyError(err instanceof Error ? err.message : "Verification failed.");
+    } catch {
+      // a check request that failed in transit may still have run: its outcome is unknown, not "try again"
+      show(step === "session" ? "sessionUnavailable" : step === "upload" ? "uploadFailed" : drillVerifyRefusal(null));
     } finally {
+      verifyingRef.current = false;
       setIsVerifying(false);
       setUploadPhase(null);
     }
@@ -295,6 +476,18 @@ export default function DrillsPage() {
               {retryRefused && hubPhase === "unavailable" && (
                 <p role="status" className="text-xs text-gray-400 mt-1 leading-relaxed">{DRILL_HUB_UNAVAILABLE_COPY.stillFinishing}</p>
               )}
+              {unconfirmed && (
+                <p className="text-xs text-gray-300 mt-1 leading-relaxed">
+                  {DRILL_HUB_UNCONFIRMED_COPY.body}{" "}
+                  <Link
+                    href="/login"
+                    prefetch={false}
+                    className="inline-flex items-center min-h-11 min-w-11 underline underline-offset-2 text-white font-bold rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-golf-green"
+                  >
+                    {DRILL_HUB_UNCONFIRMED_COPY.action}
+                  </Link>
+                </p>
+              )}
             </div>
           </div>
           <button
@@ -315,6 +508,41 @@ export default function DrillsPage() {
               </>
             )}
           </button>
+        </div>
+      )}
+
+      {/* Signed out, or another account now (R1): none of the previous golfer's drills, progress or verdicts */}
+      {(hubPhase === "signed_out" || hubPhase === "account_changed") && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4 bg-white/5 border border-white/10 rounded-2xl px-5 py-4">
+          <div role="alert" className="flex items-start gap-3 flex-1 min-w-0">
+            <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+            <div className="min-w-0">
+              <h2 ref={endHeadingRef} tabIndex={-1} className="text-sm font-black text-white rounded focus:outline focus:outline-2 focus:outline-offset-4 focus:outline-golf-green">
+                {DRILL_HUB_IDENTITY_COPY[hubPhase].title}
+              </h2>
+              <p className="text-xs text-gray-300 mt-1 leading-relaxed">{DRILL_HUB_IDENTITY_COPY[hubPhase].body}</p>
+              {notSent && <p className="text-xs text-gray-400 mt-1 leading-relaxed">{DRILL_VERIFY_COPY.notSent}</p>}
+            </div>
+          </div>
+          {hubPhase === "signed_out" ? (
+            <Link
+              href="/login"
+              prefetch={false}
+              className="shrink-0 inline-flex items-center justify-center gap-2 min-h-11 min-w-11 px-5 rounded-2xl bg-golf-green text-golf-dark font-black text-[10px] uppercase tracking-widest transition-colors hover:bg-[#22C55E] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green"
+            >
+              <LogIn size={14} aria-hidden="true" />
+              {DRILL_HUB_IDENTITY_COPY.signed_out.action}
+            </Link>
+          ) : (
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="shrink-0 inline-flex items-center justify-center gap-2 min-h-11 min-w-11 px-5 rounded-2xl border border-white/15 bg-white/5 text-white font-black text-[10px] uppercase tracking-widest transition-colors hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green"
+            >
+              <RotateCcw size={14} aria-hidden="true" />
+              {DRILL_HUB_IDENTITY_COPY.account_changed.action}
+            </button>
+          )}
         </div>
       )}
 
@@ -439,15 +667,31 @@ export default function DrillsPage() {
               )}
 
               {/* Video upload area */}
-              <div className="bg-golf-surface border border-white/5 rounded-4xl p-6">
+              <div className="relative bg-golf-surface border border-white/5 rounded-4xl p-6">
                 <p className="text-[9px] font-black uppercase tracking-widest text-gray-500 mb-4">
                   Submit Practice Video
                 </p>
 
+                {/* The file input stays in the tab order (visually hidden, not display:none): Tab reaches it and
+                    Space or Enter opens the picker; the drop zone below shows its keyboard focus. */}
+                <input
+                  id="drill-video"
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/*"
+                  className="peer sr-only"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    setVideoFile(f);
+                    setVerifyResult(null);
+                    setVerifyError(null);
+                  }}
+                />
+
                 {/* Drop zone */}
                 <label
                   htmlFor="drill-video"
-                  className={`flex flex-col items-center justify-center gap-3 border-2 border-dashed rounded-2xl px-6 py-8 cursor-pointer transition-colors ${
+                  className={`flex flex-col items-center justify-center gap-3 border-2 border-dashed rounded-2xl px-6 py-8 cursor-pointer transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-golf-green ${
                     videoFile
                       ? "border-golf-green/40 bg-golf-green/5"
                       : "border-white/10 hover:border-white/20 hover:bg-white/[0.02]"
@@ -473,30 +717,17 @@ export default function DrillsPage() {
                     </>
                   )}
                 </label>
-                <input
-                  id="drill-video"
-                  ref={fileInputRef}
-                  type="file"
-                  accept="video/mp4,video/quicktime,video/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    setVideoFile(f);
-                    setVerifyResult(null);
-                    setVerifyError(null);
-                  }}
-                />
 
                 {/* Submit button */}
                 <button
                   onClick={handleVerify}
                   disabled={!videoFile || isVerifying}
-                  className="mt-4 w-full flex items-center justify-center gap-2 px-6 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-golf-green text-golf-dark hover:bg-[#22C55E] shadow-[0_0_20px_rgba(74,222,128,0.12)]"
+                  className="mt-4 w-full min-h-11 flex items-center justify-center gap-2 px-6 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-golf-green text-golf-dark hover:bg-[#22C55E] shadow-[0_0_20px_rgba(74,222,128,0.12)]"
                 >
                   {isVerifying ? (
                     <>
                       <Loader2 size={14} className="animate-spin" />
-                      {uploadPhase === "uploading" ? "Uploading Video…" : "AI Coach Analyzing…"}
+                      {uploadPhase === "checking" ? "Checking Sign-in…" : uploadPhase === "uploading" ? "Uploading Video…" : "AI Coach Analyzing…"}
                     </>
                   ) : (
                     <>
@@ -508,7 +739,7 @@ export default function DrillsPage() {
 
                 {/* Verification error */}
                 {verifyError && (
-                  <div className="mt-3 flex items-center gap-2 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-xl">
+                  <div role="alert" className="mt-3 flex items-center gap-2 px-4 py-3 bg-red-500/10 border border-red-500/20 rounded-xl">
                     <AlertTriangle size={13} className="text-red-400 shrink-0" />
                     <p className="text-xs text-red-400">{verifyError}</p>
                   </div>
@@ -517,7 +748,7 @@ export default function DrillsPage() {
 
               {/* AI Verification result */}
               {verifyResult && (
-                <div className={`rounded-4xl border p-6 ${
+                <div role="status" className={`rounded-4xl border p-6 ${
                   verifyResult.pass
                     ? "bg-golf-green/5 border-golf-green/30"
                     : "bg-amber-400/5 border-amber-400/30"
@@ -553,14 +784,16 @@ export default function DrillsPage() {
                   {/* Retry prompt for needs_work */}
                   {!verifyResult.pass && (
                     <button
+                      type="button"
                       onClick={() => {
+                        focusPickerRef.current = true; // this button goes away: focus moves to the picker after the re-render
                         setVerifyResult(null);
                         setVideoFile(null);
                         if (fileInputRef.current) fileInputRef.current.value = "";
                       }}
-                      className="mt-4 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-colors"
+                      className="mt-4 -ml-4 inline-flex items-center gap-2 min-h-11 px-4 rounded-xl text-[10px] font-black uppercase tracking-widest text-amber-400 hover:text-amber-300 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400"
                     >
-                      <RotateCcw size={11} /> Submit Another Attempt
+                      <RotateCcw size={11} aria-hidden="true" /> Submit Another Attempt
                     </button>
                   )}
                 </div>

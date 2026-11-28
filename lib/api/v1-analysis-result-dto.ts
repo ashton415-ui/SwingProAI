@@ -1,3 +1,4 @@
+import type { GolferAttempt, GolferExecution, JobStateRead } from "@/lib/analysis-attempt-precedence";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import type { PersistedPuttingAnalysisV1 } from "@/lib/putting-analysis-contract";
 import {
@@ -157,6 +158,14 @@ export interface AnalysisResultV1 {
     readonly analysis: PersistedPuttingAnalysisV1 | null;
     readonly strokeIndex: PuttingScorePresentationState | null;
   } | null;
+  /**
+   * AG-WEB-READY-10-P2 (additive). The golfer-facing execution state and the current attempt: idle | queued |
+   * processing | complete | failed | interrupted | paused. `status` keeps its existing meaning.
+   * A1: "unavailable" (with `attempt` null) when the durable attempt state could not be read, so a caller can tell an
+   * unreadable status from a confirmed absence of work (`idle`); absent only when the caller supplied no read at all.
+   */
+  readonly execution?: GolferExecution | "unavailable";
+  readonly attempt?: GolferAttempt | null;
 }
 
 const estimate = (value: EstimateInput): SwingEstimateV1 => ({
@@ -171,6 +180,7 @@ const pillar = (value: PillarInput | null | undefined): AnalysisPillarV1 | null 
 export function toAnalysisResultV1(
   view: ResultViewInput,
   access: { readonly puttingAnalysis: boolean },
+  job: JobStateRead | null = null,
 ): AnalysisResultV1 {
   const isPutt = view.analysis_family === "putting";
   const m = view.metrics ?? {};
@@ -249,5 +259,8 @@ export function toAnalysisResultV1(
               : null,
         }
       : null,
+    ...(job === "unavailable"
+      ? { execution: "unavailable" as const, attempt: null }
+      : job ? { execution: job.execution, attempt: job.attempt } : {}),
   };
 }

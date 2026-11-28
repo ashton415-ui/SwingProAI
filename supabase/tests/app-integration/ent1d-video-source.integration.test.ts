@@ -21,14 +21,15 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const provider = vi.hoisted(() => ({ calls: 0, requests: [] as unknown[] }));
-const request = vi.hoisted(() => ({ cookie: null as string | null }));
+const request = vi.hoisted(() => ({ cookie: null as string | null, authorization: null as string | null }));
 vi.mock("server-only", () => ({}));
 vi.mock("next/headers", () => ({
   cookies: () => ({
     get: (name: string) => (request.cookie !== null && name === "sb-127-auth-token" ? { name, value: request.cookie } : undefined),
     getAll: () => [],
   }),
-  headers: () => new Headers(),
+  // AG-WEB-READY-10-P2: the analysis route and V1 upload verify a Bearer token themselves (A4 C1)
+  headers: () => new Headers(request.authorization ? { authorization: request.authorization } : {}),
 }));
 vi.mock("@/lib/gemini-transport", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/gemini-transport")>();
@@ -141,7 +142,8 @@ async function analysisFor(videoId: string, family: "full_swing" | "putting"): P
 }
 
 async function analyze(analysisId: string, body: Record<string, unknown> = {}) {
-  request.cookie = encodeURIComponent(JSON.stringify({ access_token: golfer.accessToken }));
+  request.cookie = null;
+  request.authorization = `Bearer ${golfer.accessToken}`;
   const res = await POST(new NextRequest("http://localhost/api/analyze-swing", { method: "POST", body: JSON.stringify({ analysisId, ...body }) }));
   lastBody = (await res.json()) as Record<string, unknown>;
   return res.status;
@@ -298,6 +300,7 @@ describe.skipIf(process.env.ENT1D_GUARD !== "on")("owner-bound video sources", (
     const awkwardNames = ["x".repeat(300) + ".mp4", "..", "", "../../evil name.mov"];
 
     it("the legacy server action: signed upload, then its swing_videos insert is accepted for awkward names", async () => {
+      request.authorization = null; // the server action reads only the cookie session
       request.cookie = encodeURIComponent(JSON.stringify({ access_token: golfer.accessToken }));
       for (const name of awkwardNames) {
         const signed = await getSignedUploadUrl(name, "video/mp4");
@@ -319,7 +322,8 @@ describe.skipIf(process.env.ENT1D_GUARD !== "on")("owner-bound video sources", (
     });
 
     it("POST /api/v1/upload stores and records a canonical key for awkward names", async () => {
-      request.cookie = encodeURIComponent(JSON.stringify({ access_token: golfer.accessToken }));
+      request.cookie = null;
+      request.authorization = `Bearer ${golfer.accessToken}`;
       for (const name of awkwardNames) {
         const form = new FormData();
         form.append("file", new File([SYNTHETIC_VIDEO], name, { type: "video/mp4" }));

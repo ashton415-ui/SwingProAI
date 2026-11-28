@@ -231,11 +231,14 @@ const inserts = () => h.rec.queries.filter((q) => q.method === "insert") as unkn
 const reads = () => h.rec.queries.filter((q) => q.method === "select") as unknown as Q[];
 const eqOf = (q: Q) => Object.fromEntries(q.ops.filter((o) => o[0] === "eq").map((o) => [o[1], o[2]]));
 let logs: string[];
+// AG-WEB-READY-05-G1: every valid call carries the rendered owner, which here is the verified golfer (USER); the ownership
+// refusals themselves are tested in lib/goal-plan-owner-intent.test.ts
 const form = (over: Partial<Record<"handicap_baseline" | "primary_miss" | "target_goal", string>> = {}) => {
   const fd = new FormData();
   fd.set("handicap_baseline", over.handicap_baseline ?? "12.4");
   fd.set("primary_miss", over.primary_miss ?? "Slice");
   fd.set("target_goal", over.target_goal ?? ANSWER_TEXT);
+  fd.set("expected_owner_id", USER);
   return fd;
 };
 const seed = (ai_syllabus: unknown = V, over: Partial<Row> = {}) => {
@@ -271,25 +274,25 @@ afterEach(() => {
 describe("controls and preserved properties: what the golfer is shown follows what is stored", () => {
   it("[behavior] a write that changes nothing: the generated plan is never presented; the stored plan is", async () => {
     sc.write = "zero";
-    const r = (await generateSyllabus()) as unknown as AnyResult;
+    const r = (await generateSyllabus(USER)) as unknown as AnyResult;
     expect(shownPlan(r)?.summary).not.toBe(G.summary);
     expect(shownPlan(r)?.summary).toBe(V.summary);
   });
 
   it("[behavior] a write path that stores something else: the stored content is shown, not the generated plan", async () => {
     sc.write = "transform";
-    const r = (await generateSyllabus()) as unknown as AnyResult;
+    const r = (await generateSyllabus(USER)) as unknown as AnyResult;
     expect(shownPlan(r)?.summary).toBe(Q.summary);
   });
 
   it("[behavior] a lost readback: no unconfirmed plan is presented", async () => {
     sc.readback = "error";
-    const r = (await generateSyllabus()) as unknown as AnyResult;
+    const r = (await generateSyllabus(USER)) as unknown as AnyResult;
     expect(shownPlan(r)).toBeNull();
   });
 
   it("[behavior] after a successful write the stored row is read back, by id and the verified owner, without library retries", async () => {
-    await generateSyllabus();
+    await generateSyllabus(USER);
     const all = h.rec.queries as unknown as Q[];
     const writeAt = all.findIndex((q) => q.method === "update");
     const readback = all.slice(writeAt + 1).find((q) => q.method === "select" && "id" in eqOf(q));
@@ -300,20 +303,20 @@ describe("controls and preserved properties: what the golfer is shown follows wh
   });
 
   it("[behavior] every read is built with .retry(false) (installed postgrest-js retries GETs by default)", async () => {
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(reads().length).toBeGreaterThan(0);
     for (const q of reads()) expect(q.ops).toContainEqual(["retry", false]);
   });
 
   it("[behavior] the plan update is filtered by the row id and the verified owner, and writes only ai_syllabus", async () => {
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(updates()).toHaveLength(1);
     expect(eqOf(updates()[0])).toEqual({ id: GOAL, user_id: USER });
     expect(Object.keys(updates()[0].payload!)).toEqual(["ai_syllabus"]);
   });
 
   it("[behavior] the provider client is built with no SDK retries, the chosen timeout and warn-level SDK logging; the call carries an abort signal", async () => {
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(h.rec.ctor).toHaveLength(1);
     expect(h.rec.ctor[0].maxRetries).toBe(0);
     expect(h.rec.ctor[0].timeout).toBe(11_000);
@@ -331,13 +334,13 @@ describe("controls and preserved properties: what the golfer is shown follows wh
 
   it("[behavior] a finish other than 'stop' (length) is not written", async () => {
     h.env.provider = answer(G, "length");
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(updates()).toHaveLength(0);
   });
 
   it("[behavior] provider error text never reaches the golfer", async () => {
     h.env.provider = failWith(new Error(RAW_PROVIDER));
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(JSON.stringify(r)).not.toMatch(RAW);
   });
 
@@ -358,7 +361,7 @@ describe("controls and preserved properties: what the golfer is shown follows wh
   it("[behavior] no personal data, answers, plan content or raw text in logs", async () => {
     await submitGoals(form());
     sc.write = "error";
-    await generateSyllabus();
+    await generateSyllabus(USER);
     const all = logs.join("\n");
     for (const forbidden of [EMAIL, FULL_NAME, USER, ANSWER_TEXT, G.summary, "Gate Drill G", RAW_DB]) expect(all).not.toContain(forbidden);
   });
@@ -376,19 +379,19 @@ describe("controls and preserved properties: what the golfer is shown follows wh
 
   it("[behavior] the session expires within the call window: the provider is not called", async () => {
     h.env.expInSec = 5;
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(h.rec.calls).toHaveLength(0);
   });
 
   it("[behavior] a token without a numeric exp: the provider is not called", async () => {
     h.env.expInSec = "text";
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(h.rec.calls).toHaveLength(0);
   });
 
   it("[behavior] the function budget runs out during the earlier reads: the provider is not called", async () => {
     sc.advanceOnGoalRead = 10_000;
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(h.rec.calls).toHaveLength(0);
   });
 
@@ -401,7 +404,7 @@ describe("controls and preserved properties: what the golfer is shown follows wh
 
   it("[preserve] a provider failure attempts no write", async () => {
     h.env.provider = failWith(new APIConnectionError());
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(updates()).toHaveLength(0);
   });
 });
@@ -409,7 +412,7 @@ describe("controls and preserved properties: what the golfer is shown follows wh
 // ── [taxonomy] outcomes and copy ──────────────────────────────────────────────────────────────────────
 describe("[taxonomy] generation outcomes decided by the content readback", () => {
   it("[taxonomy] saved: the displayed form of the stored plan equals the generated plan; the persisted plan is returned", async () => {
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome: "saved", display: "stored_plan", observed: true, message: "Your new plan is saved." });
     expect(r.plan?.summary).toBe(G.summary);
     expect(h.rec.calls).toHaveLength(1);
@@ -417,38 +420,38 @@ describe("[taxonomy] generation outcomes decided by the content readback", () =>
 
   it("[taxonomy] a legacy JSON-string value equal to the generated plan is saved (readLatestGoal parses it)", async () => {
     sc.readback = "legacy_string";
-    expect((await generateSyllabus()).outcome).toBe("saved");
+    expect((await generateSyllabus(USER)).outcome).toBe("saved");
   });
 
   it("[taxonomy] stored content differing only in fields the display drops is saved (the displayed plan matched)", async () => {
     sc.readback = "extra_fields";
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r.outcome).toBe("saved");
     expect(JSON.stringify(r.plan)).not.toContain("internal_note");
   });
 
   it("[taxonomy] the write reports an error but the readback shows the generated plan: saved, by observation", async () => {
     sc.write = "lost";
-    expect((await generateSyllabus()).outcome).toBe("saved");
+    expect((await generateSyllabus(USER)).outcome).toBe("saved");
   });
 
   it("[taxonomy] the write reports one row but a transforming path stored something else: other_plan_stored, never saved", async () => {
     sc.write = "transform";
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome: "other_plan_stored", display: "stored_plan", message: "Your new plan isn't the plan saved now. This is your saved plan." });
     expect(r.plan?.summary).toBe(Q.summary);
   });
 
   it("[taxonomy] a concurrent writer replaces the plan between write and readback: other_plan_stored with the neutral copy", async () => {
     sc.write = "replace_after";
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r.outcome).toBe("other_plan_stored");
     expect(r.plan?.summary).toBe(Q.summary);
   });
 
   it("[taxonomy] a rejected write with the previous plan still stored: other_plan_stored showing that plan", async () => {
     sc.write = "zero";
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r.outcome).toBe("other_plan_stored");
     expect(r.plan?.summary).toBe(V.summary);
   });
@@ -456,18 +459,18 @@ describe("[taxonomy] generation outcomes decided by the content readback", () =>
   it("[taxonomy] no plan stored after the attempt: no_plan_stored", async () => {
     seed(null);
     sc.write = "zero";
-    expect(await generateSyllabus()).toMatchObject({ outcome: "no_plan_stored", display: "no_plan", plan: null, message: "No plan is saved for this goal right now. Your new plan wasn't confirmed." });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "no_plan_stored", display: "no_plan", plan: null, message: "No plan is saved for this goal right now. Your new plan wasn't confirmed." });
   });
 
   it("[taxonomy] a malformed stored plan: stored_plan_unreadable", async () => {
     sc.write = "zero";
     seed({ summary: { text: "x" }, weeks: "four" });
-    expect(await generateSyllabus()).toMatchObject({ outcome: "stored_plan_unreadable", display: "unreadable", plan: null });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "stored_plan_unreadable", display: "unreadable", plan: null });
   });
 
   it("[taxonomy] the row is gone at readback: goal_missing", async () => {
     sc.write = "row_deleted";
-    expect(await generateSyllabus()).toMatchObject({ outcome: "goal_missing", display: "goal_missing", plan: null, message: "We couldn't find this goal. Open My Goals." });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "goal_missing", display: "goal_missing", plan: null, message: "We couldn't find this goal. Open My Goals." });
   });
 
   it.each([
@@ -475,7 +478,7 @@ describe("[taxonomy] generation outcomes decided by the content readback", () =>
     ["a thrown read", "throw"],
   ] as const)("[taxonomy] %s at readback: save_unconfirmed (never 'nothing saved'); the last verified plan is kept", async (_, mode) => {
     sc.readback = mode;
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome: "save_unconfirmed", display: "keep", plan: null, observed: true });
     expect(r.message).toBe("We couldn't confirm whether your new plan was saved. Reload My Plan to see what's saved.");
     expect(JSON.stringify(r)).not.toMatch(/nothing (new )?was saved|wasn't saved/i);
@@ -484,17 +487,17 @@ describe("[taxonomy] generation outcomes decided by the content readback", () =>
   it("[taxonomy] expiry between the call and the write: the write fails and the readback is unavailable, so save_unconfirmed", async () => {
     sc.write = "expired";
     sc.readback = "error";
-    expect((await generateSyllabus()).outcome).toBe("save_unconfirmed");
+    expect((await generateSyllabus(USER)).outcome).toBe("save_unconfirmed");
   });
 
   it("[taxonomy] the write throws (no response) and the readback shows the old plan: save_unconfirmed, last verified plan kept", async () => {
     sc.write = "throw";
-    expect(await generateSyllabus()).toMatchObject({ outcome: "save_unconfirmed", display: "keep", plan: null });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "save_unconfirmed", display: "keep", plan: null });
   });
 
   it("[taxonomy] the write is aborted at its deadline and commits after the readback: save_unconfirmed, never 'isn't the plan saved now'", async () => {
     sc.write = "late";
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome: "save_unconfirmed", display: "keep", plan: null, message: "We couldn't confirm whether your new plan was saved. Reload My Plan to see what's saved." });
     expect(store[0].ai_syllabus).toEqual(G); // what a reload would now show
   });
@@ -502,22 +505,22 @@ describe("[taxonomy] generation outcomes decided by the content readback", () =>
   it("[taxonomy] the write is aborted, nothing was stored before, and it commits late: save_unconfirmed, not 'no plan' (no invitation to pay again)", async () => {
     seed(null);
     sc.write = "late";
-    expect(await generateSyllabus()).toMatchObject({ outcome: "save_unconfirmed", display: "keep" });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "save_unconfirmed", display: "keep" });
   });
 
   it("[taxonomy] the write gets a 504 from the gateway and the readback shows the old plan: save_unconfirmed", async () => {
     sc.write = "gateway504";
-    expect(await generateSyllabus()).toMatchObject({ outcome: "save_unconfirmed", display: "keep" });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "save_unconfirmed", display: "keep" });
   });
 
   it("[taxonomy] the write is definitely rejected (403 with a PostgREST code): the readback decides, other_plan_stored", async () => {
     sc.write = "error";
-    expect(await generateSyllabus()).toMatchObject({ outcome: "other_plan_stored", display: "stored_plan" });
+    expect(await generateSyllabus(USER)).toMatchObject({ outcome: "other_plan_stored", display: "stored_plan" });
   });
 
   it("[taxonomy] the write is aborted and the row is gone: goal_missing (an update cannot bring it back)", async () => {
     sc.write = "aborted_row_gone";
-    expect((await generateSyllabus()).outcome).toBe("goal_missing");
+    expect((await generateSyllabus(USER)).outcome).toBe("goal_missing");
   });
 
   it.each([
@@ -527,7 +530,7 @@ describe("[taxonomy] generation outcomes decided by the content readback", () =>
     ["zero", "zero_rows"],
   ] as const)("[taxonomy] write mode %s is logged as writeResponse %s", async (mode, logged) => {
     sc.write = mode;
-    await generateSyllabus();
+    await generateSyllabus(USER);
     const entry = JSON.parse(logs.filter((l) => l.startsWith("[goal-plan] "))[0].slice("[goal-plan] ".length));
     expect(entry.writeResponse).toBe(logged);
   });
@@ -549,7 +552,7 @@ describe("[taxonomy] refusals before any call", () => {
   ];
   it.each(cases)("[taxonomy] %s: %s with 0 provider calls and no write", async (_, arrange, outcome, message) => {
     arrange();
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome, message, display: "keep", plan: null, observed: false });
     expect(h.rec.calls).toHaveLength(0);
     expect(updates()).toHaveLength(0);
@@ -568,19 +571,19 @@ describe("[taxonomy] provider failures: billing unknown, no write", () => {
   ];
   it.each(cases)("[taxonomy] %s: provider_failed", async (_, behaviour) => {
     h.env.provider = behaviour as never;
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome: "provider_failed", display: "keep", plan: null, message: "We couldn't create a new plan. Nothing new was saved from this attempt." });
     expect(h.rec.calls).toHaveLength(1);
     expect(updates()).toHaveLength(0);
   });
 
   it("[taxonomy] two invocations are independent: two calls (S1 is not a single-flight)", async () => {
-    await Promise.all([generateSyllabus(), generateSyllabus()]);
+    await Promise.all([generateSyllabus(USER), generateSyllabus(USER)]);
     expect(h.rec.calls).toHaveLength(2);
   });
 
   it("[taxonomy] the request uses the same model and strict schema, and caps output tokens", async () => {
-    await generateSyllabus();
+    await generateSyllabus(USER);
     const params = h.rec.calls[0] as { model: string; max_completion_tokens: number; response_format: { json_schema: { strict: boolean } } };
     expect(params.model).toBe("gpt-4o-mini");
     expect(params.response_format.json_schema.strict).toBe(true);
@@ -669,7 +672,9 @@ describe("[guard] the chosen constants and the module's boundaries", () => {
     const a = source("app/(dashboard)/goals/actions.ts");
     expect(a).not.toMatch(/console\.|openai|createClient|from\(|user_id|goalId/i);
     expect(a).toMatch(/export async function submitGoals\(formData: FormData\)/);
-    expect(a).toMatch(/export async function generateSyllabus\(\)/);
+    // G1: generation carries exactly one argument, the rendered owner, forwarded untouched (no default, not optional)
+    expect(a).toMatch(/export async function generateSyllabus\(expectedOwnerId: string\)/);
+    expect(a).toContain("return generateGoalPlan(expectedOwnerId);");
   });
 });
 
@@ -679,7 +684,7 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
     const OTHER = "00000000-0000-4000-8000-0000000000b2";
     store.push({ id: "a0000000-0000-4000-8000-0000000000f9", user_id: OTHER, handicap_baseline: 3, primary_miss: "Hook", target_goal: "OTHER GOLFER SECRET GOAL",
       ai_syllabus: Q, created_at: "2026-11-13T00:00:00.000Z" });
-    await generateSyllabus();
+    await generateSyllabus(USER);
     const discovery = reads()[0];
     expect(eqOf(discovery)).toEqual({ user_id: USER });
     expect(JSON.stringify(h.rec.calls)).not.toContain("OTHER GOLFER SECRET GOAL");
@@ -687,7 +692,7 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
   });
 
   it("[taxonomy] the plan write and the readback are filtered by the goal id and the verified owner (the accepted write filtered by id only and relied on RLS)", async () => {
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(updates()).toHaveLength(1);
     expect(eqOf(updates()[0])).toEqual({ id: GOAL, user_id: USER });
     expect(eqOf(reads()[reads().length - 1])).toEqual({ id: GOAL, user_id: USER });
@@ -703,27 +708,31 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
     expect(inserts()[0].payload!.user_id).toBe(USER);
   });
 
-  it("[taxonomy] an argument passed to generateSyllabus is ignored (no goal id from the client)", async () => {
+  // G1: generateSyllabus's one argument is now the rendered owner. A goal id (or any object) in its place is not an owner:
+  // refused before Auth is asked, with nothing read, written or called — the client still never chooses a goal row.
+  it("[taxonomy] a goal id passed to generateSyllabus is not an owner intent: owner_intent_invalid, nothing read or called (no goal id from the client)", async () => {
     const r = await (generateSyllabus as unknown as (x: unknown) => Promise<{ outcome: string }>)({ goalId: "a0000000-0000-4000-8000-0000000000f9" });
-    expect(r.outcome).toBe("saved");
-    expect(eqOf(updates()[0])).toEqual({ id: GOAL, user_id: USER });
+    expect(r.outcome).toBe("owner_intent_invalid");
+    expect(h.rec.queries).toHaveLength(0);
+    expect(h.rec.ctor).toHaveLength(0);
   });
 
-  it("[taxonomy] a non-FormData argument to submitGoals is refused as invalid_input, nothing inserted", async () => {
+  it("[taxonomy] a non-FormData argument to submitGoals carries no owner intent: owner_intent_invalid, nothing inserted", async () => {
     const r = await (submitGoals as unknown as (x: unknown) => Promise<{ outcome: string }>)({ handicap_baseline: "12" });
-    expect(r.outcome).toBe("invalid_input");
+    expect(r.outcome).toBe("owner_intent_invalid");
     expect(inserts()).toHaveLength(0);
+    expect(h.rec.queries).toHaveLength(0);
   });
 
   it("[taxonomy] a discovered row id that is not a UUID: goal_unavailable, no call", async () => {
     seed(V, { id: "not-a-uuid" });
-    expect((await generateSyllabus()).outcome).toBe("goal_unavailable");
+    expect((await generateSyllabus(USER)).outcome).toBe("goal_unavailable");
     expect(h.rec.calls).toHaveLength(0);
   });
 
   it("[taxonomy] the verified-auth helper throws: auth_unavailable, never 'signed out'", async () => {
     h.env.auth = "throw";
-    expect((await generateSyllabus()).outcome).toBe("auth_unavailable");
+    expect((await generateSyllabus(USER)).outcome).toBe("auth_unavailable");
   });
 
   it("[taxonomy] an insert rejected with 401 and a PostgREST code: goal_save_failed, no call", async () => {
@@ -740,7 +749,7 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
   ];
   it.each(flows)("[taxonomy] Next control flow raised in %s passes through untouched (I10) and no later step runs", async (_, arrange, after) => {
     arrange();
-    await expect(generateSyllabus()).rejects.toBe(REDIRECT);
+    await expect(generateSyllabus(USER)).rejects.toBe(REDIRECT);
     after();
   });
 
@@ -749,7 +758,7 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
     ["a static-generation bailout code", Object.assign(new Error("provider said: bail out"), { status: 400, code: "NEXT_STATIC_GEN_BAILOUT" })],
   ])("[taxonomy] a provider error shaped like Next control flow (%s) is a provider failure: no write, fixed copy, one log line", async (_, error) => {
     h.env.provider = async () => { throw error; };
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r).toMatchObject({ outcome: "provider_failed", message: "We couldn't create a new plan. Nothing new was saved from this attempt." });
     expect(updates()).toHaveLength(0);
     const lines = logs.filter((l) => l.startsWith("[goal-plan] "));
@@ -776,13 +785,13 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
 
   it("[taxonomy] the time decision uses a fresh clock: exp 19 s is enough at the start but not after 1 s of reads", async () => {
     h.env.expInSec = 19;
-    await generateSyllabus();
+    await generateSyllabus(USER);
     expect(h.rec.calls).toHaveLength(1); // 19 s − 5 s skew = 14 s >= 13.5 s needed
     h.rec.calls = [];
     h.env.client = fakeClient();
     seed();
     sc.advanceOnGoalRead = 1_000;
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(r.outcome).toBe("time_insufficient");
     expect(r.message).toBe("Please sign in again, then try.");
     expect(h.rec.calls).toHaveLength(0);
@@ -793,7 +802,7 @@ describe("review additions: owner isolation, Next control flow, fresh clock and 
     [1_501, 0], // 1 ms less: refused
   ])("[taxonomy] function-budget threshold: %i ms spent before dispatch gives %i call(s)", async (spent, calls) => {
     sc.advanceOnGoalRead = spent;
-    const r = await generateSyllabus();
+    const r = await generateSyllabus(USER);
     expect(h.rec.calls).toHaveLength(calls);
     if (!calls) expect(r).toMatchObject({ outcome: "time_insufficient", message: "Please try again." });
   });

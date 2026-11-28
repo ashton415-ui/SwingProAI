@@ -10,6 +10,7 @@ import {
 import { isUuid } from "@/lib/api/v1-analysis-dto";
 import { toAnalysisResultV1 } from "@/lib/api/v1-analysis-result-dto";
 import { readAuthorizedAnalysis } from "@/lib/analysis-result-read-authority";
+import { readGolferJobState } from "@/lib/analysis-attempt-precedence";
 
 /**
  * GET /api/v1/analyses/{id}
@@ -57,7 +58,11 @@ export async function GET(
       return v1Error("SERVER_TEMPORARILY_UNAVAILABLE", UNAVAILABLE_MESSAGE, requestId, 503);
     }
 
-    return v1Success(toAnalysisResultV1(read.result, read.access), requestId);
+    // AG-WEB-READY-10-P2: the durable attempt state, additive, on the verified caller's own session (owner-bound in
+    // the database). A1: a read that fails is reported as execution "unavailable" (never as no work) and changes
+    // nothing else.
+    const job = await readGolferJobState(auth.client, id);
+    return v1Success(toAnalysisResultV1(read.result, read.access, job), requestId);
   } catch {
     return v1Error("INTERNAL_ERROR", INTERNAL_MESSAGE, requestId, 500);
   }

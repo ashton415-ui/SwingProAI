@@ -1,13 +1,72 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Target, TrendingUp, Crosshair, ArrowRight } from "lucide-react";
 import { submitGoals } from "./actions";
+import { useRenderedSession } from "@/components/navigation/SessionKeeper";
+import { createClient } from "@/utils/supabase/client";
+import { confirmOwnerSession } from "@/lib/drill-hub-session";
+import { readStoredSession } from "@/utils/supabase/session-storage";
+import { jwtClaims } from "@/utils/supabase/session-cookie-layout";
 
 const MISS_OPTIONS = ["None", "Slice", "Hook", "Fat", "Thin"] as const;
 const ANSWERS_SAVED = "Your answers were saved.";
 const ANSWERS_UNCONFIRMED = "We couldn't confirm your answers were saved. Open My Goals to check before trying again.";
+// F1-A1 (V1): the answer to a submit is applied only by the view that asked for it — still on screen and still showing
+// the account this page was rendered for (useRenderedSession: the server-verified owner), confirmed when the answer
+// arrives the way owner-bound requests are (confirmOwnerSession). A view that was removed or left drops it; a confirmed
+// end or change of the sign-in shows only fixed guidance; an account that cannot be confirmed now (an Auth outage)
+// shows "couldn't confirm" and never a sign-out. In every such case nothing of the answer is shown, no navigation starts
+// and nothing is submitted again (the answers may already be saved).
+const RESULT_SIGN_IN_CHANGED =
+  "This browser signed in to a different account before your answers' result arrived, so it isn't shown here. Your answers may already be saved. Reload to continue with the account that's signed in now.";
+const RESULT_SIGN_IN_ENDED =
+  "This page's sign-in ended before your answers' result arrived, so it isn't shown here. Your answers may already be saved. Reload to continue.";
+
+/** F1-A1 (V1): the account the browser's stored session cookie envelope names (a local read; no request), or null. */
+function storedSubject(): string | null {
+  try {
+    const stored = readStoredSession();
+    return stored.kind === "present" ? jwtClaims(stored.envelope.accessToken).sub : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * F1-A1 (V1): a press that will leave this page in this window: a primary, unmodified press on a same-origin link to a
+ * different page (not a new tab or window, not a download, not this same page or a fragment of it) — the same presses the
+ * router itself turns into a navigation.
+ */
+function leavesThisPage(event: Event): boolean {
+  const press = event as MouseEvent;
+  if (press.defaultPrevented || (typeof press.button === "number" && press.button !== 0)) return false;
+  if (press.metaKey || press.ctrlKey || press.shiftKey || press.altKey) return false;
+  const target = press.target as { closest?: (selector: string) => unknown } | null;
+  const link = target && typeof target.closest === "function" ? (target.closest("a[href]") as HTMLAnchorElement | null) : null;
+  if (!link) return false;
+  const opens = link.getAttribute("target");
+  if ((opens && opens !== "_self") || link.hasAttribute("download")) return false;
+  try {
+    const to = new URL(link.getAttribute("href") ?? "", window.location.href);
+    return to.origin === window.location.origin && (to.pathname !== window.location.pathname || to.search !== window.location.search);
+  } catch {
+    return false;
+  }
+}
+const RESULT_ACCOUNT_UNCONFIRMED =
+  "We couldn't confirm the signed-in account, so your result isn't shown here. Open My Goals to check before trying again.";
+// AG-WEB-READY-05-G1: the answers are sent only for the account this page was rendered for (useRenderedSession: the
+// server-verified owner) — as the one EXPECTED_OWNER_FIELD entry (lib/goal-plan-generation.ts; a literal here because that
+// module is server-only), never the account the browser happens to hold when the request leaves. The server refuses
+// before saving anything when the verified caller is another account, or when the page sent no usable owner; with no
+// rendered owner nothing is sent at all. Either way the golfer is told nothing was saved and offered a fresh page; nothing
+// is retried or resubmitted, and the newer sign-in is left as it is.
+const EXPECTED_OWNER_FIELD = "expected_owner_id";
+const OWNER_MISMATCH =
+  "This page was opened for a different account than the one signed in now, so nothing was saved or generated. Reload the page to continue with the account that's signed in.";
+const OWNER_INTENT_INVALID = "This page is out of date, so nothing was saved or generated. Reload the page to continue.";
 
 const STEPS = [
   {
@@ -32,6 +91,38 @@ const STEPS = [
 
 export default function GoalsForm() {
   const router = useRouter();
+  const rendered = useRenderedSession();
+  // F1-A1 (V1): false once this form is no longer on screen (the golfer left, or the shell was removed)
+  const liveRef = useRef(true);
+  // F1-A1 (V1): the golfer chose to leave while an answer was pending — a link pressed, or back/forward. The app router
+  // queues that navigation behind the running Server Action, so the form is still mounted when the answer arrives; the
+  // answer must not then send the golfer somewhere else (or show a result) over that choice.
+  const departedRef = useRef(false);
+  useEffect(() => {
+    liveRef.current = true;
+    if (typeof document === "undefined" || typeof window === "undefined") {
+      return () => {
+        liveRef.current = false;
+      };
+    }
+    const onPress = (event: Event) => {
+      if (leavesThisPage(event)) departedRef.current = true;
+    };
+    const onHistory = () => {
+      departedRef.current = true;
+    };
+    document.addEventListener("click", onPress, true);
+    window.addEventListener("popstate", onHistory);
+    return () => {
+      liveRef.current = false;
+      document.removeEventListener("click", onPress, true);
+      window.removeEventListener("popstate", onHistory);
+    };
+  }, []);
+  // F1-A1 (V1): the sign-in this view was rendered for was confirmed changed or ended when an answer arrived
+  const [resultWithheld, setResultWithheld] = useState<"changed" | "ended" | null>(null);
+  // G1: the server (or, with no rendered owner, this form) refused before anything was saved
+  const [ownerRefused, setOwnerRefused] = useState<"mismatch" | "invalid" | null>(null);
   const [isPending, startTransition] = useTransition();
   const [step, setStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
@@ -53,18 +144,67 @@ export default function GoalsForm() {
     setStep((s) => s + 1);
   }
 
+  /** F1-A1 (V1): whether the answer that just arrived may be applied by this view, and if not, what to show instead. */
+  async function mayApplyAnswer(): Promise<"apply" | "drop" | "changed" | "ended" | "unconfirmed"> {
+    if (!liveRef.current || departedRef.current) return "drop";
+    if (rendered === null) return "unconfirmed"; // no rendered account to apply it to
+    let answer: Awaited<ReturnType<typeof confirmOwnerSession>>;
+    try {
+      answer = await confirmOwnerSession(() => createClient(), rendered.ownerId);
+    } catch {
+      answer = { status: "unavailable" };
+    }
+    if (!liveRef.current || departedRef.current) return "drop";
+    if (answer.status === "ready") {
+      // the confirmation may have joined a read that began before a switch, or a sign-in may have been published since:
+      // the jar must still name the rendered account at the moment the answer is applied (security review S2)
+      const holder = storedSubject();
+      return holder !== null && holder !== rendered.ownerId ? "changed" : "apply";
+    }
+    if (answer.status === "account_changed") return "changed";
+    if (answer.status === "signed_out" || answer.status === "ended") return "ended";
+    return "unconfirmed";
+  }
+
   function handleSubmit() {
+    // G1: no rendered owner, nothing to send the answers as (never the cookie's account): fixed guidance, no request
+    if (rendered === null) {
+      setOwnerRefused("invalid");
+      return;
+    }
     const fd = new FormData();
     fd.set("handicap_baseline", handicap);
     fd.set("primary_miss", primaryMiss);
     fd.set("target_goal", targetGoal);
+    fd.set(EXPECTED_OWNER_FIELD, rendered.ownerId);
 
+    departedRef.current = false; // only a departure while this submit's answer is pending counts
     startTransition(async () => {
       let result: Awaited<ReturnType<typeof submitGoals>> | undefined;
       try {
         result = await submitGoals(fd);
       } catch {
         result = undefined;
+      }
+      const may = await mayApplyAnswer();
+      if (may === "drop") {
+        // still on screen while the chosen navigation completes: fixed guidance (never the result), no resubmit
+        if (liveRef.current) setOutcome({ lines: [ANSWERS_UNCONFIRMED], href: "/goals", label: "Open My Goals" });
+        return;
+      }
+      // G1: refused before anything was saved (another account is signed in now, or the page sent no usable owner): this
+      // fixed answer carries no data, so it is shown whatever the browser holds now — with a fresh page, never a resubmit
+      if (result && (result.outcome === "owner_mismatch" || result.outcome === "owner_intent_invalid")) {
+        setOwnerRefused(result.outcome === "owner_mismatch" ? "mismatch" : "invalid");
+        return;
+      }
+      if (may === "changed" || may === "ended") {
+        setResultWithheld(may);
+        return;
+      }
+      if (may === "unconfirmed") {
+        setOutcome({ lines: [RESULT_ACCOUNT_UNCONFIRMED], href: "/goals", label: "Open My Goals" });
+        return;
       }
       // the action failed (dropped connection) or came back without a result (Next resolves undefined when the
       // response is not a Server Action response, e.g. a platform timeout page): the insert may have committed
@@ -95,6 +235,42 @@ export default function GoalsForm() {
 
   const inputCls =
     "w-full bg-slate-800 border border-white/10 rounded-xl px-4 py-3 text-white text-base lg:text-sm placeholder:text-gray-600 focus:outline-none focus:ring-1 focus:ring-golf-green";
+
+  if (ownerRefused) {
+    return (
+      <div className="max-w-lg mx-auto">
+        {/* guidance (the rendered-session boundary lets its own controls act); nothing was saved, nothing is retried */}
+        <div role="status" data-rendered-session-guidance="goals" className="bg-golf-header border border-white/5 rounded-2xl p-7 text-center">
+          <p className="text-sm text-gray-300 mb-2 break-words">{ownerRefused === "mismatch" ? OWNER_MISMATCH : OWNER_INTENT_INVALID}</p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-4 inline-flex items-center justify-center min-h-11 min-w-11 px-5 rounded-xl bg-golf-green hover:bg-golf-green/90 text-sm font-black uppercase tracking-widest text-white transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+          >
+            Reload page
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (resultWithheld) {
+    return (
+      <div className="max-w-lg mx-auto">
+        {/* guidance (the rendered-session boundary lets its own controls act); nothing of the old answer is shown */}
+        <div role="status" data-rendered-session-guidance="goals" className="bg-golf-header border border-white/5 rounded-2xl p-7 text-center">
+          <p className="text-sm text-gray-300 mb-2 break-words">{resultWithheld === "changed" ? RESULT_SIGN_IN_CHANGED : RESULT_SIGN_IN_ENDED}</p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-4 inline-flex items-center justify-center min-h-11 min-w-11 px-5 rounded-xl bg-golf-green hover:bg-golf-green/90 text-sm font-black uppercase tracking-widest text-white transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+          >
+            Reload page
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (outcome) {
     return (
@@ -206,7 +382,7 @@ export default function GoalsForm() {
                   key={miss}
                   type="button"
                   onClick={() => setPrimaryMiss(miss)}
-                  className={`py-2.5 rounded-xl text-sm font-semibold border transition-colors ${
+                  className={`min-h-11 py-2.5 rounded-xl text-sm font-semibold border transition-colors ${
                     primaryMiss === miss
                       ? "bg-golf-green/15 border-golf-green/40 text-golf-green"
                       : "bg-white/[0.03] border-white/10 text-gray-400 hover:border-white/20 hover:text-white"
@@ -259,7 +435,7 @@ export default function GoalsForm() {
               type="button"
               onClick={() => { setError(null); setStep((s) => s - 1); }}
               disabled={isPending}
-              className="px-5 py-2.5 rounded-xl border border-white/10 text-sm font-medium text-gray-400 hover:text-white hover:bg-white/5 transition-colors disabled:opacity-40"
+              className="min-h-11 min-w-11 px-5 py-2.5 rounded-xl border border-white/10 text-sm font-medium text-gray-400 hover:text-white hover:bg-white/5 transition-colors disabled:opacity-40"
             >
               Back
             </button>
@@ -268,7 +444,7 @@ export default function GoalsForm() {
             type="button"
             onClick={nextStep}
             disabled={isPending}
-            className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-golf-green hover:bg-golf-green/90 disabled:opacity-50 text-sm font-black uppercase tracking-widest text-white transition-colors"
+            className="flex-1 flex items-center justify-center gap-2 min-h-11 px-5 py-2.5 rounded-xl bg-golf-green hover:bg-golf-green/90 disabled:opacity-50 text-sm font-black uppercase tracking-widest text-white transition-colors"
           >
             {isPending ? (
               "Building Your Plan…"

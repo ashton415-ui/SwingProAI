@@ -173,6 +173,8 @@ export async function POST(request: Request): Promise<Response> {
       objectPath,
       fileSize: metadata.size,
       contentType: metadata.contentType,
+      // AG-WEB-READY-10-P2: the web clip metadata, compared on a repeat only when this request carried it.
+      ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
     };
 
     // Owner-scoped lookup. RLS already restricts this to the caller's own rows;
@@ -225,6 +227,14 @@ export async function POST(request: Request): Promise<Response> {
       file_size: metadata.size,
       mime_type: metadata.contentType,
       status: UPLOAD_FINALIZED_STATUS,
+      // AG-WEB-READY-10-P2 (optional): what the web page records about the chosen clip; never part of the object's
+      // identity, size or type, which stay server-derived.
+      ...(parsed.metadata
+        ? {
+            original_filename: parsed.metadata.originalFilename,
+            ...(parsed.metadata.trimStart !== null ? { trim_start: parsed.metadata.trimStart, trim_end: parsed.metadata.trimEnd } : {}),
+          }
+        : {}),
     });
 
     if (!inserted.error) {

@@ -16,6 +16,15 @@ import {
   authorizeOwnedAnalysisRow,
   readOwnedAnalysisPayloads,
 } from "@/lib/analysis-result-read-authority";
+import {
+  ADMISSION_PAUSED_COPY,
+  INTERRUPTED_UNRESOLVED_COPY,
+  STATUS_UNAVAILABLE_COPY,
+  SYNTHETIC_RESULT_NOTICE,
+  SYNTHETIC_UNSCORED_COPY,
+  isSyntheticResult,
+  readGolferJobState,
+} from "@/lib/analysis-attempt-precedence";
 import { readExecutionState } from "@/lib/analysis-execution-claim";
 import {
   classifyFailedAnalysisVideo,
@@ -174,13 +183,30 @@ export default async function SwingDetailPage({
   // reporting (or that was taken by pre-lease code) will not finish and is not
   // re-run automatically. It is told apart from live work on the server; no
   // claim detail reaches the page.
-  const isStalled =
-    swing.status === "processing" &&
-    (await readExecutionState({
-      analysisId: swing.id,
-      userId: user.id,
-      family: isPutt ? "putting" : "full_swing",
-    })) === "stalled";
+  // AG-WEB-READY-10-P2. The durable attempt state (golfer-facing), read on the golfer's own session.
+  // A1: a state that could not be read is shown as exactly that, with a fresh read and no other action (the swing may
+  // be queued or running). A stored completed swing keeps its results whatever the read did.
+  const jobRead = await readGolferJobState(supabase, swing.id);
+  const statusUnavailable = jobRead === "unavailable" && swing.status !== "complete";
+  const job = jobRead === "unavailable" ? null : jobRead;
+  const isStalled = statusUnavailable
+    ? false
+    : job
+    ? job.execution === "interrupted"
+    : swing.status === "processing" &&
+      (await readExecutionState({
+        analysisId: swing.id,
+        userId: user.id,
+        family: isPutt ? "putting" : "full_swing",
+      })) === "stalled";
+  // A1: an interrupted attempt whose dispatch is unresolved may still be settled by a late result (or reconciled); a
+  // stall described by a finished attempt (or none) is the synchronous one, which cannot
+  const isUnresolvedAttempt = isStalled && job?.attempt?.state === "interrupted";
+  // P2: what the shared status region shows, by the shared precedence rule (complete > open attempt > finished > none)
+  const isProcessingView = !statusUnavailable && (job ? job.execution === "processing" : swing.status === "processing" && !isStalled);
+  const isFailedView = !statusUnavailable && (job ? job.execution === "failed" : swing.status === "failed");
+  const isUnusableView = isFailedView && (failedReason === VIDEO_UNUSABLE_STATUS || job?.attempt?.failureKind === "video_unusable");
+  const hasRetryableAttempt = isFailedView && !isUnusableView && job?.attempt !== null && job?.attempt !== undefined;
 
   // ── EQ5C-A putting result state — decided here, on the server ───────────────
   //
@@ -373,7 +399,7 @@ export default async function SwingDetailPage({
                 {scoreShown.scored ? `${scoreShown.value} pts` : UNSCORED_LABEL}
               </p>
               <p className="text-[9px] text-gray-500 mt-2 leading-snug">
-                {scoreShown.scored ? SCORE_BASIS : UNSCORED_COPY}
+                {scoreShown.scored ? SCORE_BASIS : isSyntheticResult(swing.feedback) ? SYNTHETIC_UNSCORED_COPY : UNSCORED_COPY}
               </p>
             </div>
             {estimates.map((m) => (
@@ -421,6 +447,7 @@ export default async function SwingDetailPage({
                 <Zap size={12} />
                 {ASSESSMENT_LABEL}
               </h3>
+              {isSyntheticResult(swing.feedback) && <p className="text-amber-300 text-xs font-bold mb-3" role="note">{SYNTHETIC_RESULT_NOTICE}</p>}
               <p className="text-gray-300 leading-relaxed text-sm">{swing.feedback}</p>
             </div>
           )}
@@ -489,7 +516,7 @@ export default async function SwingDetailPage({
       )}
 
       {/* SHARED STATUS REGION — family-neutral, and identical for both. */}
-      {swing.status === "processing" && !isStalled && (
+      {isProcessingView && (
         <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-yellow-400 shrink-0" />
           <p className="text-yellow-300 text-xs font-bold uppercase tracking-wide">
@@ -498,7 +525,34 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {isStalled && (
+      {/* A1: the status could not be read — a fresh read (a reload of this page), never an analysis request */}
+      {statusUnavailable && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-4xl p-6 mb-6" role="status">
+          <AlertTriangle size={18} className="text-amber-400 shrink-0" />
+          <p className="text-amber-200 text-xs font-bold leading-relaxed">{STATUS_UNAVAILABLE_COPY}</p>
+          <a
+            href={`/swings/${swing.id}`}
+            className="sm:ml-auto inline-flex items-center justify-center min-h-[44px] min-w-[44px] px-4 rounded-2xl border border-white/10 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/5"
+          >
+            Check status
+          </a>
+        </div>
+      )}
+
+      {isStalled && isUnresolvedAttempt && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-4xl p-6 mb-6" role="status">
+          <AlertTriangle size={18} className="text-amber-400 shrink-0" />
+          <p className="text-amber-200 text-xs font-bold leading-relaxed">{INTERRUPTED_UNRESOLVED_COPY}</p>
+          <a
+            href={`/swings/${swing.id}`}
+            className="sm:ml-auto inline-flex items-center justify-center min-h-[44px] min-w-[44px] px-4 rounded-2xl border border-white/10 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/5"
+          >
+            Check status
+          </a>
+        </div>
+      )}
+
+      {isStalled && !isUnresolvedAttempt && (
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-amber-500/10 border border-amber-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-amber-400 shrink-0" />
           <p className="text-amber-200 text-xs font-bold leading-relaxed">
@@ -513,7 +567,23 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {swing.status === "failed" && failedReason === VIDEO_UNUSABLE_STATUS && (
+      {job?.execution === "queued" && (
+        <div className="flex items-center gap-3 bg-golf-green/10 border border-golf-green/20 rounded-4xl p-6 mb-6" role="status">
+          <AlertTriangle size={18} className="text-golf-green shrink-0" />
+          <p className="text-golf-green text-xs font-bold uppercase tracking-wide">
+            Queued — your swing is saved. You can close this tab and come back later.
+          </p>
+        </div>
+      )}
+
+      {job?.execution === "paused" && (
+        <div className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-4xl p-6 mb-6" role="status">
+          <AlertTriangle size={18} className="text-gray-400 shrink-0" />
+          <p className="text-gray-300 text-xs font-bold leading-relaxed">{ADMISSION_PAUSED_COPY}</p>
+        </div>
+      )}
+
+      {isUnusableView && (
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-red-500/10 border border-red-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-red-400 shrink-0" />
           <p className="text-red-200 text-xs font-bold leading-relaxed">{VIDEO_UNUSABLE_COPY}</p>
@@ -526,7 +596,22 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {swing.status === "failed" && failedReason !== VIDEO_UNUSABLE_STATUS && (
+      {hasRetryableAttempt && (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-red-500/10 border border-red-500/20 rounded-4xl p-6 mb-6">
+          <AlertTriangle size={18} className="text-red-400 shrink-0" />
+          <p className="text-red-200 text-xs font-bold leading-relaxed">
+            This analysis didn&apos;t finish. You can retry it from its report.
+          </p>
+          <Link
+            href={`/analyze/${swing.id}`}
+            className="sm:ml-auto inline-flex items-center justify-center min-h-[44px] px-4 rounded-2xl border border-white/10 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/5"
+          >
+            Open report
+          </Link>
+        </div>
+      )}
+
+      {isFailedView && !isUnusableView && !hasRetryableAttempt && (
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-red-500/10 border border-red-500/20 rounded-4xl p-6 mb-6">
           <AlertTriangle size={18} className="text-red-400 shrink-0" />
           <p className="text-red-200 text-xs font-bold leading-relaxed">
@@ -541,11 +626,11 @@ export default async function SwingDetailPage({
         </div>
       )}
 
-      {swing.status === "pending" && (
+      {!statusUnavailable && (job ? job.execution === "idle" : swing.status === "pending") && (
         <div className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-4xl p-6">
           <AlertTriangle size={18} className="text-gray-500 shrink-0" />
           <p className="text-gray-500 text-xs font-bold uppercase tracking-wide">
-            Analysis queued — awaiting AI processing.
+            Not analyzed yet — your swing is saved.
           </p>
         </div>
       )}

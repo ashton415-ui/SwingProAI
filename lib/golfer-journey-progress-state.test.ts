@@ -25,12 +25,15 @@ type Scenario =
   | { kind: "null_data" };
 
 let scenario: Scenario = { kind: "rows", rows: [] };
+/** A1: the status read the page makes (read_analysis_job_states); null = the fake has no reader (the read fails). */
+let statusRead: null | ((ids: string[]) => { data: unknown; error: unknown }) = null;
 interface Call { table?: string; select?: string; eq?: unknown[]; order?: unknown[]; limit?: number }
 let calls: Call[] = [];
 const refresh = vi.fn();
 
 function fakeClient() {
   return {
+    ...(statusRead ? { rpc: async (_fn: string, args: { p_ids: string[] }) => statusRead!(args.p_ids) } : {}),
     from(table: string) {
       if (scenario.kind === "throw_on_from") throw new Error("client exploded at https://project.supabase.co key=abc");
       const call: Call = { table };
@@ -91,6 +94,7 @@ async function render(s: Scenario) {
 
 beforeEach(() => {
   calls = [];
+  statusRead = null;
   refresh.mockClear();
 });
 
@@ -189,7 +193,7 @@ describe("Progress Hub — existing presentation invariants are unchanged", () =
     expect(text).toMatch(/Recent Analyses 5 Up to 10 most recent/);
   });
 
-  it("a putt shows no full-swing score or tempo; null family is labelled Full Swing; null status shows pending", async () => {
+  it("a putt shows no full-swing score or tempo; null family is labelled Full Swing; a row whose status cannot be read says so (A1)", async () => {
     const { text } = await render({ kind: "rows", rows: MIXED });
     expect(text).toContain("82 pts");
     expect(text).toContain("70 pts");
@@ -197,13 +201,53 @@ describe("Progress Hub — existing presentation invariants are unchanged", () =
     expect(text).not.toContain("1.5");
     expect((text.match(/Putting/g) ?? []).length).toBe(2); // phone + table label for the one putt
     expect((text.match(/Full Swing/g) ?? []).length).toBe(8); // four full-swing-compatible rows, twice each
-    expect(text).toContain("pending");
-    expect(text).toContain("failed");
+    // A1: this fake has no status reader, so the two rows that are not complete read as unavailable (never as the
+    // stored status: P2 showed "pending" for the null status and "failed" here)
+    expect(text.match(/Status unavailable/g) ?? []).toHaveLength(4); // two rows, phone list + table
+    expect(text).not.toMatch(/pending|Not analyzed yet/);
   });
 
   it("absent scores render neutral, never the red band", async () => {
     const { html } = await render({ kind: "rows", rows: [row(4, { score: null })] });
     expect(html).toContain("text-gray-600 border-white/5");
     expect(html).not.toContain("text-red-400 border-red-500/20");
+  });
+});
+
+describe("A1 — each row's label comes from the status read; a read that fails says so", () => {
+  const U = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+  const rows = [
+    row(1, { id: U(1), status: "pending", score: null, tempo_ratio: null }),
+    row(2, { id: U(2), status: "failed", score: null, tempo_ratio: null }),
+    row(3, { id: U(3), status: "pending", score: null, tempo_ratio: null }),
+    row(4, { id: U(4), status: "complete" }),
+    row(5, { id: U(5), status: "pending", score: null, tempo_ratio: null }),
+  ];
+  const count = (text: string, re: RegExp) => (text.match(re) ?? []).length;
+
+  it("a confirmed absence of work reads Not analyzed yet, a failed attempt Failed, an accepted one Queued; a row the read did not answer says Status unavailable", async () => {
+    statusRead = (ids) => ({
+      data: [
+        { analysisId: U(1), execution: "idle", attempt: null },
+        { analysisId: U(2), execution: "failed", attempt: null },
+        { analysisId: U(3), execution: "queued", attempt: null },
+        { analysisId: U(4), execution: "complete", attempt: null },
+      ].filter((s) => ids.includes(s.analysisId)),
+      error: null,
+    });
+    const { text } = await render({ kind: "rows", rows });
+    expect(count(text, /Not analyzed yet/g)).toBe(2); // phone list + table
+    expect(count(text, /Failed/g)).toBe(2);
+    expect(count(text, /Queued/g)).toBe(2);
+    expect(count(text, /Status unavailable/g)).toBe(2); // row 5: no answer for it
+    expect(calls).toHaveLength(1); // the status read is an RPC; the history read is unchanged
+  });
+
+  it("a failed status read: every row that is not complete says Status unavailable (never Not analyzed yet); a completed one stays Complete", async () => {
+    statusRead = () => ({ data: null, error: { message: "permission denied for function read_analysis_job_states", code: "42501" } });
+    const { text } = await render({ kind: "rows", rows });
+    expect(count(text, /Status unavailable/g)).toBe(8);
+    expect(text).not.toMatch(/Not analyzed yet|Queued/);
+    expect(text).not.toContain("permission denied");
   });
 });

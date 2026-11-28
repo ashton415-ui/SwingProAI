@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { authorizeOwnedAnalysisRows } from "@/lib/analysis-result-read-authority";
+import { golferStatusLabel, readGolferJobStates, type JobStateRead } from "@/lib/analysis-attempt-precedence";
 import {
   ASSESSMENT_LABEL,
   ESTIMATES_DISCLOSURE,
@@ -35,6 +36,8 @@ interface SwingLog {
   id:          string;
   created_at:  string;
   status:      string;
+  /** AG-WEB-READY-10-P2: the golfer-facing attempt state, when it could be read */
+  job?:        JobStateRead | null;
   score:       number | null;
   feedback:    string | null;
   club:        string | null;
@@ -99,7 +102,21 @@ function sessionLabel(type: string) {
 // Status chip
 // ─────────────────────────────────────────────────────────────────────────────
 
-function StatusChip({ status }: { status: string }) {
+function StatusChip({ status, job = null }: { status: string; job?: JobStateRead | null }) {
+  // P2: with an attempt state, the shared precedence rule decides (an open retry is never shown as Failed). A1: an
+  // unreadable state is "Status unavailable" (a stored completed swing stays Complete).
+  if (job) {
+    const { label, tone } = golferStatusLabel(status, job);
+    if (tone !== "complete") {
+      const style =
+        tone === "failed" ? "bg-red-400/10 border-red-400/20 text-red-400"
+        : tone === "active" || tone === "attention" ? "bg-amber-400/10 border-amber-400/20 text-amber-400"
+        : "bg-white/[0.04] border-white/10 text-gray-500";
+      const spinning = job !== "unavailable" && job.execution === "processing";
+      const Icon = tone === "failed" || tone === "attention" ? AlertCircle : spinning ? Loader2 : Clock;
+      return <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-[9px] font-black uppercase tracking-widest ${style}`}><Icon className={`w-2.5 h-2.5${spinning ? " animate-spin" : ""}`} />{label}</span>;
+    }
+  }
   if (status === "complete")   return <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-golf-green/10 border border-golf-green/20 text-[9px] font-black uppercase tracking-widest text-golf-green"><CheckCircle2 className="w-2.5 h-2.5" />Complete</span>;
   if (status === "processing") return <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-400/10 border border-amber-400/20 text-[9px] font-black uppercase tracking-widest text-amber-400"><Loader2 className="w-2.5 h-2.5 animate-spin" />Processing</span>;
   if (status === "failed")     return <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-red-400/10 border border-red-400/20 text-[9px] font-black uppercase tracking-widest text-red-400"><AlertCircle className="w-2.5 h-2.5" />Failed</span>;
@@ -181,7 +198,7 @@ function SwingLogCard({ log }: { log: SwingLog }) {
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-1">
             <span className="text-base font-black text-white truncate">{label}</span>
-            <StatusChip status={log.status} />
+            <StatusChip status={log.status} job={log.job ?? null} />
             {isComplete && (
               <span className="text-sm font-black font-mono text-white" title={SCORE_BASIS}>
                 {score.scored ? `${score.value} / 100` : UNSCORED_LABEL}
@@ -200,7 +217,7 @@ function SwingLogCard({ log }: { log: SwingLog }) {
         {isComplete && (
           <Link
             href={`/analyze/${log.id}`}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-golf-green/10 border border-golf-green/20 text-[9px] font-black uppercase tracking-widest text-golf-green hover:bg-golf-green/20 transition-colors"
+            className="shrink-0 inline-flex items-center justify-center gap-1.5 min-h-11 min-w-11 px-3.5 py-2 rounded-xl bg-golf-green/10 border border-golf-green/20 text-[9px] font-black uppercase tracking-widest text-golf-green hover:bg-golf-green/20 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green"
           >
             Full Report <ChevronRight className="w-3 h-3" />
           </Link>
@@ -292,7 +309,7 @@ function SwingLogCard({ log }: { log: SwingLog }) {
       {!isComplete && (
         <div className="px-5 py-3 flex items-center justify-between border-t border-white/[0.04]">
           <span className="text-[9px] text-gray-700">Analysis {log.status}</span>
-          <Link href={`/analyze/${log.id}`} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/10 text-[9px] font-black uppercase tracking-widest text-gray-500 hover:text-white hover:border-white/20 transition-colors">
+          <Link href={`/analyze/${log.id}`} className="inline-flex items-center justify-center gap-1.5 min-h-11 min-w-11 px-3 py-1.5 rounded-lg border border-white/10 text-[9px] font-black uppercase tracking-widest text-gray-500 hover:text-white hover:border-white/20 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-golf-green">
             View Status <ChevronRight className="w-3 h-3" />
           </Link>
         </div>
@@ -407,6 +424,10 @@ export default async function TelemetryPage() {
     (r) => r.analysis_family === null || r.analysis_family === "full_swing",
   );
 
+  // AG-WEB-READY-10-P2: golfer-facing attempt states, on the golfer's own session (A1: "unavailable" per swing when
+  // its state cannot be read)
+  const jobStates = await readGolferJobStates(supabase, fullSwingRows.map((r) => r.id));
+
   const swingLogs: SwingLog[] = fullSwingRows.map((r) => {
     const vid    = r.swing_video as unknown as RawVideo | RawVideo[];
     const video  = Array.isArray(vid) ? (vid[0] ?? null) : vid;
@@ -426,6 +447,7 @@ export default async function TelemetryPage() {
       id:           r.id,
       created_at:   r.created_at ?? "",
       status:       r.status,
+      job:          jobStates.get(String(r.id)),
       score:        r.score ?? null,
       feedback:     r.feedback ?? null,
       // EQ5F-A. The immutable equipment snapshot names the club this analysis
@@ -510,10 +532,10 @@ export default async function TelemetryPage() {
         </div>
 
         <div className="flex gap-2 mt-1">
-          <Link href="/range" className="px-4 py-2.5 border border-white/10 text-gray-400 hover:text-white hover:border-white/20 rounded-xl font-black flex items-center gap-2 text-[10px] uppercase tracking-widest transition-all">
+          <Link href="/range" className="min-h-11 px-4 py-2.5 border border-white/10 text-gray-400 hover:text-white hover:border-white/20 rounded-xl font-black flex items-center gap-2 text-[10px] uppercase tracking-widest transition-all">
             <Target size={13} />Range
           </Link>
-          <Link href="/analyze" className="px-4 py-2.5 bg-golf-green text-golf-dark rounded-xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all text-[10px] uppercase tracking-widest">
+          <Link href="/analyze" className="min-h-11 px-4 py-2.5 bg-golf-green text-golf-dark rounded-xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all text-[10px] uppercase tracking-widest">
             <Video size={13} />Analyze
           </Link>
         </div>
@@ -545,8 +567,8 @@ export default async function TelemetryPage() {
           <Zap size={36} className="text-gray-700" />
           <p className="text-gray-700 font-mono text-[10px] uppercase tracking-[0.3em] italic">No telemetry recorded yet</p>
           <div className="flex gap-3">
-            <Link href="/range" className="px-4 py-2.5 border border-white/10 text-gray-400 rounded-xl font-black text-[9px] uppercase tracking-widest hover:text-white transition-all">Start Range Session</Link>
-            <Link href="/analyze" className="px-4 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all">Upload First Swing</Link>
+            <Link href="/range" className="inline-flex items-center justify-center min-h-11 px-4 py-2.5 border border-white/10 text-gray-400 rounded-xl font-black text-[9px] uppercase tracking-widest hover:text-white transition-all">Start Range Session</Link>
+            <Link href="/analyze" className="inline-flex items-center justify-center min-h-11 px-4 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all">Upload First Swing</Link>
           </div>
         </div>
       ) : (

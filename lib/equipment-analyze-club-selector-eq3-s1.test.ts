@@ -83,7 +83,7 @@ const submissionSource = submissionBody();
  * is now that request rather than a direct `swing_analysis` INSERT.
  */
 function analysisInsertSource(): string {
-  const start = submissionSource.indexOf('fetch("/api/v1/analyses"');
+  const start = submissionSource.indexOf('sendAppRequest("analyses"');
   expect(start, "expected startAnalysis to request an analysis").toBeGreaterThan(-1);
   const end = submissionSource.indexOf("});", start);
   expect(end, "expected the analysis request to close").toBeGreaterThan(start);
@@ -92,7 +92,7 @@ function analysisInsertSource(): string {
 
 /** The `/api/analyze-swing` request, isolated. */
 function analysisRequestSource(): string {
-  const start = submissionSource.indexOf('fetch("/api/analyze-swing"');
+  const start = submissionSource.indexOf('sendAppRequest("analyze"');
   expect(start, "expected startAnalysis to call the analysis API").toBeGreaterThan(-1);
   const end = submissionSource.indexOf("});", start);
   expect(end, "expected the analysis request to close").toBeGreaterThan(start);
@@ -285,9 +285,33 @@ describe("EQ3-S1 Analyze — reuses the shared saved-club foundations", () => {
 
 describe("EQ3-S1 Analyze — one stable managed browser client", () => {
   it("creates the client exactly once, lazily, in a ref", () => {
+    // AG-WEB-READY-03-R1-A3 (owner-approved amendment): the one client is the
+    // managed browser client (its Auth: acquisition, refresh, events) with every
+    // data request — the selector's read, the submission re-check, the Storage
+    // upload and the swing_videos insert — bound to the account the page was
+    // rendered for (lib/drill-hub-session.ts ownerBoundClient). Still created
+    // exactly once, lazily, in a ref, so the selector and the submission share it.
     expect(analyzeSource.match(/createClient\(\)/g) ?? []).toHaveLength(1);
-    expect(analyzeSource).toContain("supabaseRef.current = createClient();");
+    expect(analyzeSource).toContain(
+      "return ownerBoundClient(createClient(), ownerId, process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);"
+    );
+    expect(analyzeSource).toContain("supabaseRef.current = analyzeClientFor(ownerRef.current);");
     expect(analyzeSource).toMatch(/const\s+supabase\s*=\s*supabaseRef\.current/);
+  });
+
+  it("A3: binds the selector's read and the re-check to the rendered owner, never the first session the browser shows", () => {
+    expect(analyzeSource).toContain('import { confirmOwnerSession, ownerBearer, ownerBoundClient } from "@/lib/drill-hub-session";');
+    expect(analyzeSource).toContain("const ownerRef = useRef<string | null>(rendered?.ownerId ?? null);");
+    // the selector reads only the rendered owner's bag: another account's session settles the panel, never a read
+    const owner = initSource.indexOf("const owner = ownerRef.current;");
+    const mismatch = initSource.indexOf("if (clubsUserId !== owner) {");
+    const read = initSource.indexOf("querySavedClubs(supabase, { userId: clubsUserId })");
+    expect(owner).toBeGreaterThan(-1);
+    expect(owner).toBeLessThan(mismatch);
+    expect(mismatch).toBeLessThan(read);
+    expect(initSource).not.toContain("clubsUserRef");
+    // a re-check refused for the owner says why, and still never substitutes a club
+    expect(submissionSource).toMatch(/if \(currentClubs\.status === "auth_error"\) \{\s*const notConfirmed = await ownerNoLongerConfirmed\(\);/);
   });
 
   it("does not use a memo as the owner of that client", () => {
@@ -353,10 +377,10 @@ describe("EQ3-S1 Analyze — submission order and the club revalidation step", (
     preprocessing: "await getTrimmedBlob()",
     session: "await supabase.auth.getSession()",
     revalidation: "querySavedClubs(supabase, { userId })",
-    storage: ".from(BUCKET).upload(",
-    videos: '.from("swing_videos")',
-    analysis: 'fetch("/api/v1/analyses"',
-    api: 'fetch("/api/analyze-swing"',
+    storage: "await transferSelection(", // A1: the V1 signed transfer
+    videos: 'sendAppRequest("finalize"', // P2: finalize writes the swing_videos row
+    analysis: 'sendAppRequest("analyses"',
+    api: 'sendAppRequest("analyze"',
   } as const;
 
   function at(anchor: string): number {
@@ -712,16 +736,16 @@ describe("EQ3-S2 Analyze — a selected Putter can never enter the full-swing pi
   });
 
   it("refuses before Storage", () => {
-    expect(at(guard)).toBeLessThan(at("supabase.storage"));
+    expect(at(guard)).toBeLessThan(at("await transferSelection(")); // A1: the V1 signed transfer
   });
 
   it("refuses before both database inserts", () => {
-    expect(at(guard)).toBeLessThan(at(String.raw`.from("swing_videos")`));
-    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/v1/analyses"`));
+    expect(at(guard)).toBeLessThan(at(String.raw`sendAppRequest("finalize"`)); // P2: the swing_videos row
+    expect(at(guard)).toBeLessThan(at(String.raw`sendAppRequest("analyses"`));
   });
 
   it("refuses before the analysis API call", () => {
-    expect(at(guard)).toBeLessThan(at(String.raw`fetch("/api/analyze-swing"`));
+    expect(at(guard)).toBeLessThan(at(String.raw`sendAppRequest("analyze"`));
   });
 
   it("uses fixed golfer-facing copy that explains rather than blames", () => {
@@ -948,10 +972,10 @@ describe("EQ4-S1 Analyze — mobile club selector placement", () => {
       "isPuttingCapturePresentation(savedClubs, selectedClubId)",
     );
     const preprocessing = submissionSource.indexOf("await getTrimmedBlob()");
-    const storage = submissionSource.indexOf("supabase.storage");
-    const videos = submissionSource.indexOf('.from("swing_videos")');
-    const analysis = submissionSource.indexOf('fetch("/api/v1/analyses"');
-    const api = submissionSource.indexOf('fetch("/api/analyze-swing"');
+    const storage = submissionSource.indexOf("await transferSelection("); // A1: the V1 signed transfer
+    const videos = submissionSource.indexOf('sendAppRequest("finalize"'); // P2: the swing_videos row
+    const analysis = submissionSource.indexOf('sendAppRequest("analyses"');
+    const api = submissionSource.indexOf('sendAppRequest("analyze"');
 
     for (const idx of [guard, preprocessing, storage, videos, analysis, api]) {
       expect(idx).toBeGreaterThanOrEqual(0);

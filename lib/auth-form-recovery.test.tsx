@@ -51,6 +51,16 @@ import { fileURLToPath } from "node:url";
  * fixed next step. The sign-up expectations below use that contract (the stubbed action returns those outcomes), and
  * the uncertainty copy no longer mentions the dashboard. The action itself is tested through the installed SDK in
  * lib/auth-signup-completion.test.ts. The sign-in tests are unchanged.
+ *
+ * A1 (AG-WEB-READY-03-R1-A1): the sign-in page no longer builds a browser client and calls signInWithPassword itself.
+ * It makes exactly one call, utils/supabase/session-publication.ts signInAndPublish(email, password), which owns the
+ * scratch sign-in client, the shared client and the publication under the session-publication lease, and answers with
+ * one fixed outcome: "signed_in" | "refused" | "interrupted" | "unsupported" (tested with the real SDK and a multi-tab
+ * stand-in in lib/session-publication.test.ts). That call is the page's boundary, so it is the spy here, replacing the
+ * old fake client and its signInWithPassword; every sign-in behaviour is still asserted against it: the fixed failure
+ * and interruption copy, a thrown or unusable result, retry, the duplicate-submit guard, privacy (no provider text or
+ * entered email on the page) and no server handoff (no Server Action, no server cookie write, no fetch). A1 adds the
+ * fixed "unsupported" outcome (this browser cannot keep a sign-in safely; nothing was sent).
  */
 
 const rt = vi.hoisted(() => ({
@@ -60,8 +70,7 @@ const rt = vi.hoisted(() => ({
   formPending: false,
   holding: 0,
   held: [] as (() => void)[],
-  createClient: null as null | (() => unknown),
-  signIn: null as null | ((...a: unknown[]) => unknown),
+  publish: null as null | ((...a: unknown[]) => unknown),
   signup: null as null | ((...a: unknown[]) => unknown),
   // AG-AUTH-02 recorders: calls into the login action module, and writes to the server request cookie store
   actionCalls: [] as { name: string; carriesTheSessionTokens: boolean }[],
@@ -97,7 +106,13 @@ vi.mock("next/link", async () => {
   const { createElement } = await import("react");
   return { default: (p: Record<string, unknown>) => createElement("a", { ...p, href: p.href }) };
 });
-vi.mock("@/utils/supabase/client", () => ({ createClient: () => rt.createClient!() }));
+// A1: the page's one sign-in call (see the header)
+// A2: the sign-in page also asks whether an End Session completion is pending (none here: a plain visit) and never runs one
+vi.mock("@/utils/supabase/session-publication", () => ({
+  signInAndPublish: (...a: unknown[]) => rt.publish!(...a),
+  endIntentPending: () => false,
+  completeEndedSession: () => Promise.reject(new Error("a plain visit runs no End Session completion")),
+}));
 // AG-AUTH-02: the real login action module, each exported function wrapped so a call is recorded and then run as is
 vi.mock("@/app/(auth)/login/actions", async (importOriginal) => {
   const real = await importOriginal<Record<string, unknown>>();
@@ -120,6 +135,8 @@ const COPY = {
   signInFailed: "We couldn't sign you in. Check your email and password, or try again in a moment.",
   signInInterrupted: "We couldn't finish signing you in. Please try again in a moment.",
   signInNotReady: "Sign-in needs JavaScript. If the button stays unavailable, check that JavaScript is on and reload this page.",
+  // A1 (R5): this browser cannot keep a sign-in safely; nothing was sent
+  signInUnsupported: "This browser can't keep your sign-in safe, so you weren't signed in and nothing was sent. Private browsing or blocked site data can cause this; try a regular window or another browser.",
   signUpFailed: "We couldn't create your account. Check your details or try again in a moment. If you already have an account, sign in instead.",
   // AG-AUTH-03: without the dashboard sentence (sign-up no longer redirects); the one completion's heading and body
   signUpUnconfirmed: "We couldn't confirm whether your account was created. Check your email or try signing in before creating it again.",
@@ -209,7 +226,8 @@ const button = (nodes: unknown[]) => {
   expect(b).toHaveLength(1);
   return b[0];
 };
-const status = (nodes: unknown[]) => all(nodes, (e) => e.props.role === "status").map(textOf).join("|");
+// A2: the sign-in page's End Session completion has its own status region (id login-end-status), empty on a plain visit
+const status = (nodes: unknown[]) => all(nodes, (e) => e.props.role === "status" && e.props.id !== "login-end-status").map(textOf).join("|");
 const BODY = { id: "body" };
 function runEffects(active: unknown = BODY) {
   focusLog.length = 0;
@@ -257,8 +275,7 @@ async function runFormAction(action: (f: FormData) => Promise<void>, fd: FormDat
 }
 const settle = (p: Promise<unknown>) => p.then(() => "resolved", () => "rejected");
 
-let createClient: ReturnType<typeof vi.fn>;
-let signIn: ReturnType<typeof vi.fn>;
+let publish: ReturnType<typeof vi.fn>;
 let signup: ReturnType<typeof vi.fn>;
 let win: { location: { href: string } };
 beforeEach(() => {
@@ -267,11 +284,9 @@ beforeEach(() => {
   rt.formPending = false;
   rt.holding = 0;
   rt.held = [];
-  signIn = vi.fn();
-  createClient = vi.fn(() => ({ auth: { signInWithPassword: signIn } }));
+  publish = vi.fn();
   signup = vi.fn();
-  rt.createClient = createClient;
-  rt.signIn = signIn;
+  rt.publish = publish;
   rt.signup = signup;
   rt.actionCalls = [];
   rt.cookieWrites = [];
@@ -283,7 +298,9 @@ beforeEach(() => {
 afterEach(() => {
   delete (globalThis as Record<string, unknown>).window;
 });
-const ok = () => ({ data: { session: { ...TOKENS }, user: { id: "u" } }, error: null });
+// A1: the helper's fixed outcomes (the session's tokens never reach the page)
+const SIGNED_IN = "signed_in";
+const REFUSED = "refused";
 
 // ── sign-in ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("sign-in: thrown, lost and unusable results settle visibly", () => {
@@ -292,10 +309,14 @@ describe("sign-in: thrown, lost and unusable results settle visibly", () => {
     runEffects(BODY); // hydrated: the page's effects have run (R1: the submit handler is ready)
   });
   // AG-AUTH-02: the two handoff cases (a lost or unusable handoff answer) were removed with the handoff itself
-  const cases: Array<[string, () => void, (keyof typeof COPY), { signIn: number }]> = [
-    ["the browser client cannot be created", () => { createClient.mockImplementation(() => { throw new Error(RAW); }); }, "signInInterrupted", { signIn: 0 }],
-    ["signInWithPassword throws", () => { signIn.mockRejectedValue(new TypeError("Failed to fetch")); }, "signInInterrupted", { signIn: 1 }],
-    ["signInWithPassword returns nothing usable", () => { signIn.mockResolvedValue(undefined); }, "signInInterrupted", { signIn: 1 }],
+  // A1: the old client-creation / signInWithPassword failures are now failures of the one sign-in call
+  const cases: Array<[string, () => void, (keyof typeof COPY), { publish: number }]> = [
+    ["the sign-in call throws at once (a browser client cannot be created)", () => { publish.mockImplementation(() => { throw new Error(RAW); }); }, "signInInterrupted", { publish: 1 }],
+    ["the sign-in call rejects (a lost request)", () => { publish.mockRejectedValue(new TypeError("Failed to fetch")); }, "signInInterrupted", { publish: 1 }],
+    ["the sign-in call returns nothing usable", () => { publish.mockResolvedValue(undefined); }, "signInInterrupted", { publish: 1 }],
+    ["the sign-in call returns an outcome the page does not know", () => { publish.mockResolvedValue({ data: { session: { ...TOKENS } }, error: null }); }, "signInInterrupted", { publish: 1 }],
+    ["the sign-in call reports the attempt interrupted (no answer in time, or the session could not be published and recorded)", () => { publish.mockResolvedValue("interrupted"); }, "signInInterrupted", { publish: 1 }],
+    ["the sign-in call reports this browser unsupported (A1 R5: nothing was sent)", () => { publish.mockResolvedValue("unsupported"); }, "signInUnsupported", { publish: 1 }],
   ];
   it.each(cases)("[behavior] %s: the fixed message, pending cleared, no navigation", async (_, arrange, copy, calls) => {
     arrange();
@@ -309,11 +330,11 @@ describe("sign-in: thrown, lost and unusable results settle visibly", () => {
     expect(after.html).not.toContain(DUMMY.email);
     expect(win.location.href).toBe("about:blank");
     expect(outcome).toBe("resolved"); // nothing escapes as an unhandled rejection
-    expect({ signIn: signIn.mock.calls.length }).toEqual(calls);
+    expect({ publish: publish.mock.calls.length }).toEqual(calls);
   });
 
   it("[behavior] after an interrupted attempt the message takes focus when focus had fallen to the page", async () => {
-    signIn.mockRejectedValue(new TypeError("Failed to fetch"));
+    publish.mockRejectedValue(new TypeError("Failed to fetch"));
     await settle(loginSubmit()(loginEvent()));
     render(LoginPage);
     expect(runEffects(BODY)).toEqual(["login-error"]);
@@ -323,36 +344,35 @@ describe("sign-in: thrown, lost and unusable results settle visibly", () => {
 
   it("[behavior] a second submit before the first settles starts no second request, and still blocks the browser's own submission", async () => {
     const d = deferred<unknown>();
-    signIn.mockReturnValue(d.promise);
+    publish.mockReturnValue(d.promise);
     const handler = loginSubmit();
     const e1 = loginEvent(), e2 = loginEvent(), e3 = loginEvent();
     const first = handler(e1);
     const second = handler(e2); // the same moment: before React has re-rendered the disabled button
     const third = loginSubmit()(e3); // after a re-render too
     await new Promise((r) => setTimeout(r, 0)); // let every started attempt reach its first request
-    const counts = { createClient: createClient.mock.calls.length, signIn: signIn.mock.calls.length };
-    d.resolve({ data: { session: null, user: null }, error: { message: RAW } });
+    const counts = { publish: publish.mock.calls.length };
+    d.resolve(REFUSED);
     await Promise.all([first, second, third].map(settle));
-    expect(counts).toEqual({ createClient: 1, signIn: 1 });
+    expect(counts).toEqual({ publish: 1 });
     for (const e of [e1, e2, e3]) expect(e.preventDefault).toHaveBeenCalledTimes(1);
     expect(alerts(render(LoginPage).nodes)).toEqual([COPY.signInFailed]);
   });
 
   it("[behavior] after a thrown attempt, another deliberate attempt runs again and can succeed", async () => {
-    signIn.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValueOnce(ok());
+    publish.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValueOnce(SIGNED_IN);
     await settle(loginSubmit()(loginEvent()));
     expect(button(render(LoginPage).nodes).props.disabled).toBe(false);
     await loginSubmit()(loginEvent());
-    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(publish).toHaveBeenCalledTimes(2);
     expect(win.location.href).toBe("/dashboard");
   });
 
-  it("[preserve] success: one client, one sign-in with exactly { email, password }, then /dashboard; no message, still busy, nothing reset", async () => {
-    signIn.mockResolvedValue(ok());
+  it("[preserve] success: one sign-in with exactly the entered email and password, then /dashboard; no message, still busy, nothing reset", async () => {
+    publish.mockResolvedValue(SIGNED_IN);
     const ev = loginEvent();
     await loginSubmit()(ev);
-    expect(createClient).toHaveBeenCalledTimes(1);
-    expect(signIn.mock.calls).toEqual([[{ email: DUMMY.email, password: DUMMY.password }]]);
+    expect(publish.mock.calls).toEqual([[DUMMY.email, DUMMY.password]]);
     expect(win.location.href).toBe("/dashboard");
     const after = render(LoginPage);
     expect(alerts(after.nodes)).toEqual([]);
@@ -360,14 +380,11 @@ describe("sign-in: thrown, lost and unusable results settle visibly", () => {
     expect(ev.currentTarget.reset).not.toHaveBeenCalled();
   });
 
+  // A1: a returned sign-in error, no session, an invalid token response or no data at all are each "refused" inside
+  // the helper (its own contract, lib/session-publication.test.ts); the page shows the one fixed failure message for it
   it.each([
-    ["a returned sign-in error", () => { signIn.mockResolvedValue({ data: { session: null, user: null }, error: { message: RAW, status: 400 } }); }],
-    ["no error and no session", () => { signIn.mockResolvedValue({ data: { session: null, user: null }, error: null }); }],
-    // what the installed auth-js returns when the token response holds no usable session
-    ["an invalid token response (the SDK's AuthInvalidTokenResponseError, no session)", () => {
-      signIn.mockResolvedValue({ data: { session: null, user: null }, error: { name: "AuthInvalidTokenResponseError", message: RAW, status: 500 } });
-    }],
-    ["a result with no data at all", () => { signIn.mockResolvedValue({ error: null }); }],
+    ["the helper's refused outcome (any returned sign-in error, or no session)", () => { publish.mockResolvedValue(REFUSED); }],
+    ["a refused outcome after a first refusal (the same fixed message again)", () => { publish.mockResolvedValueOnce(REFUSED).mockResolvedValueOnce(REFUSED); }],
   ])("[preserve] %s: the existing fixed message, values left in the form, another attempt possible", async (_, arrange) => {
     arrange();
     const ev = loginEvent();
@@ -382,13 +399,13 @@ describe("sign-in: thrown, lost and unusable results settle visibly", () => {
 
   it("[preserve] pending: the button is disabled and busy and the status region announces it", async () => {
     const d = deferred<unknown>();
-    signIn.mockReturnValue(d.promise);
+    publish.mockReturnValue(d.promise);
     const done = loginSubmit()(loginEvent());
     const during = render(LoginPage);
     expect(button(during.nodes).props.disabled).toBe(true);
     expect(button(during.nodes).props["aria-busy"]).toBe(true);
     expect(status(during.nodes)).toBe("Signing in…");
-    d.resolve({ data: { session: null, user: null }, error: { message: RAW } });
+    d.resolve(REFUSED);
     await done;
   });
 });
@@ -404,7 +421,7 @@ describe("AG-AUTH-02: after sign-in the page makes no further request with the s
   const observed = (o: unknown) => `observed ${JSON.stringify(o)}`;
 
   it("[retired] success: no login Server Action is called, no cookie is written through the server and no fetch is made; the page goes to /dashboard", async () => {
-    signIn.mockResolvedValue(ok());
+    publish.mockResolvedValue(SIGNED_IN);
     // any request the page might make by itself (for example to another session route) would go through fetch
     const realFetch = globalThis.fetch;
     let fetchCalls = 0;
@@ -414,41 +431,41 @@ describe("AG-AUTH-02: after sign-in the page makes no further request with the s
     } finally {
       globalThis.fetch = realFetch;
     }
-    const seen = { actionCalls: rt.actionCalls, cookieWrites: rt.cookieWrites, fetchCalls, signIn: signIn.mock.calls.length, href: win.location.href };
-    expect(seen, observed(seen)).toEqual({ actionCalls: [], cookieWrites: [], fetchCalls: 0, signIn: 1, href: "/dashboard" });
+    const seen = { actionCalls: rt.actionCalls, cookieWrites: rt.cookieWrites, fetchCalls, publish: publish.mock.calls.length, href: win.location.href };
+    expect(seen, observed(seen)).toEqual({ actionCalls: [], cookieWrites: [], fetchCalls: 0, publish: 1, href: "/dashboard" });
   });
 
   it("[retired] a completed sign-in no longer depends on a second request: with the server cookie store failing, the session still leads to /dashboard", async () => {
     rt.cookies = () => { throw new Error("request cookie store unavailable (synthetic)"); };
-    signIn.mockResolvedValue(ok());
+    publish.mockResolvedValue(SIGNED_IN);
     const outcome = await settle(loginSubmit()(loginEvent()));
     const seen = { outcome, alerts: alerts(render(LoginPage).nodes), href: win.location.href, actionCalls: rt.actionCalls };
     expect(seen, observed(seen)).toEqual({ outcome: "resolved", alerts: [], href: "/dashboard", actionCalls: [] });
   });
 
   it("[retired] retry after a definite failure, then success: two sign-in calls, one navigation, and across both no action call or server cookie write", async () => {
-    signIn.mockResolvedValueOnce({ data: { session: null, user: null }, error: { message: RAW, status: 400 } }).mockResolvedValueOnce(ok());
+    publish.mockResolvedValueOnce(REFUSED).mockResolvedValueOnce(SIGNED_IN);
     await loginSubmit()(loginEvent());
     expect(alerts(render(LoginPage).nodes)).toEqual([COPY.signInFailed]);
     expect(win.location.href).toBe("about:blank");
     await loginSubmit()(loginEvent());
-    const seen = { signIn: signIn.mock.calls.length, href: win.location.href, actionCalls: rt.actionCalls, cookieWrites: rt.cookieWrites };
-    expect(seen, observed(seen)).toEqual({ signIn: 2, href: "/dashboard", actionCalls: [], cookieWrites: [] });
+    const seen = { publish: publish.mock.calls.length, href: win.location.href, actionCalls: rt.actionCalls, cookieWrites: rt.cookieWrites };
+    expect(seen, observed(seen)).toEqual({ publish: 2, href: "/dashboard", actionCalls: [], cookieWrites: [] });
   });
 
-  it("[retired] duplicate submits while a successful sign-in is pending (the same task, and after a re-render): one client, one sign-in, one navigation, no action call", async () => {
+  it("[retired] duplicate submits while a successful sign-in is pending (the same task, and after a re-render): one sign-in, one navigation, no action call", async () => {
     const assigned: string[] = [];
     win.location = { set href(v: string) { assigned.push(v); }, get href() { return assigned[assigned.length - 1] ?? "about:blank"; } };
     const d = deferred<unknown>();
-    signIn.mockReturnValue(d.promise);
+    publish.mockReturnValue(d.promise);
     const handler = loginSubmit();
     const first = handler(loginEvent());
     const second = handler(loginEvent()); // the same task, before React re-renders the disabled button
     const third = loginSubmit()(loginEvent()); // after a re-render
-    d.resolve(ok());
+    d.resolve(SIGNED_IN);
     await Promise.all([first, second, third].map(settle));
-    const seen = { createClient: createClient.mock.calls.length, signIn: signIn.mock.calls.length, navigations: assigned, actionCalls: rt.actionCalls };
-    expect(seen, observed(seen)).toEqual({ createClient: 1, signIn: 1, navigations: ["/dashboard"], actionCalls: [] });
+    const seen = { publish: publish.mock.calls.length, navigations: assigned, actionCalls: rt.actionCalls };
+    expect(seen, observed(seen)).toEqual({ publish: 1, navigations: ["/dashboard"], actionCalls: [] });
   });
 
   it("[retired-guard] the sign-in page's code imports no Server Action and names no token, cookie or session handoff", () => {
@@ -456,8 +473,10 @@ describe("AG-AUTH-02: after sign-in the page makes no further request with the s
     // code only: line comments and JSX comments are removed first (the comments describe the inherited cookie honestly)
     const code = src.replace(/\{\/\*[\s\S]*?\*\/\}/g, "").replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/from "\.\/actions"|setSessionAction|setSession\(|access_token|refresh_token|cookie|test-auth|fetch\(/i);
-    expect(Array.from(src.matchAll(/^import .* from "([^"]+)";$/gm)).map((m) => m[1])).toEqual(["react", "@/utils/supabase/client", "next/link", "lucide-react"]);
-    expect(src.match(/signInWithPassword\(/g)).toHaveLength(1);
+    // A1: the one sign-in call comes from the publication module (no browser client, no SDK call in the page itself)
+    expect(Array.from(src.matchAll(/^import .* from "([^"]+)";$/gm)).map((m) => m[1])).toEqual(["react", "@/utils/supabase/session-publication", "next/link", "lucide-react"]);
+    expect(src.match(/signInAndPublish\(/g)).toHaveLength(1);
+    expect(src).not.toMatch(/signInWithPassword|createClient/);
     expect(src.match(/window\.location\.href = "\/dashboard";/g)).toHaveLength(1);
   });
 
@@ -636,10 +655,10 @@ describe("R1: the sign-in form is not submittable until its own handler is ready
     render(LoginPage);
     runEffects(BODY);
     const d = deferred<unknown>();
-    signIn.mockReturnValue(d.promise);
+    publish.mockReturnValue(d.promise);
     const done = loginSubmit()(loginEvent());
     expect(button(render(LoginPage).nodes).props.disabled).toBe(true);
-    d.resolve({ data: { session: null, user: null }, error: { message: RAW } });
+    d.resolve(REFUSED);
     await done;
     expect(button(render(LoginPage).nodes).props.disabled).toBe(false);
   });
@@ -688,6 +707,7 @@ describe("copy and source guards", () => {
 
   it("[taxonomy] no page message names the provider's reason or says whether an account exists", () => {
     const texts = [pageConstant("app/(auth)/login/page.tsx", "SIGN_IN_FAILED"), pageConstant("app/(auth)/login/page.tsx", "SIGN_IN_INTERRUPTED"),
+      pageConstant("app/(auth)/login/page.tsx", "SIGN_IN_UNSUPPORTED"),
       pageConstant("app/(auth)/signup/page.tsx", "SIGN_UP_FAILED"), pageConstant("app/(auth)/signup/page.tsx", "SIGN_UP_UNCONFIRMED"),
       pageConstant("app/(auth)/signup/page.tsx", "CONTINUE_HEADING"), pageConstant("app/(auth)/signup/page.tsx", "CONTINUE_BODY")];
     for (const text of texts) {
@@ -700,6 +720,7 @@ describe("copy and source guards", () => {
     const constant = (rel: string, name: string) => (new RegExp(`const ${name} =\\s*"([^"]*)";`).exec(source(rel)) || [])[1];
     expect(constant("app/(auth)/login/page.tsx", "SIGN_IN_FAILED")).toBe(COPY.signInFailed);
     expect(constant("app/(auth)/login/page.tsx", "SIGN_IN_INTERRUPTED")).toBe(COPY.signInInterrupted);
+    expect(constant("app/(auth)/login/page.tsx", "SIGN_IN_UNSUPPORTED")).toBe(COPY.signInUnsupported);
     expect(constant("app/(auth)/signup/page.tsx", "SIGN_UP_FAILED")).toBe(COPY.signUpFailed);
     expect(constant("app/(auth)/signup/page.tsx", "SIGN_UP_UNCONFIRMED")).toBe(COPY.signUpUnconfirmed);
     expect(constant("app/(auth)/signup/page.tsx", "CONTINUE_HEADING")).toBe(COPY.continueHeading);
@@ -714,10 +735,11 @@ describe("copy and source guards", () => {
   });
 
   // AG-AUTH-02: the setSessionAction call-site count was removed with the handoff (see the [retired-guard] checks)
-  it("[guard] the same calls: one signInWithPassword and one signupAction call site; the same destination", () => {
+  // A1: the one sign-in call site is signInAndPublish (it replaced the page's own signInWithPassword)
+  it("[guard] the same calls: one sign-in call site (signInAndPublish) and one signupAction call site; the same destination", () => {
     const login = source("app/(auth)/login/page.tsx");
     const signupSrc = source("app/(auth)/signup/page.tsx");
-    expect(login.match(/signInWithPassword\(/g)).toHaveLength(1);
+    expect(login.match(/signInAndPublish\(/g)).toHaveLength(1);
     expect(login.match(/window\.location\.href = "\/dashboard";/g)).toHaveLength(1);
     expect(signupSrc.match(/await signupAction\(formData\)/g)).toHaveLength(1);
     expect(signupSrc).toContain("<form action={handleSubmit}");

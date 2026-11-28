@@ -97,6 +97,17 @@ export type PillarKey = (typeof PILLAR_KEYS)[number];
 /** Upper bound on each finding list, as the response schema describes it. */
 export const MAX_FINDINGS = 4;
 
+/**
+ * AG-WEB-READY-10-P2. Upper bound on the stored executive summary (swing_analysis.feedback), enforced by the
+ * validator and mirrored, never stricter, by the database's result bound for background completion
+ * (analysis_result_ok in 20261127120000_analysis_jobs.sql). Generous: a summary is a few sentences.
+ */
+export const MAX_EXECUTIVE_SUMMARY_CHARS = 4000;
+/** P2. The database bounds of a stored result (metrics object, whole result, tempo); compared with the SQL by a test. */
+export const MAX_STORED_METRICS_BYTES = 65536;
+export const MAX_STORED_RESULT_BYTES = 262144;
+export const MAX_STORED_TEMPO_RATIO = 99.99;
+
 /** The rubric's clamp: a scored result lies within it. */
 export const SCORE_FLOOR = RUBRIC_SCORE_FLOOR;
 export const SCORE_CEILING = RUBRIC_SCORE_CEILING;
@@ -291,6 +302,13 @@ class Rejected extends Error {
 function text(value: unknown): string {
   if (!nonEmpty(value)) throw new Rejected("bad_text");
   return value;
+}
+
+/** P2: the executive summary is text within MAX_EXECUTIVE_SUMMARY_CHARS (an existing rejection code, no new one). */
+function boundedSummary(value: unknown): string {
+  const summary = text(value);
+  if (summary.length > MAX_EXECUTIVE_SUMMARY_CHARS) throw new Rejected("bad_text");
+  return summary;
 }
 
 function optionalText(value: unknown): string | null {
@@ -538,7 +556,7 @@ export function validateFullSwingProviderResponse(value: unknown): FullSwingProv
         highlights,
         deficiencies,
         drills,
-        executive_summary: text(value.executive_summary),
+        executive_summary: boundedSummary(value.executive_summary),
         practice_focus: optionalText(value.practice_focus),
         pro_cue: optionalText(value.pro_cue),
         scorable,
@@ -696,4 +714,84 @@ export function readMetricEvidence(value: unknown): MetricEvidence | null {
     out[key] = { ai_video_estimate: ai as number | string | null, client_unverified_estimate: client as number | string | null };
   }
   return { schema_version: METRIC_EVIDENCE_VERSION, ...(out as Record<FullSwingMetricKey, MetricEvidenceEntry>) };
+}
+
+// ── Stored result (shared by the synchronous route and the background worker) ─
+
+/** "N:1" / "N.N:1" as the number stored in swing_analysis.tempo_ratio, or null (moved unchanged from the route). */
+export function parseTempoRatioToNumber(s: string): number | null {
+  const parts = s.split(":").map(Number);
+  if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1]) && parts[1] !== 0) {
+    return parts[0] / parts[1];
+  }
+  return null;
+}
+
+/** The nine stored result columns of a completed full-swing analysis. */
+export interface StoredFullSwingResult {
+  readonly score: number | null;
+  readonly feedback: string;
+  readonly spine_angle: number | null;
+  readonly hip_rotation: number | null;
+  readonly shoulder_rotation: number | null;
+  readonly tempo_ratio: number | null;
+  readonly metrics: Record<string, unknown>;
+  readonly swing_highlights: ReadonlyArray<Record<string, unknown>>;
+  readonly mechanical_deficiencies: ReadonlyArray<Record<string, unknown>>;
+}
+
+/**
+ * AG-WEB-READY-10-P2. The stored columns for a validated report, moved without change from the synchronous route
+ * (app/api/analyze-swing/route.ts step 7) so the route and the worker write the identical shape. The stored estimates
+ * are the model's own values; a client estimate is recorded beside each one, labelled unverified, and never takes
+ * its place. The score is null when the video could not be scored, never 0 or a default.
+ */
+export function toStoredFullSwingResult(
+  report: FullSwingReport,
+  assessment: RubricAssessment,
+  client: AcceptedClientEstimates,
+): StoredFullSwingResult {
+  const metricEvidence = buildMetricEvidence(report, client);
+  const metrics = {
+    scoring_breakdown: report.scoring_breakdown,
+    evidence_limits:   report.evidence_limits,
+    evidence_coverage: report.evidence_coverage,
+    metric_evidence:   metricEvidence,
+    fault_tags:        report.fault_tags,
+    drills:            report.drills,
+    posture:           report.posture,
+    swing_plane:       report.swing_plane,
+    impact:            report.impact,
+    practice_focus:    report.practice_focus,
+    pro_cue:           report.pro_cue,
+    // Internal and versioned: model declarations, item outcomes and the applied
+    // adjustments. Never served: the read authority's metrics allow-list drops it.
+    rubric_assessment: assessment,
+  };
+  // S6-R1A. The model assesses no checkpoint, joint position or severity, so none is stored: these are null
+  // ("not assessed"). The coaching text is kept as written.
+  const swing_highlights = report.highlights.map((h) => ({
+    checkpoint:         null,
+    positive_movement:  h.title,
+    mechanical_benefit: h.description,
+  }));
+  const mechanical_deficiencies = report.deficiencies.map((d) => ({
+    checkpoint:              null,
+    joint_coordinate:        null,
+    fault_description:       d.title,
+    corrective_drill_detail: d.description,
+    severity:                null,
+    corrective_drill_title:  "",
+  }));
+  return {
+    score:             report.score,
+    feedback:          report.executive_summary,
+    spine_angle:       report.spine_angle,
+    hip_rotation:      report.hip_rotation,
+    shoulder_rotation: report.shoulder_rotation,
+    tempo_ratio:       report.tempo_ratio === null ? null : parseTempoRatioToNumber(report.tempo_ratio),
+    metrics,
+    swing_highlights,
+    mechanical_deficiencies,
+  };
 }

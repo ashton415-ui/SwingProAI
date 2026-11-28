@@ -33,9 +33,15 @@ const state = vi.hoisted(() => ({
   networkFailure: false,
   /** simulates getUser() throwing outright */
   throwOnVerify: false,
+  /** A4 review: Auth answers the verification with this HTTP status (an ordinary AuthApiError, as auth-js reports it) */
+  answerStatus: null as number | null,
   created: [] as { url: string; key: string; authorization: string | null }[],
 }));
 
+// AG-WEB-READY-03-R1: the verifier reads the request's raw Cookie header (utils/supabase/session-cookie-layout.ts),
+// not cookies(). The mock serves the same jar both ways: `state.cookies` (insertion order) becomes a Cookie header
+// with URL-encoded values, exactly as a browser sends what the session storage wrote; an explicit `cookie` entry in
+// `state.headers` takes precedence (raw header cases).
 vi.mock("next/headers", () => ({
   cookies: async () => ({
     get: (name: string) =>
@@ -44,7 +50,15 @@ vi.mock("next/headers", () => ({
         : undefined,
   }),
   headers: async () => ({
-    get: (name: string) => state.headers.get(name.toLowerCase()) ?? null,
+    get: (name: string) => {
+      const lower = name.toLowerCase();
+      if (lower === "cookie" && !state.headers.has("cookie")) {
+        return state.cookies.size === 0
+          ? null
+          : Array.from(state.cookies, ([n, v]) => `${n}=${encodeURIComponent(v)}`).join("; ");
+      }
+      return state.headers.get(lower) ?? null;
+    },
   }),
 }));
 
@@ -60,6 +74,9 @@ vi.mock("@supabase/supabase-js", () => ({
       auth: {
         getUser: async (jwt?: string) => {
           if (state.throwOnVerify) throw new Error("socket hang up");
+          if (state.answerStatus !== null) {
+            return { data: { user: null }, error: { name: "AuthApiError", status: state.answerStatus, message: "synthetic" } };
+          }
           if (state.networkFailure) {
             return {
               data: { user: null },
@@ -81,6 +98,7 @@ vi.mock("@supabase/supabase-js", () => ({
   },
 }));
 
+import { sessionBinding } from "@/utils/supabase/session-cookie-layout";
 import {
   authStorageKey,
   createClient,
@@ -228,14 +246,16 @@ describe("verified cookie resolution", () => {
     expect((await resolveVerifiedAuth()).status).toBe("absent");
   });
 
-  it("10. a populated bare cookie short-circuits the chunk scan", async () => {
+  it("10. a bare cookie beside chunks is ambiguous and identifies no one (AG-WEB-READY-03-R1: was 'bare short-circuits')", async () => {
+    // Deliberate contract reversal: @supabase/ssr 0.3.0's own writer could leave an OLDER bare session beside a NEWER
+    // chunked one, and a reader that took the bare key first served the older golfer's session. Every reader now
+    // shares one strict layout rule: a jar holding more than one layout is ambiguous, verified as no one, and Auth is
+    // never asked (no client is created).
     state.cookies.set(KEY, envelope(VALID_TOKEN));
     state.cookies.set(`${KEY}.0`, "{ garbage that must never be read");
 
-    const auth = await resolveVerifiedAuth();
-
-    assertAuthenticated(auth);
-    expect(auth.userId).toBe("verified-user-id");
+    expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    expect(state.created).toEqual([]);
   });
 
   it("11. joins contiguous chunks byte-exactly", async () => {
@@ -248,14 +268,131 @@ describe("verified cookie resolution", () => {
     expect((await resolveVerifiedAuth()).status).toBe("authenticated");
   });
 
-  it("12. ignores a stale numbered chunk left beside a valid bare cookie", async () => {
+  it("12. a stale numbered chunk beside a valid bare cookie makes the jar ambiguous: invalid, never the bare one (AG-WEB-READY-03-R1 reversal)", async () => {
     state.cookies.set(KEY, envelope(VALID_TOKEN));
     state.cookies.set(`${KEY}.0`, envelope(REJECTED_TOKEN));
 
-    const auth = await resolveVerifiedAuth();
+    expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    expect(state.created).toEqual([]);
+  });
 
+  it("12b. malformed family members, gaps, a stray index, an index over 15 and empty values are ambiguous: invalid (F6)", async () => {
+    const raw = envelope(VALID_TOKEN);
+    const jars: [string, string][][] = [
+      [[`${KEY}.00`, raw]],
+      [[KEY, raw], [`${KEY}.x`, "y"]],
+      [[`${KEY}.0`, raw.slice(0, 10)], [`${KEY}.2`, raw.slice(10)]],
+      [[`${KEY}.0`, raw.slice(0, 10)], [`${KEY}.1`, raw.slice(10)], [`${KEY}.01`, "z"]],
+      [[`${KEY}.1`, raw]],
+      Array.from({ length: 17 }, (_, i) => [`${KEY}.${i}`, i === 0 ? raw : " "] as [string, string]),
+    ];
+    for (const entries of jars) {
+      state.cookies.clear();
+      for (const [n, v] of entries) state.cookies.set(n, v);
+      expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    }
+    state.cookies.clear();
+    state.headers.set("cookie", `${KEY}=`);
+    expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    state.headers.set("cookie", `${KEY}=${encodeURIComponent(raw)}; ${KEY}=${encodeURIComponent(raw)}`);
+    expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    expect(state.created).toEqual([]);
+  });
+
+  it("12d. the cookie value is decoded once, as the browser reads it: '%22' inside the stored user's metadata is text, not a quote (the golfer is not locked out); a value that is not JSON after that one decode is no session", async () => {
+    const withPercent = JSON.stringify({
+      access_token: VALID_TOKEN,
+      refresh_token: "refresh-token-value",
+      expires_at: 1,
+      user: { id: "envelope-claimed-id", user_metadata: { nickname: 'fifty%22 "putts"' } },
+    });
+    state.cookies.set(KEY, withPercent); // the header mock URL-encodes it once, as the browser's writer does
+    expect((await resolveVerifiedAuth()).status).toBe("authenticated");
+    state.cookies.clear();
+    state.headers.set("cookie", `${KEY}=${encodeURIComponent(encodeURIComponent(envelope(VALID_TOKEN)))}`); // encoded twice
+    expect((await resolveVerifiedAuth()).status).toBe("invalid");
+  });
+
+  it("12c. the verifier reads the request's raw Cookie header with the shared layout reader, never cookies()", () => {
+    const server = readSource("utils/supabase/server.ts").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+    expect(server).toContain('const pairs = parseCookieHeader(headerList.get("cookie") ?? "");');
+    expect(server).toContain("const layout = readSessionLayout(pairs, authStorageKey());");
+    expect(server).not.toMatch(/\bcookies\(\)/);
+  });
+});
+
+// ─── The binding cookie (A1 R2) ──────────────────────────────────────────────
+//
+// The browser's own writer sets `swingproai-session-binding` (the SHA-256 of the access token it stored, or "none") in
+// the same step as every session write or removal; a tab still running a previous bundle cannot. A session the binding
+// does not vouch for identifies no one here — not in the verifier, not in createClient() — whatever Auth would say about
+// its token. No binding at all is the pre-migration state and is read as before.
+
+describe("the binding cookie (a session written outside the browser's own writer)", () => {
+  const BINDING = "swingproai-session-binding";
+  const OTHER_TOKEN = "other.valid.access.token";
+  const bindingOf = async (token: string) => (await sessionBinding(token)) as string;
+  beforeEach(() => {
+    state.users.set(OTHER_TOKEN, { id: "other-verified-user-id", email: "other@example.com" });
+  });
+
+  it("12e. a session whose binding names its access token authenticates (bare and chunked)", async () => {
+    state.cookies.set(KEY, envelope(VALID_TOKEN));
+    state.cookies.set(BINDING, await bindingOf(VALID_TOKEN));
+    const auth = await resolveVerifiedAuth();
     assertAuthenticated(auth);
-    expect(auth.accessToken).toBe(VALID_TOKEN);
+    expect(auth.userId).toBe("verified-user-id");
+    state.cookies.clear();
+    const raw = envelope(VALID_TOKEN);
+    state.cookies.set(`${KEY}.0`, raw.slice(0, 40));
+    state.cookies.set(`${KEY}.1`, raw.slice(40));
+    state.cookies.set(BINDING, await bindingOf(VALID_TOKEN));
+    expect((await resolveVerifiedAuth()).status).toBe("authenticated");
+  });
+
+  it("12f. a complete, Auth-valid session the binding does NOT vouch for (a previous bundle's late write of another account): invalid, never authenticated as that account; Auth is not even asked; createClient carries no token", async () => {
+    state.cookies.set(KEY, envelope(OTHER_TOKEN)); // live and unrevoked at Auth
+    state.cookies.set(BINDING, await bindingOf(VALID_TOKEN)); // the browser's own writer last stored VALID_TOKEN's session
+    expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    expect(await getServerSession()).toBeNull();
+    expect(state.created).toEqual([]); // no Auth client was built: the token was never sent for verification
+    await createClient();
+    expect(state.created.map((c) => c.authorization)).toEqual([null]);
+  });
+
+  it("12g. 'none' (the browser's own writer removed the session) beside a session, a duplicated binding, and a value that is not a binding are all invalid", async () => {
+    for (const binding of [["none"], [await bindingOf(VALID_TOKEN), await bindingOf(VALID_TOKEN)], ["not-a-binding"]]) {
+      state.cookies.clear();
+      state.headers.clear();
+      const pairs = [`${KEY}=${encodeURIComponent(envelope(VALID_TOKEN))}`, ...binding.map((b) => `${BINDING}=${b}`)];
+      state.headers.set("cookie", pairs.join("; "));
+      expect((await resolveVerifiedAuth()).status).toBe("invalid");
+    }
+  });
+
+  it("12h. negative controls: no binding at all (pre-migration) authenticates as before; a binding without a session is simply absent; a valid Bearer ignores the cookie and its binding", async () => {
+    state.cookies.set(KEY, envelope(VALID_TOKEN));
+    expect((await resolveVerifiedAuth()).status).toBe("authenticated");
+    state.cookies.clear();
+    state.cookies.set(BINDING, await bindingOf(VALID_TOKEN));
+    expect((await resolveVerifiedAuth()).status).toBe("absent");
+    state.cookies.set(KEY, envelope(OTHER_TOKEN));
+    state.headers.set("authorization", `Bearer ${VALID_TOKEN}`);
+    const auth = await resolveRouteAuth();
+    assertAuthenticated(auth);
+    expect([auth.source, auth.userId]).toEqual(["bearer", "verified-user-id"]);
+  });
+
+  it("12i. a binding that cannot be checked here (no SubtleCrypto) is an outage, never a sign-out or an identity", async () => {
+    state.cookies.set(KEY, envelope(VALID_TOKEN));
+    state.cookies.set(BINDING, await bindingOf(VALID_TOKEN));
+    vi.stubGlobal("crypto", {});
+    try {
+      expect((await resolveVerifiedAuth()).status).toBe("verification_unavailable");
+      await expect(getServerSession()).rejects.toBeInstanceOf(AuthVerificationUnavailableError);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -584,4 +721,35 @@ describe("verification failure classification", () => {
 
     expect((await resolveRouteAuth()).status).toBe("verification_unavailable");
   });
+
+  // A4 review (security finding 1): auth-js reports only 502-504 and 520-530 as retryable, so Auth's own 500 or a 429
+  // arrives as an ordinary API error with a status. It judged nothing about the credential: an outage, never "invalid".
+  for (const status of [500, 503, 429]) {
+    it(`A4: Auth answering ${status} is an outage on both ingress paths — never a refusal, never a sign-out`, async () => {
+      state.answerStatus = status;
+      try {
+        state.cookies.set(KEY, envelope(VALID_TOKEN));
+        expect((await resolveVerifiedAuth()).status).toBe("verification_unavailable");
+        await expect(getServerSession()).rejects.toBeInstanceOf(AuthVerificationUnavailableError);
+        state.headers.set("authorization", `Bearer ${VALID_TOKEN}`);
+        expect((await resolveRouteAuth()).status).toBe("verification_unavailable");
+      } finally {
+        state.answerStatus = null;
+      }
+    });
+  }
+  for (const status of [400, 401, 403, 404]) {
+    it(`A4 control: Auth refusing the credential with ${status} stays "invalid"`, async () => {
+      state.answerStatus = status;
+      try {
+        state.cookies.set(KEY, envelope(VALID_TOKEN));
+        expect((await resolveVerifiedAuth()).status).toBe("invalid");
+        expect(await getServerSession()).toBeNull();
+        state.headers.set("authorization", `Bearer ${VALID_TOKEN}`);
+        expect((await resolveRouteAuth()).status).toBe("invalid");
+      } finally {
+        state.answerStatus = null;
+      }
+    });
+  }
 });

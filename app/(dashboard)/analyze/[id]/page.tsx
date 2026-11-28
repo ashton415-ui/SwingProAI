@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
 import { authorizeOwnedAnalysisRow } from "@/lib/analysis-result-read-authority";
+import { readGolferJobState } from "@/lib/analysis-attempt-precedence";
 import { classifyFailedAnalysisVideo, signOwnedSwingVideoPlayback } from "@/lib/swing-video-source";
 import AnalysisReport, { type AnalysisData } from "./AnalysisReport";
 import Link from "next/link";
@@ -105,6 +106,11 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
       ? await classifyFailedAnalysisVideo(supabase, videoRow?.storage_path, user.id)
       : null;
 
+  // AG-WEB-READY-10-P2. The durable attempt state, read on the golfer's own session (owner-bound in the database;
+  // golfer-facing states only). A read, never an analysis request. A1: "unavailable" when it cannot be read; the report
+  // then says so and offers only a fresh read (a stored completed report is shown as before).
+  const job = await readGolferJobState(supabase, row.id);
+
   const formattedDate = videoRow?.created_at
     ? new Date(videoRow.created_at).toLocaleDateString("en-US", {
         month: "short", day: "numeric", year: "numeric",
@@ -142,6 +148,7 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
         videoSignedUrl={videoSignedUrl}
         clubDisplayName={clubDisplayName}
         failedReason={failedReason}
+        job={job}
       />
     </div>
   );

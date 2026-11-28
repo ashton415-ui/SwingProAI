@@ -9,6 +9,15 @@ import {
   Lock, BarChart2, FileUp, Camera, Square,
 } from "lucide-react";
 import { createClient } from "@/utils/supabase/client";
+import { sessionUnverifiedReason } from "@/utils/supabase/session-storage";
+import {
+  sessionEndPending,
+  watchLineageEnd,
+  watchSessionEnd,
+  type OwnerRefusal,
+} from "@/utils/supabase/session-publication";
+import { confirmOwnerSession, ownerBearer, ownerBoundClient } from "@/lib/drill-hub-session";
+import { useRenderedSession } from "@/components/navigation/SessionKeeper";
 import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 import { ASSESSMENT_LABEL, SCORE_BASIS, UNSCORED_COPY, UNSCORED_LABEL } from "@/lib/swing-metric-presentation";
 import {
@@ -45,6 +54,19 @@ import {
   selectCameraRecorderMimeType,
 } from "@/lib/analyze-camera-capture";
 import type { DeficiencyItem, HighlightItem } from "@/types/database";
+import {
+  TUS_RESUMABLE_VERSION,
+  UPLOAD_CHUNK_SIZE,
+  buildResumableEndpoint,
+  buildTusUploadMetadata,
+  buildUploadObjectPath,
+  isUploadMimeType,
+  parseSignedUploadGrant,
+  resolveTusUploadUrl,
+  type UploadMimeType,
+} from "@/lib/api/v1-upload-dto";
+import { ADMISSION_DECLARATION_HEADER, ADMISSION_DECLARATION_VALUE } from "@/lib/analysis-attempt-precedence";
+import { sendAppRequest } from "@/lib/protected-web-requests";
 
 /** Browsers open a file input on Space but not on Enter, which is what a
  *  keyboard user presses on a button-like control. Enter opens it too. */
@@ -63,12 +85,64 @@ function getUserTier(): SubscriptionTier {
 }
 
 // ─── Auth ──────────────────────────────────────────────────────────────────────
-// Authentication is owned entirely by the managed browser client in
-// utils/supabase/client.ts. This page must never read the auth cookie itself,
-// never copy an access token into a header, and never disable session
-// persistence or auto-refresh — a hand-copied token cannot be refreshed and
-// eventually reaches its `exp`, which Storage rejects mid-submission.
+// Session acquisition, refresh and identity events are owned entirely by the
+// managed browser client in utils/supabase/client.ts. This page never reads the
+// auth cookie itself and never disables session persistence or auto-refresh — a
+// token frozen at page load cannot be refreshed and eventually reaches its `exp`,
+// which Storage rejects mid-submission.
+//
+// A3. The page belongs to the account the dashboard layout was rendered for
+// (the server-verified owner: components/navigation/SessionKeeper.tsx), never
+// to whichever session the browser holds when the page first looks. Every
+// owner-specific request carries a credential confirmed for that owner at the
+// moment it is sent: the data client re-confirms the managed session for every
+// PostgREST and Storage request (lib/drill-hub-session.ts ownerBoundClient);
+// the analysis-request doorway and (A4) the analysis call, whose routes verify
+// a Bearer token themselves and then read no cookie, each get the owner's token
+// confirmed immediately before they are sent (ownerBearer) and go with
+// `credentials: "omit"`, so no cookie — possibly another sign-in's, written by
+// any writer after the confirmation — travels with them. A request whose owner
+// is not confirmed is never sent with another account's credential — it is not
+// sent at all.
+// P4. A build that opts into the protected browser path (a deployment behind a
+// platform sign-in, which admits only requests that carry its own cookie) sends
+// these four requests to fixed web endpoints on this exact origin instead, with
+// this origin's cookies and no redirect followed; each endpoint refuses a request
+// without the Bearer, whose verification never consults the cookie
+// (lib/protected-web-requests.ts, lib/api/protected-web-boundary.ts). The owner
+// confirmation before each send is unchanged.
 const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+// A2. The managed client refuses a session read it cannot confirm (another
+// sign-in's write not visible here yet, a write from outside the browser's own
+// writer, an unreadable lineage store: utils/supabase/session-storage.ts), and a
+// read can fail outright (Auth unreachable). Neither is a sign-out, and neither
+// reaches the golfer as SDK text: each has fixed copy that says what to do.
+const SESSION_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm which account is signed in on this device, so your swing wasn't analyzed. Your video is still selected — try again, or sign in again.";
+const SESSION_UNAVAILABLE_MESSAGE =
+  "We couldn't check your sign-in just now, so your swing wasn't analyzed. Your video is still selected — try again in a moment.";
+// A sign-out or account change noticed while an analysis runs stops it before
+// its next step; it is never continued for another account.
+const ACCOUNT_CHANGED_MESSAGE =
+  "This browser is now signed in to a different account, so this analysis was stopped. Refresh the page before you try again.";
+// A result that arrives after the page's sign-in changed belongs to the earlier
+// sign-in: it is not shown here and nothing navigates.
+const ANALYSIS_AFTER_CHANGE_MESSAGE =
+  "This browser's sign-in changed while your swing was being analyzed, so the result isn't shown here. Refresh the page to continue with the account that's signed in now.";
+// Anything else that is not one of this page's own messages (or the analysis
+// server's own explanation) is never shown as it is.
+const ANALYSIS_FAILED_MESSAGE = "We couldn't finish this analysis. Please try again.";
+/** The submission's session read is given this long before it is reported as unavailable. */
+const SESSION_READ_DEADLINE_MS = 12_000;
+
+/** `work()`'s result, or null when it has not settled within `ms` (it keeps running; its late result is ignored). */
+function settleWithin<T>(work: () => Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([work(), late]).finally(() => clearTimeout(timer));
+}
 
 // ─── Equipment context ─────────────────────────────────────────────────────────
 // Choosing a club is optional. Every message below is fixed copy: the saved-club
@@ -81,6 +155,74 @@ const CLUBS_AUTH_MESSAGE =
   "We couldn't confirm your session, so your clubs aren't available. You can still analyze without a club.";
 const CLUBS_UNAVAILABLE_MESSAGE =
   "We couldn't load your clubs right now. You can still analyze without a club.";
+// A2. Why the clubs could not be shown when it is the session read itself, not
+// the clubs query: fixed copy, each with the one action that can help.
+const CLUBS_UNCONFIRMED_MESSAGE =
+  "We couldn't confirm which account is signed in on this device, so your clubs aren't shown. Try again, or sign in again.";
+const CLUBS_SESSION_UNAVAILABLE_MESSAGE =
+  "We couldn't check your sign-in just now, so your clubs aren't shown. Try again in a moment.";
+const CLUBS_ACCOUNT_CHANGED_MESSAGE =
+  "This browser is now signed in to a different account, so the clubs shown here were cleared. Refresh the page to continue with the account that's signed in now.";
+/** A load (session read and clubs query together) that has not finished by then is reported as unavailable. */
+const CLUBS_LOAD_DEADLINE_MS = 12_000;
+type ClubsIssue = "unconfirmed" | "unavailable" | "signed_out" | "account_changed";
+type IdentityEnd = "signed_out" | "account_changed";
+
+/** The user id a session object from the managed client states, or null. Never throws. */
+function sessionUserId(session: unknown): string | null {
+  if (session === null || typeof session !== "object") return null;
+  try {
+    const user = (session as { user?: unknown }).user;
+    const id = user !== null && typeof user === "object" ? (user as { id?: unknown }).id : undefined;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a managed-client event means for a page showing `shownUserId`'s clubs (null: none shown yet): SIGNED_OUT ends
+ * it; an event carrying another golfer's session is an account change. A null session on any other event is not a
+ * sign-out (the client reports an unconfirmed start-up read that way).
+ */
+function identityEndFromEvent(shownUserId: string | null, event: string, session: unknown): IdentityEnd | null {
+  if (event === "SIGNED_OUT") return "signed_out";
+  if (shownUserId === null) return null;
+  const id = sessionUserId(session);
+  return id !== null && id !== shownUserId ? "account_changed" : null;
+}
+
+/** The fixed copy for why the clubs cannot be shown because of the session. */
+function clubsNoticeMessage(issue: ClubsIssue | null): string {
+  return issue === "unconfirmed" ? CLUBS_UNCONFIRMED_MESSAGE
+    : issue === "unavailable" ? CLUBS_SESSION_UNAVAILABLE_MESSAGE
+      : issue === "account_changed" ? CLUBS_ACCOUNT_CHANGED_MESSAGE
+        : CLUBS_AUTH_MESSAGE;
+}
+
+/**
+ * The club panel's notice when the clubs cannot be shown because of the session, with its one recovery action. Its
+ * text is announced by the panel's persistent status region (a region mounted together with its text is often missed).
+ */
+function ClubsSessionNotice({ issue, onRetry }: { issue: ClubsIssue | null; onRetry: () => void }) {
+  const message = clubsNoticeMessage(issue);
+  const action = "min-h-11 px-4 rounded-xl border border-white/15 text-xs font-bold text-white hover:bg-white/5 inline-flex items-center justify-center";
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-gray-400">{message}</p>
+      <div className="flex flex-wrap gap-2">
+        {(issue === "unconfirmed" || issue === "unavailable") && (
+          <button type="button" onClick={onRetry} className={action}>Try again</button>
+        )}
+        {issue === "account_changed" ? (
+          <button type="button" onClick={() => window.location.reload()} className={action}>Refresh page</button>
+        ) : issue !== "unavailable" && (
+          <Link href="/login" className={action}>Sign in again</Link>
+        )}
+      </div>
+    </div>
+  );
+}
 // Raised when a club that was selectable when the page loaded is no longer in
 // the golfer's active bag at submission time. The analysis is refused rather
 // than quietly recorded against a different club, or against no club at all.
@@ -116,6 +258,9 @@ const CLIP_TOO_LARGE_MESSAGE =
   "This clip is too large to analyse. Trim it to just the swing — a few seconds — and try again.";
 const UPLOAD_FAILED_MESSAGE =
   "We couldn't upload your video. Check your connection, then tap Run Analyzer again — your video is still selected.";
+/** AG-WEB-READY-10-P3: the transfer is kept, but Storage has not confirmed how much of the clip arrived. */
+const UPLOAD_UNCONFIRMED_MESSAGE =
+  "Your upload was interrupted and we couldn't confirm how much of your video arrived. Check your connection, then tap Run Analyzer again to continue — your video is still selected.";
 const ANALYSIS_CONNECTION_LOST_MESSAGE =
   "We lost the connection while your swing was being analysed. Check History in a moment; if it isn't there, run it again.";
 
@@ -146,9 +291,241 @@ interface AnalysisResult {
   _upgradeMessage?: string;
 }
 
-const BUCKET = "swing-videos";
 const MAX_FILE_MB = 250;
 const MAX_SEGMENT_SECONDS = 15;
+
+// ── AG-WEB-READY-10-P2: one stable upload identity per deliberate clip selection ─────────────────────────────────
+// The selection is the signed-in owner, the chosen file, its trim and its club. Pressing Run again for the SAME
+// selection (after a lost answer, a dropped connection or a refusal) re-sends the SAME upload id through the V1 upload
+// contract's object key, so Storage (one immutable object key), swing_videos (the id is the primary key), the analysis request (one
+// per video) and the admission (one attempt per analysis) all answer the existing records: no second upload, video,
+// analysis or reservation. Any new selection, or another account, gets a new id. Held in memory for this page only.
+interface UploadIntent {
+  readonly ownerId: string | null;
+  readonly file: File;
+  readonly trimStart: number;
+  readonly trimEnd: number;
+  readonly clubId: string | null;
+  readonly uploadId: string;
+  /** The prepared clip, kept so a repeat sends the identical bytes. */
+  blob: Blob | null;
+  /** An upload of this selection was sent: a repeat asks finalize first whether the object is already stored. */
+  sent: boolean;
+  /** A1: this selection's signed resumable transfer (page memory only), so a repeat resumes it rather than re-sending. */
+  transfer: SignedTransfer | null;
+}
+
+function sameSelection(
+  intent: UploadIntent | null,
+  selection: Pick<UploadIntent, "ownerId" | "file" | "trimStart" | "trimEnd" | "clubId">,
+): intent is UploadIntent {
+  return intent !== null && intent.ownerId !== null && intent.ownerId === selection.ownerId && intent.file === selection.file
+    && intent.trimStart === selection.trimStart && intent.trimEnd === selection.trimEnd && intent.clubId === selection.clubId;
+}
+
+/** The V1 content type of a clip: its MIME base type, or (when a platform reports none) its name's extension; or null. */
+function uploadMimeTypeOf(blob: Blob, fileName: string): UploadMimeType | null {
+  const base = blob.type.split(";")[0].trim().toLowerCase();
+  if (isUploadMimeType(base)) return base;
+  if (base === "") {
+    if (/\.(mp4|m4v)$/i.test(fileName)) return "video/mp4";
+    if (/\.mov$/i.test(fileName)) return "video/quicktime";
+    if (/\.webm$/i.test(fileName)) return "video/webm";
+  }
+  return null;
+}
+
+// ── AG-WEB-READY-10-P2-A1: the V1 signed resumable transfer of one selection ─────────────────────────────────────
+// The first transfer of a selection uses exactly what POST /api/v1/uploads/authorize answered: its endpoint (the
+// project's direct Storage host) and its short-lived, path-scoped signature, over the resumable (TUS) protocol, in the
+// fixed 6 MiB chunks the contract names. Nothing else is trusted: the answer must name this upload id, this owner's
+// object key, this content type and no upsert, at exactly the endpoint this deployment's project URL implies
+// (parseSignedUploadGrant), and the transfer address must stay on the endpoint's own origin and path
+// (resolveTusUploadUrl); no redirect is followed. The signature is kept in page memory for this selection only and is
+// never logged or stored.
+interface SignedTransfer {
+  readonly uploadUrl: string;
+  readonly signature: string;
+  /** When the signature stops being usable (its lifetime less a minute), in epoch ms. */
+  readonly usableUntil: number;
+}
+
+/** What one transfer pass left: the clip is stored; signing or creation was refused (the key may already be stored,
+ *  which V1 finalize decides); the transfer is kept but Storage has not confirmed how much of the clip it holds (P3:
+ *  nothing more is sent until the golfer retries); or the transfer failed. */
+type TransferResult = "stored" | "maybe_stored" | "unconfirmed" | "failed";
+
+/** Chunks re-read and re-sent after a failed one, per pass. */
+const TRANSFER_RETRIES = 3;
+
+function signedTransferHeaders(signature: string, extra: Readonly<Record<string, string>> = {}): Record<string, string> {
+  return {
+    "Tus-Resumable": TUS_RESUMABLE_VERSION,
+    "x-signature": signature,
+    apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
+    ...extra,
+  };
+}
+
+/**
+ * AG-WEB-READY-10-P3: a byte position Storage stated explicitly in an Upload-Offset header — a plain nonnegative
+ * decimal integer no larger than the transfer's length. An explicit "0" is a position. An absent or empty header, and
+ * any value with a sign, a decimal point, an exponent, a hexadecimal prefix or any other character, or beyond the
+ * length, is none (null). (`Number()` reads an absent or empty header as 0, which resent the clip from its start.)
+ */
+function confirmedOffset(value: string | null, length: number): number | null {
+  if (value === null || !/^[0-9]{1,16}$/.test(value)) return null;
+  const offset = Number(value);
+  return Number.isSafeInteger(offset) && offset <= length ? offset : null;
+}
+
+/** P3: what an authoritative status read (HEAD) of a transfer said. */
+type TransferStatus =
+  /** Storage confirmed it holds exactly this many bytes of the clip */
+  | { readonly offset: number }
+  /** Storage confirmed the transfer is gone (404, 410): the replacement flow applies */
+  | "gone"
+  /** P3-A1: anything else is not known — no answer; a generic 400, 401 or 403 (no reliable terminal signal: it may come
+   *  from an intermediary while the transfer is still live); 5xx, 429, …; or a 200/204 without a readable offset. The
+   *  transfer and the selection are kept. */
+  | "unknown";
+
+async function readTransferStatus(transfer: SignedTransfer, size: number, signal: AbortSignal): Promise<TransferStatus> {
+  stopIfLeft(signal);
+  try {
+    const r = await fetch(transfer.uploadUrl, {
+      method: "HEAD", credentials: "omit", cache: "no-store", redirect: "error", signal, headers: signedTransferHeaders(transfer.signature),
+    });
+    if (r.status === 404 || r.status === 410) return "gone";
+    // P3-A1: a successful status answer is 200 or 204, read with the same strict offset rule
+    if (r.status !== 200 && r.status !== 204) return "unknown";
+    const offset = confirmedOffset(r.headers.get("upload-offset"), size);
+    return offset === null ? "unknown" : { offset };
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return "unknown";
+  }
+}
+
+/** P3: what sending chunks left: every byte confirmed stored; the stored position unknown (nothing more was sent);
+ *  the bounded retries spent at a confirmed position; or the transfer confirmed gone. */
+type ChunksResult = "stored" | "unconfirmed" | "failed" | "gone";
+
+/** P3: once the page is left (the run's signal is aborted) the transfer sends nothing more. */
+function stopIfLeft(signal: AbortSignal): void {
+  if (signal.aborted) throw new DOMException("The upload was stopped.", "AbortError");
+}
+
+/**
+ * Sends the clip from `start` in chunks. A chunk counts only when its acknowledgement (204) names exactly the end of the
+ * chunk just sent (P3). Any other answer — none, another status, no readable offset, or an offset that contradicts the
+ * chunk — is reconciled with an authoritative status read before anything else is sent, a bounded number of times per
+ * pass. A position the status read cannot confirm stops the pass with the transfer kept.
+ */
+async function sendSignedChunks(
+  transfer: SignedTransfer, blob: Blob, start: number, chunkSize: number, signal: AbortSignal, between: () => void,
+): Promise<ChunksResult> {
+  let offset = start;
+  let retries = 0;
+  while (offset < blob.size) {
+    stopIfLeft(signal);
+    between();
+    const end = Math.min(blob.size, offset + chunkSize);
+    let next: number | null = null;
+    try {
+      const r = await fetch(transfer.uploadUrl, {
+        method: "PATCH", credentials: "omit", cache: "no-store", redirect: "error", signal,
+        headers: signedTransferHeaders(transfer.signature, { "Upload-Offset": String(offset), "Content-Type": "application/offset+octet-stream" }),
+        body: blob.slice(offset, end),
+      });
+      if (r.status === 204 && confirmedOffset(r.headers.get("upload-offset"), blob.size) === end) next = end;
+    } catch (e) {
+      if (signal.aborted) throw e;
+    }
+    if (next === null) {
+      retries += 1;
+      if (retries > TRANSFER_RETRIES) return "failed";
+      between();
+      const status = await readTransferStatus(transfer, blob.size, signal);
+      if (status === "gone") return "gone";
+      if (status === "unknown") return "unconfirmed";
+      next = status.offset;
+    }
+    offset = next;
+  }
+  return "stored";
+}
+
+/**
+ * One transfer pass for this selection: resumes the selection's own transfer while its signature is usable;
+ * otherwise asks V1 authorize (the page's own request) for a new signature and creates the transfer.
+ */
+async function transferSelection(args: {
+  readonly intent: UploadIntent;
+  readonly blob: Blob;
+  readonly mimeType: UploadMimeType;
+  readonly objectPath: string;
+  /** POST /api/v1/uploads/authorize with the page's confirmed Bearer (it throws when the owner is not confirmed) */
+  readonly authorize: () => Promise<Response>;
+  readonly signal: AbortSignal;
+  /** called before every request: stops the pass when the page's sign-in changed */
+  readonly between: () => void;
+}): Promise<TransferResult> {
+  const { intent, blob, signal, between } = args;
+  if (intent.transfer !== null && Date.now() < intent.transfer.usableUntil) {
+    between();
+    const status = await readTransferStatus(intent.transfer, blob.size, signal);
+    // P3: while the stored position is unknown the transfer is kept and nothing more is sent — no chunk, no new
+    // authorization or creation — until the golfer retries; only a transfer Storage confirmed gone is replaced
+    if (status === "unknown") return "unconfirmed";
+    if (status !== "gone") {
+      const sent = await sendSignedChunks(intent.transfer, blob, status.offset, UPLOAD_CHUNK_SIZE, signal, between);
+      if (sent !== "gone") return sent;
+    }
+  }
+  // no transfer yet, its signature's known lifetime has passed, or Storage confirmed it gone (404, 410): a new
+  // authorization and transfer
+  intent.transfer = null;
+  stopIfLeft(signal);
+  const answer = await args.authorize();
+  // Storage refuses to sign a key that is already stored (no upsert): V1 finalize decides whether this one is
+  if (answer.status === 503) return "maybe_stored";
+  if (!answer.ok) return "failed";
+  const body = (await answer.json().catch(() => null)) as { data?: unknown } | null;
+  // the endpoint must be exactly the one this deployment's own project URL implies (the server's own rule)
+  const authorization = parseSignedUploadGrant(body?.data, {
+    uploadId: intent.uploadId,
+    objectPath: args.objectPath,
+    contentType: args.mimeType,
+    endpoint: buildResumableEndpoint(process.env.NEXT_PUBLIC_SUPABASE_URL, { allowLoopback: true }),
+  });
+  if (authorization === null) return "failed";
+  between();
+  let created: Response;
+  try {
+    created = await fetch(authorization.endpoint, {
+      method: "POST", credentials: "omit", cache: "no-store", redirect: "error", signal,
+      headers: signedTransferHeaders(authorization.signature, {
+        "Upload-Length": String(blob.size),
+        "Upload-Metadata": buildTusUploadMetadata(authorization),
+        "x-upsert": "false",
+      }),
+    });
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return "failed";
+  }
+  if (created.status === 409) return "maybe_stored";
+  const uploadUrl = created.status === 201 ? resolveTusUploadUrl(created.headers.get("location"), authorization.endpoint) : null;
+  if (uploadUrl === null) return "failed";
+  intent.transfer = {
+    uploadUrl,
+    signature: authorization.signature,
+    usableUntil: Date.now() + Math.max(0, authorization.expiresInSeconds - 60) * 1000,
+  };
+  const sent = await sendSignedChunks(intent.transfer, blob, 0, authorization.chunkSize, signal, between);
+  return sent === "gone" ? "failed" : sent;
+}
 
 // ─── EQ4-S2 mobile camera capture ─────────────────────────────────────────────
 /** Every member is `ideal`: preferences, never requirements. An `exact` rear
@@ -190,6 +567,49 @@ const CAMERA_PUTTING_GUIDANCE =
 const PREPROCESSING_FAILED_MESSAGE =
   "Your browser couldn't prepare this clip for analysis. Try a shorter or smaller clip, or use another browser or device.";
 
+/** A2. This page's own fixed messages: the only error text a failed analysis shows as it is. */
+const PAGE_MESSAGES: ReadonlySet<string> = new Set([
+  SESSION_EXPIRED_MESSAGE,
+  SESSION_UNCONFIRMED_MESSAGE,
+  SESSION_UNAVAILABLE_MESSAGE,
+  ACCOUNT_CHANGED_MESSAGE,
+  ANALYSIS_AFTER_CHANGE_MESSAGE,
+  CLUB_UNAVAILABLE_MESSAGE,
+  ANALYSIS_CREATE_FAILED_MESSAGE,
+  EMPTY_VIDEO_MESSAGE,
+  CLIP_TOO_LARGE_MESSAGE,
+  UPLOAD_FAILED_MESSAGE,
+  UPLOAD_UNCONFIRMED_MESSAGE,
+  PREPROCESSING_FAILED_MESSAGE,
+]);
+
+/** A3. The fixed copy for a request of this page that was not sent because its account could not be confirmed. */
+const OWNER_REFUSAL_MESSAGES: Readonly<Record<OwnerRefusal, string>> = {
+  signed_out: SESSION_EXPIRED_MESSAGE,
+  ended: SESSION_EXPIRED_MESSAGE,
+  unconfirmed: SESSION_UNCONFIRMED_MESSAGE,
+  unavailable: SESSION_UNAVAILABLE_MESSAGE,
+  account_changed: ACCOUNT_CHANGED_MESSAGE,
+};
+
+/** A3. This page's data client: the shared managed client's Auth, with every data request bound to `ownerId`. */
+function analyzeClientFor(ownerId: string | null) {
+  return ownerBoundClient(createClient(), ownerId, process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+}
+
+/**
+ * A2. What a failed analysis shows: one of this page's fixed messages; the analysis server's own explanation (a plain
+ * Error thrown from its refusal, after the analysis started); a fixed "unconfirmed" message for a session read the
+ * managed client refused inside a request; otherwise fixed copy — never an SDK, Storage or runtime error's own text.
+ */
+function golferMessage(failure: unknown, analysisStarted: boolean): string {
+  if (sessionUnverifiedReason(failure) !== null) return SESSION_UNCONFIRMED_MESSAGE;
+  if (!(failure instanceof Error)) return ANALYSIS_FAILED_MESSAGE;
+  if (PAGE_MESSAGES.has(failure.message)) return failure.message;
+  if (analysisStarted && failure.constructor === Error && failure.message.length > 0) return failure.message;
+  return ANALYSIS_FAILED_MESSAGE;
+}
+
 function formatYt(url: string) {
   if (!url) return "";
   if (url.includes("watch?v=")) return url.replace("watch?v=", "embed/");
@@ -202,12 +622,19 @@ export default function AnalyzePage() {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
+  // P2: the current selection's stable upload identity (see UploadIntent)
+  const uploadIntentRef = useRef<UploadIntent | null>(null);
   const [trimStart, setTrimStart] = useState(0);
   const [trimEnd, setTrimEnd] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [videoAspect, setVideoAspect] = useState<number | null>(null);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  // A2. Set synchronously: a second Run press before the busy overlay renders starts nothing.
+  const analyzingRef = useRef(false);
+  // A3 review. The running analysis's cancellation: leaving the page cancels an
+  // analysis call it has not sent yet (one already sent runs on, as before).
+  const runAbortRef = useRef<AbortController | null>(null);
   const [isTrimming, setIsTrimming] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -215,15 +642,24 @@ export default function AnalyzePage() {
   const [lmFile, setLmFile] = useState<File | null>(null);
   const [userTier, setUserTier] = useState<SubscriptionTier>("par");
 
-  // One managed browser client for the lifetime of this mounted page. A lazy
-  // ref is used rather than a memo because this is an identity that must not be
-  // recreated, not a value derived from props: memoization is a cache the
-  // runtime is free to discard, which would silently hand the selector and the
-  // submission two different clients. Selector loading and submission below
+  // A3. The account this page belongs to: the one the dashboard layout was
+  // rendered for, as the server verified it — taken once, when the page first
+  // renders, and never replaced by a session the browser holds. No account
+  // (a page rendered outside the dashboard layout): nothing is read or sent.
+  const rendered = useRenderedSession();
+  const ownerRef = useRef<string | null>(rendered?.ownerId ?? null);
+  const renderedLineageRef = useRef<string | null>(rendered?.lineage ?? null);
+
+  // One client for the lifetime of this mounted page: the managed browser
+  // client's Auth, with every data request bound to the page's account (A3). A
+  // lazy ref is used rather than a memo because this is an identity that must
+  // not be recreated, not a value derived from props: memoization is a cache
+  // the runtime is free to discard, which would silently hand the selector and
+  // the submission two different clients. Selector loading and submission below
   // both use this exact binding.
-  const supabaseRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const supabaseRef = useRef<ReturnType<typeof analyzeClientFor> | null>(null);
   if (supabaseRef.current === null) {
-    supabaseRef.current = createClient();
+    supabaseRef.current = analyzeClientFor(ownerRef.current);
   }
   const supabase = supabaseRef.current;
 
@@ -237,6 +673,20 @@ export default function AnalyzePage() {
   // The URL hint is applied at most once, so a later re-resolution cannot
   // overwrite a choice the golfer has since made in the selector.
   const clubHintApplied = useRef(false);
+  // A2. Why the clubs are not shown when the session read itself failed (shown
+  // with the auth_error state); a deliberate Try again bumps the load key.
+  const [clubsIssue, setClubsIssue] = useState<ClubsIssue | null>(null);
+  const [clubsLoadKey, setClubsLoadKey] = useState(0);
+  // A load is running (a second Try again press before React re-renders starts nothing).
+  const clubsLoadingRef = useRef(false);
+  // False once the page has left: an analysis finishing afterwards shows nothing and navigates nowhere.
+  const mountedRef = useRef(true);
+  // Identity generation: bumped by a sign-out or account change, so a clubs load or an analysis started for the
+  // earlier account stops at its next step and never shows or sends anything afterwards.
+  const identityRef = useRef(0);
+  const identityEndRef = useRef<IdentityEnd | null>(null);
+  const endIdentityRef = useRef<(why: IdentityEnd) => void>(() => undefined);
+  const stopLineageWatchRef = useRef<() => void>(() => undefined);
 
   // EQ4-S2 camera capture. `cameraError` is separate from the page-wide `error`
   // banner on purpose: that banner renders inside the preview branch, so it is
@@ -265,26 +715,109 @@ export default function AnalyzePage() {
     setUserTier(getUserTier());
   }, []);
 
+  /**
+   * A2. Whether the browser is still signed in as `userId`, by a fresh read
+   * through the same managed client. Never rejects.
+   */
+  const confirmSignedInAs = useCallback(
+    async (userId: string): Promise<"same" | IdentityEnd | "unconfirmed" | "unavailable"> => {
+      try {
+        const { data, error: readError } = await supabase.auth.getSession();
+        if (readError) return "unavailable";
+        const id = sessionUserId(data.session);
+        if (id === null) return "signed_out";
+        return id === userId ? "same" : "account_changed";
+      } catch (readFailure) {
+        return sessionUnverifiedReason(readFailure) !== null ? "unconfirmed" : "unavailable";
+      }
+    },
+    [supabase],
+  );
+
   useEffect(() => {
     let cancelled = false;
+    const generation = identityRef.current;
+    clubsLoadingRef.current = true;
+
+    // A2. Every load settles exactly once: with the clubs, with a classified
+    // reason (Try again or Sign in again), or — when an identity change ended
+    // the page's view meanwhile — with nothing, leaving that change's notice.
+    const finish = () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      clubsLoadingRef.current = false;
+    };
+    const settle = (issue: ClubsIssue) => {
+      finish();
+      if (identityRef.current !== generation) return;
+      // another account than the page's golfer: the page's view ends for good (an analysis then refuses to run)
+      if (issue === "account_changed") return endIdentityRef.current("account_changed");
+      setSavedClubs({ status: "auth_error", clubs: [] });
+      setClubsIssue(issue);
+    };
+    // A load still running after CLUBS_LOAD_DEADLINE_MS is reported as
+    // unavailable, and whatever it returns afterwards is dropped.
+    const deadline = setTimeout(() => {
+      if (!cancelled) settle("unavailable");
+    }, CLUBS_LOAD_DEADLINE_MS);
 
     void (async () => {
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      let sessionRead: Awaited<ReturnType<typeof supabase.auth.getSession>>;
+      try {
+        sessionRead = await supabase.auth.getSession();
+      } catch (readFailure) {
+        if (cancelled) return;
+        // A refused read is "unconfirmed", a failed one "unavailable": never a
+        // sign-out, never SDK text, and nothing is read without a session.
+        settle(sessionUnverifiedReason(readFailure) !== null ? "unconfirmed" : "unavailable");
+        return;
+      }
+      const { data: { session }, error: sessionError } = sessionRead;
       const clubsUserId = session?.user?.id;
       if (cancelled) return;
 
       if (sessionError || !session || !clubsUserId) {
-        // Classified, never surfaced raw. The golfer can still analyze.
-        setSavedClubs({ status: "auth_error", clubs: [] });
+        // Classified, never surfaced raw. A returned error is a read that
+        // failed (Auth unreachable); no session at all is a genuine sign-out.
+        settle(sessionError ? "unavailable" : "signed_out");
+        return;
+      }
+      if (identityRef.current !== generation) return finish();
+      // A3. Only the account the page was rendered for: another account's
+      // session is never adopted (it ends the view), and without an account
+      // nothing is read.
+      const owner = ownerRef.current;
+      if (owner === null) {
+        settle("unconfirmed");
+        return;
+      }
+      if (clubsUserId !== owner) {
+        settle("account_changed");
         return;
       }
 
       // The one saved-club reader. It scopes to this user id alongside RLS and
-      // excludes archived rows in the query itself.
+      // excludes archived rows in the query itself; its request carries the
+      // page's account's confirmed token, or is not sent (A3).
       const result = await querySavedClubs(supabase, { userId: clubsUserId });
       if (cancelled) return;
+      // A2. Shown only while that golfer is still the one signed in here: an
+      // answer from a read that went out after a sign-out or account change
+      // (the managed client attaches whatever session is current) is dropped.
+      const still = await confirmSignedInAs(clubsUserId);
+      if (cancelled) return;
+      if (identityRef.current !== generation) return finish();
+      if (still !== "same") {
+        settle(still);
+        return;
+      }
+      finish();
 
+      setClubsIssue(null);
       setSavedClubs(result);
+      // End Session of this session (here or in another tab) ends what is shown.
+      stopLineageWatchRef.current();
+      stopLineageWatchRef.current = watchSessionEnd(session, () => endIdentityRef.current("signed_out"));
 
       if (!clubHintApplied.current) {
         clubHintApplied.current = true;
@@ -297,10 +830,87 @@ export default function AnalyzePage() {
 
     return () => {
       cancelled = true;
+      clearTimeout(deadline);
+      clubsLoadingRef.current = false;
     };
-  }, [supabase, searchParams]);
+  }, [supabase, searchParams, clubsLoadKey, confirmSignedInAs]);
+
+  /** A2. A deliberate Try again after a failed clubs load: one load at a time. */
+  const retryClubs = useCallback(() => {
+    if (clubsLoadingRef.current || identityEndRef.current === "account_changed") return;
+    clubsLoadingRef.current = true;
+    setSavedClubs(null);
+    setClubsIssue(null);
+    setClubsLoadKey((key) => key + 1);
+  }, []);
+
+  // A2. A sign-out or account change noticed while the page is open (managed
+  // client events, which also bring other tabs' sign-ins and sign-outs, and an
+  // End Session of this session anywhere in the browser) ends what was shown
+  // for the earlier account: the clubs and the club choice are cleared, a load
+  // or analysis still running for it stops before its next step, and the
+  // panel says what happened. The golfer's chosen video stays selected.
+  useEffect(() => {
+    const end = (why: IdentityEnd) => {
+      if (identityEndRef.current === "account_changed") return;
+      identityEndRef.current = why;
+      identityRef.current += 1;
+      clubsLoadingRef.current = false;
+      stopLineageWatchRef.current();
+      stopLineageWatchRef.current = () => undefined;
+      setSelectedClubId(null);
+      setSavedClubs({ status: "auth_error", clubs: [] });
+      setClubsIssue(why);
+    };
+    endIdentityRef.current = end;
+    let unsubscribe = () => {};
+    try {
+      const { data } = supabase.auth.onAuthStateChange((event, session) => {
+        // A3: measured against the account the page was rendered for, from the moment it mounts
+        const why = identityEndFromEvent(ownerRef.current, event, session);
+        if (why !== null) end(why);
+      });
+      unsubscribe = () => data.subscription.unsubscribe();
+    } catch {
+      // no events: the next session read decides
+    }
+    // A3: End Session of the sign-in the page was rendered for (here or in another tab) ends the view at once
+    const stopRenderedWatch = watchLineageEnd(renderedLineageRef.current, () => end("signed_out"));
+    return () => {
+      unsubscribe();
+      stopRenderedWatch();
+      stopLineageWatchRef.current();
+      endIdentityRef.current = () => undefined;
+    };
+  }, [supabase]);
+
+  // A3. The layout re-rendered for another account while this page stays
+  // mounted (a refresh after another sign-in): this page's view ends; a reload
+  // shows the account signed in now.
+  const renderedOwner = rendered?.ownerId ?? null;
+  useEffect(() => {
+    if (renderedOwner !== ownerRef.current) endIdentityRef.current("account_changed");
+  }, [renderedOwner]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      runAbortRef.current?.abort();
+    };
+  }, []);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // AG-WEB-READY-10-P3 (UX review): the preview's error message sits below the preview; when it appears it is brought
+  // into view at once (nearest edge, no animation) clear of the fixed header and the phone's bottom tabs.
+  const previewErrorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!error || !previewUrl) return;
+    const el = previewErrorRef.current;
+    if (!el || typeof el.scrollIntoView !== "function") return;
+    el.scrollIntoView({ block: "nearest" });
+  }, [error, previewUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -363,6 +973,8 @@ export default function AnalyzePage() {
     // deliberate — it must never be gated on MediaRecorder/captureStream.
     const preprocessingRequired = !(
       trimStart === 0 && Math.abs(trimEnd - duration) < 0.1 && file.size <= MAX_ANALYSIS_VIDEO_BYTES
+      // P2: and a content type the V1 upload contract accepts (otherwise the clip is transcoded to WebM)
+      && uploadMimeTypeOf(file, file.name) !== null
     );
     if (!preprocessingRequired) {
       return file;
@@ -557,12 +1169,51 @@ export default function AnalyzePage() {
       setError(`Trim your segment to under ${MAX_SEGMENT_SECONDS}s for best results.`);
       return;
     }
+    // A2. After the page's view ended for another account, nothing runs here
+    // until the page is refreshed for the account signed in now.
+    if (identityEndRef.current === "account_changed") {
+      setError(ACCOUNT_CHANGED_MESSAGE);
+      return;
+    }
+    // A2. One analysis at a time: a second press before React re-renders the
+    // busy overlay starts nothing.
+    if (analyzingRef.current) return;
+    analyzingRef.current = true;
     setIsAnalyzing(true); setError(null);
+    const runAbort = new AbortController();
+    runAbortRef.current = runAbort;
+
+    // A2. The analysis belongs to the golfer this page is showing. A sign-out
+    // or account change noticed while it runs stops it before its next step.
+    const generation = identityRef.current;
+    const stopIfIdentityChanged = () => {
+      if (identityRef.current === generation) return;
+      throw new Error(identityEndRef.current === "signed_out" ? SESSION_EXPIRED_MESSAGE : ACCOUNT_CHANGED_MESSAGE);
+    };
+    // A3 review. A request refused because the browser now holds another
+    // account also ends the page's view (as the clubs re-check does).
+    const refusedFor = (reason: OwnerRefusal): string => {
+      if (reason === "account_changed") endIdentityRef.current("account_changed");
+      return OWNER_REFUSAL_MESSAGES[reason];
+    };
+    // A3. Why a data step failed when the page's account can no longer be
+    // confirmed (its request was then not sent at all); null otherwise.
+    const ownerNoLongerConfirmed = async (): Promise<string | null> => {
+      const now = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+      return now.status === "ready" ? null : refusedFor(now.status);
+    };
 
     // Which step a network failure interrupted decides what the golfer is told.
     let analysisStarted = false;
     try {
-      const blob = await getTrimmedBlob();
+      // P2: the selection's stable upload identity, and its clip prepared once (a repeat sends the identical bytes).
+      const selection = { ownerId: ownerRef.current, file, trimStart, trimEnd, clubId: selectedClubId };
+      const intent: UploadIntent = sameSelection(uploadIntentRef.current, selection)
+        ? uploadIntentRef.current
+        : { ...selection, uploadId: crypto.randomUUID(), blob: null, sent: false, transfer: null };
+      uploadIntentRef.current = intent;
+      const blob = intent.blob ?? await getTrimmedBlob();
+      intent.blob = blob;
       // The route sends at most MAX_ANALYSIS_VIDEO_BYTES to the AI and refuses
       // anything larger, so a clip that is still too large is not uploaded.
       if (blob.size < MIN_VIDEO_BYTES) throw new Error(EMPTY_VIDEO_MESSAGE);
@@ -576,12 +1227,36 @@ export default function AnalyzePage() {
       // is at (or near) expiry, persisting the rotated tokens through the managed
       // client's own cookie storage. Refreshing is deliberately NOT forced on
       // every submission.
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      let sessionAnswer: Awaited<ReturnType<typeof supabase.auth.getSession>> | null;
+      try {
+        // bounded: a read with no answer in time is unavailable, never a run left busy
+        sessionAnswer = await settleWithin(async () => await supabase.auth.getSession(), SESSION_READ_DEADLINE_MS);
+      } catch (readFailure) {
+        // A2. A refused read (unconfirmed) or a failed one: fixed copy, the
+        // video stays selected, nothing is sent.
+        throw new Error(sessionUnverifiedReason(readFailure) !== null ? SESSION_UNCONFIRMED_MESSAGE : SESSION_UNAVAILABLE_MESSAGE);
+      }
+      if (sessionAnswer === null) throw new Error(SESSION_UNAVAILABLE_MESSAGE);
+      const { data: { session }, error: sessionError } = sessionAnswer;
       const userId = session?.user?.id;
+      // A returned error is a read that failed (Auth unreachable), not a sign-out.
+      const sessionGuardMessage = sessionError ? SESSION_UNAVAILABLE_MESSAGE : SESSION_EXPIRED_MESSAGE;
       // Fail here — before Storage, before swing_videos, before swing_analysis,
       // and before /api/analyze-swing. The raw Supabase error is not surfaced to
       // the golfer; they get an actionable instruction instead.
-      if (sessionError || !session || !userId) throw new Error(SESSION_EXPIRED_MESSAGE);
+      if (sessionError || !session || !userId) throw new Error(sessionGuardMessage);
+      // A3. Only the account the page was rendered for: never another, and
+      // never one adopted because it was the first seen (another account's
+      // session ends the page's view; without an account nothing is sent).
+      if (ownerRef.current === null) throw new Error(SESSION_UNCONFIRMED_MESSAGE);
+      if (userId !== ownerRef.current) {
+        endIdentityRef.current("account_changed");
+        throw new Error(ACCOUNT_CHANGED_MESSAGE);
+      }
+      stopIfIdentityChanged();
+      // A2. A session the server already ended (its removal from this browser is still pending) is not used.
+      if (await sessionEndPending(session)) throw new Error(SESSION_EXPIRED_MESSAGE);
+      stopIfIdentityChanged();
 
       // Re-check the chosen club against a freshly read active bag, using the
       // session just resolved. A club removed from the bag since the selector
@@ -593,6 +1268,11 @@ export default function AnalyzePage() {
       if (selectedClubId !== null) {
         const currentClubs = await querySavedClubs(supabase, { userId });
         if (!isSelectionStillValid(currentClubs, selectedClubId)) {
+          // A3: a re-check not sent because the page's account could not be confirmed says why
+          if (currentClubs.status === "auth_error") {
+            const notConfirmed = await ownerNoLongerConfirmed();
+            if (notConfirmed !== null) throw new Error(notConfirmed);
+          }
           // No substitution and no fallback — recording a club the golfer did
           // not choose would corrupt the analysis record.
           throw new Error(CLUB_UNAVAILABLE_MESSAGE);
@@ -600,34 +1280,85 @@ export default function AnalyzePage() {
         validatedClubId = selectedClubId;
       }
 
-      // 1. Upload video to Supabase Storage
-      // ENT-1D: a file name the canonical-key rule accepts, fixed before upload.
+      // 1. Upload the clip (AG-WEB-READY-10-P2; A1: through V1 authorize and its signed transport). The object key is
+      // the V1 upload contract's deterministic key for the verified owner and this selection's upload id
+      // (lib/api/v1-upload-dto.ts buildUploadObjectPath, the same builder authorize signs and V1 finalize verifies
+      // against), so a repeat of the same selection names the same immutable object: Storage refuses to sign or
+      // overwrite it and finalize proves the stored object. ENT-1D: the display file name is canonical.
       const safeFilename = canonicalUploadFileName(file.name);
-      const storagePath = `${userId}/${crypto.randomUUID()}/${safeFilename}`;
-      const { error: uploadErr } = await supabase.storage
-        .from(BUCKET).upload(storagePath, blob, { contentType: blob.type, upsert: false });
-      if (uploadErr) {
-        console.error("Video upload failed");
-        throw new Error(UPLOAD_FAILED_MESSAGE);
-      }
+      const mimeType = uploadMimeTypeOf(blob, file.name);
+      if (mimeType === null) throw new Error(PREPROCESSING_FAILED_MESSAGE);
+      const objectPath = buildUploadObjectPath(userId, intent.uploadId, mimeType);
+      // A repeat of this selection asks finalize (step 2) first: its object may already be stored, and a refused
+      // duplicate upload is never sent before finalize. Only "not stored" sends the upload, once (at most two passes).
+      let skipUpload = intent.sent;
+      for (let pass = 0; ; pass++) {
+        if (!skipUpload) {
+          stopIfIdentityChanged();
+          intent.sent = true;
+          const transferred = await transferSelection({
+            intent,
+            blob,
+            mimeType,
+            objectPath,
+            authorize: async () => {
+              // the page's own account's token, confirmed now: the signature is minted for this owner's key only
+              const authorizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+              if (authorizeSession.status !== "ready") throw new Error(refusedFor(authorizeSession.status));
+              stopIfIdentityChanged();
+              stopIfLeft(runAbort.signal); // P3: the golfer left while the owner check ran: no signature is minted
+              // P4: the Bearer alone identifies the request — by default with no cookie (possibly another sign-in's) at
+              // all; on the protected opt-in with only this origin's cookies, to an endpoint that refuses it without
+              // the Bearer and never follows a redirect (lib/protected-web-requests.ts)
+              return sendAppRequest("authorize", {
+                headers: { "Content-Type": "application/json", ...ownerBearer(authorizeSession.session) },
+                body: JSON.stringify({ uploadId: intent.uploadId, mimeType, fileSize: blob.size }),
+              });
+            },
+            signal: runAbort.signal,
+            between: stopIfIdentityChanged,
+          });
+          if (transferred === "failed" || transferred === "unconfirmed") {
+            console.error("Video upload failed");
+            // A3: an upload not sent because the page's account could not be confirmed says why
+            const notConfirmed = await ownerNoLongerConfirmed();
+            if (notConfirmed !== null) throw new Error(notConfirmed);
+            // P3: the selection, its upload id and its transfer are kept: the next press resumes from what Storage confirms
+            throw new Error(transferred === "unconfirmed" ? UPLOAD_UNCONFIRMED_MESSAGE : UPLOAD_FAILED_MESSAGE);
+          }
+        }
 
-      // 2. Create the swing_videos record
-      const { data: videoRow, error: videoErr } = await supabase
-        .from("swing_videos").insert({
-          user_id:           userId,
-          storage_path:      storagePath,
-          video_url:         storagePath,
-          original_filename: safeFilename,
-          file_size:         blob.size,
-          mime_type:         blob.type,
-          trim_start:        trimStart,
-          trim_end:          trimEnd,
-          status:            "uploaded",
-        }).select().single();
-      if (videoErr || !videoRow) {
-        console.error("Failed to register video");
+        // 2. Finalize: exactly one canonical swing_videos row for this upload id (idempotent; V1 finalize derives the
+        // owner, path, size and type on the server), with the clip's display name and trim as this page has always
+        // recorded them.
+        stopIfIdentityChanged();
+        const finalizeSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+        if (finalizeSession.status !== "ready") throw new Error(refusedFor(finalizeSession.status));
+        stopIfIdentityChanged();
+        // P4: the Bearer alone identifies the request (by default no cookie; the protected opt-in: lib/protected-web-requests.ts)
+        const finalizeRes = await sendAppRequest("finalize", {
+          headers: { "Content-Type": "application/json", ...ownerBearer(finalizeSession.session) },
+          body:    JSON.stringify({
+            uploadId: intent.uploadId,
+            mimeType,
+            originalFilename: safeFilename,
+            ...(trimEnd > trimStart ? { trimStart, trimEnd } : {}),
+          }),
+        });
+        const finalized = await finalizeRes.json().catch(() => null) as
+          { data?: { swingVideoId?: unknown }; error?: { code?: unknown } } | null;
+        if (finalizeRes.ok && finalized?.data?.swingVideoId === intent.uploadId) break;
+        // a repeat whose object was never stored: upload it now (once)
+        if (skipUpload && pass === 0 && finalizeRes.status === 409 && finalized?.error?.code === "UPLOAD_NOT_FOUND_OR_NOT_READY") {
+          skipUpload = false;
+          continue;
+        }
+        console.error("Failed to register video:", finalizeRes.status);
+        const notConfirmed = await ownerNoLongerConfirmed();
+        if (notConfirmed !== null) throw new Error(notConfirmed);
         throw new Error(UPLOAD_FAILED_MESSAGE);
       }
+      const videoRow = { id: intent.uploadId };
 
       // 3. Ask the server to create the pending analysis request. The browser
       // holds no INSERT privilege on swing_analysis: the owner, readiness, club
@@ -635,9 +1366,17 @@ export default function AnalyzePage() {
       // native clients use. The club id is the only equipment fact sent; the
       // derived analysis family and the immutable equipment snapshot are
       // produced by the database trigger and are never sent from here.
-      const createRes = await fetch("/api/v1/analyses", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
+      // A3. That doorway verifies a Bearer token itself and then reads no
+      // cookie, so the request carries the page's account's token, confirmed
+      // now: it can only ever be that account's request.
+      stopIfIdentityChanged();
+      const requestSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+      if (requestSession.status !== "ready") throw new Error(refusedFor(requestSession.status));
+      stopIfIdentityChanged();
+      // A3 review, P4: the Bearer alone identifies the request (by default no cookie; the protected opt-in:
+      // lib/protected-web-requests.ts)
+      const createRes = await sendAppRequest("analyses", {
+        headers: { "Content-Type": "application/json", ...ownerBearer(requestSession.session) },
         body:    JSON.stringify({ swingVideoId: videoRow.id, clubId: validatedClubId }),
       });
       const created = await createRes.json().catch(() => null) as
@@ -654,20 +1393,65 @@ export default function AnalyzePage() {
       }
 
       // 4. Call the direct Gemini pipeline — it fetches the video from Storage itself
+      // A4 (C1). The route verifies a Bearer token itself (resolveRouteAuth) and
+      // then reads no cookie, so the request carries the page's account's
+      // token, confirmed now, and no cookie at all: whatever any writer puts in
+      // the jar after this confirmation, the request can only be this account's.
+      // No lease is held, and nothing waits on the analysis. Leaving the page
+      // before it is sent cancels it; once sent it runs on, as before.
+      stopIfIdentityChanged();
+      const analysisSession = await confirmOwnerSession(() => supabase, ownerRef.current, SESSION_READ_DEADLINE_MS);
+      if (analysisSession.status !== "ready") throw new Error(refusedFor(analysisSession.status));
+      stopIfIdentityChanged();
+      if (runAbort.signal.aborted || !mountedRef.current) return;
       analysisStarted = true;
-      const analysisRes = await fetch("/api/analyze-swing", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
+      // P4: the Bearer alone identifies the request (by default no cookie; the protected opt-in:
+      // lib/protected-web-requests.ts); once sent it runs on: no cancel signal
+      const analysisRes = await sendAppRequest("analyze", {
+        // P2: this page understands a 202 acceptance (not a security control; the server decides)
+        headers: { "Content-Type": "application/json", ...ownerBearer(analysisSession.session), [ADMISSION_DECLARATION_HEADER]: ADMISSION_DECLARATION_VALUE },
         body:    JSON.stringify({ analysisId: analysisRow.id }),
       });
+      // A2. Finished after the golfer left the page, or after the page's
+      // sign-in changed: nothing of it is shown here and nowhere is navigated.
+      if (!mountedRef.current) return;
+      if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
+
+      // P2: accepted and saved durably (202). The analysis runs in the background; the saved report shows the queued
+      // attempt and can be closed and reopened. Nothing waits here.
+      if (analysisRes.status === 202) {
+        await analysisRes.json().catch(() => null);
+        if (!mountedRef.current) return;
+        if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
+        router.push(`/analyze/${analysisRow.id}`);
+        return;
+      }
 
       if (!analysisRes.ok) {
         const err = await analysisRes.json().catch(() => ({}));
+        // A3 (F2). The error body can finish after the golfer left the page or
+        // the page's sign-in changed: nothing of it is acted on then.
+        if (!mountedRef.current) return;
+        if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
         // ENT-1D. Already running for this swing: hand over to its report page,
-        // which shows the in-progress state and can check again. A stalled
-        // analysis falls through to the error banner below, which offers no
-        // retry, with the server's explanation.
+        // which shows the in-progress state and can check again. A synchronous
+        // stall falls through to the error banner below, which offers no retry,
+        // with the server's explanation (A1: an attempt that stopped reporting is
+        // handed over below instead).
         if (analysisRes.status === 409 && err.status === "processing") {
+          router.push(`/analyze/${analysisRow.id}`);
+          return;
+        }
+        // P2: this swing already has an attempt that finished without a result (or a retry refers to an earlier one):
+        // its report shows that attempt and offers the right next step.
+        if (analysisRes.status === 409 && (err.status === "failed" || err.status === "superseded")) {
+          router.push(`/analyze/${analysisRow.id}`);
+          return;
+        }
+        // A1: an answer describing an attempt that stopped reporting (`current ?? attempt`; its outcome is not
+        // confirmed yet; only a job's stall names one) hands over to its report, which shows it and offers a status
+        // read. Nothing is retried; a synchronous stall (no interrupted attempt) stays on this page's banner.
+        if (analysisRes.status === 409 && (err.current ?? err.attempt)?.state === "interrupted") {
           router.push(`/analyze/${analysisRow.id}`);
           return;
         }
@@ -681,6 +1465,8 @@ export default function AnalyzePage() {
       }
 
       const { data: updatedRow } = await analysisRes.json() as { data: Record<string, unknown> };
+      if (!mountedRef.current) return;
+      if (identityRef.current !== generation) throw new Error(ANALYSIS_AFTER_CHANGE_MESSAGE);
 
       // EQ5C-D. Which report this is was decided by the database at insert and
       // returned by the server on the completed row — not by the selector the
@@ -704,10 +1490,11 @@ export default function AnalyzePage() {
       if (err instanceof TypeError && /Failed to fetch|NetworkError|Load failed/.test(err.message)) {
         setError(analysisStarted ? ANALYSIS_CONNECTION_LOST_MESSAGE : UPLOAD_FAILED_MESSAGE);
       } else {
-        setError(err instanceof Error ? err.message : "Analysis failed.");
+        setError(golferMessage(err, analysisStarted));
       }
     } finally {
       setIsAnalyzing(false);
+      analyzingRef.current = false;
     }
   };
 
@@ -1005,6 +1792,13 @@ export default function AnalyzePage() {
     };
   }, []);
 
+  // A2: what the club panels' persistent status region announces
+  const clubsStatus =
+    savedClubs === null ? CLUBS_LOADING_MESSAGE
+      : savedClubs.status === "auth_error" ? clubsNoticeMessage(clubsIssue)
+        : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? CLUBS_UNAVAILABLE_MESSAGE
+          : "";
+
   const cameraGuidance = isPuttingCapture
     ? CAMERA_PUTTING_GUIDANCE
     : CAMERA_FULL_SWING_GUIDANCE;
@@ -1029,12 +1823,22 @@ export default function AnalyzePage() {
               </div>
             </div>
 
+            {/* A2: one persistent live region per panel, so every change of the clubs' state is announced */}
+            <p role="status" aria-live="polite" className="sr-only">{clubsStatus}</p>
             {savedClubs === null ? (
               <p className="text-sm text-gray-400">{CLUBS_LOADING_MESSAGE}</p>
             ) : savedClubs.status === "auth_error" ? (
-              <p className="text-sm text-gray-400">{CLUBS_AUTH_MESSAGE}</p>
+              <ClubsSessionNotice issue={clubsIssue} onRetry={retryClubs} />
             ) : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? (
-              <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+              <div className="space-y-3">
+                <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+                {savedClubs.status === "database_error" && (
+                  <button type="button" onClick={retryClubs}
+                    className="min-h-11 px-4 rounded-xl border border-white/15 text-xs font-bold text-white hover:bg-white/5">
+                    Try again
+                  </button>
+                )}
+              </div>
             ) : (
               <ClubSelector
                 clubs={savedClubs.clubs}
@@ -1200,20 +2004,6 @@ export default function AnalyzePage() {
               );
             })()}
 
-            {/* Error banner */}
-            {error && (
-              <div className="absolute top-16 left-4 right-4 z-50">
-                <div className="bg-red-500/10 border border-red-500/40 backdrop-blur-xl p-4 rounded-xl flex items-start gap-3">
-                  <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
-                  <p className="text-sm text-white">{error}</p>
-                  <button onClick={() => setError(null)} aria-label="Dismiss message"
-                    className="ml-auto -my-3 -mr-3 shrink-0 flex items-center justify-center min-w-11 min-h-11 text-gray-500 hover:text-white">
-                    <X size={16} />
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* Loading overlay */}
             {(isAnalyzing || isTrimming) && (
               <div className="absolute inset-0 bg-black/85 backdrop-blur-md flex flex-col items-center justify-center text-white z-50">
@@ -1277,6 +2067,23 @@ export default function AnalyzePage() {
           </div>
         )}
 
+        {/* Error banner. AG-WEB-READY-10-P3: in the page flow directly below the preview (every width), not overlaid
+            on it: at phone width the overlay covered the Run Analyzer control its own copy points to. The file-refused
+            case without a preview keeps its own banner above. */}
+        {previewUrl && error && (
+          <div ref={previewErrorRef}
+            className="px-4 pt-3 pb-3 bg-black scroll-mt-[calc(4.5rem+env(safe-area-inset-top))] scroll-mb-[calc(5rem+env(safe-area-inset-bottom))]">
+            <div role="alert" className="bg-red-500/10 border border-red-500/40 p-4 rounded-xl flex items-start gap-3">
+              <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+              <p className="text-sm text-white">{error}</p>
+              <button onClick={() => setError(null)} aria-label="Dismiss message"
+                className="ml-auto -my-3 -mr-3 shrink-0 flex items-center justify-center min-w-11 min-h-11 text-gray-500 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ── Timeline Scrubber ── */}
         <div className="h-28 bg-golf-header border-t border-white/10 px-6 flex flex-col justify-center">
           {previewUrl && duration > 0 ? (
@@ -1327,12 +2134,22 @@ export default function AnalyzePage() {
               </div>
             </div>
 
+            {/* A2: one persistent live region per panel, so every change of the clubs' state is announced */}
+            <p role="status" aria-live="polite" className="sr-only">{clubsStatus}</p>
             {savedClubs === null ? (
               <p className="text-sm text-gray-400">{CLUBS_LOADING_MESSAGE}</p>
             ) : savedClubs.status === "auth_error" ? (
-              <p className="text-sm text-gray-400">{CLUBS_AUTH_MESSAGE}</p>
+              <ClubsSessionNotice issue={clubsIssue} onRetry={retryClubs} />
             ) : savedClubs.status === "database_error" || savedClubs.status === "malformed_data" ? (
-              <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+              <div className="space-y-3">
+                <p className="text-sm text-gray-400">{CLUBS_UNAVAILABLE_MESSAGE}</p>
+                {savedClubs.status === "database_error" && (
+                  <button type="button" onClick={retryClubs}
+                    className="min-h-11 px-4 rounded-xl border border-white/15 text-xs font-bold text-white hover:bg-white/5">
+                    Try again
+                  </button>
+                )}
+              </div>
             ) : (
               <ClubSelector
                 clubs={savedClubs.clubs}

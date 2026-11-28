@@ -140,8 +140,10 @@ const answer = (body: unknown) => async () => received(JSON.stringify(body));
 // ── Request helpers ──────────────────────────────────────────────────────────
 
 function as(golfer: Golfer | null) {
-  request.cookie = golfer ? encodeURIComponent(JSON.stringify({ access_token: golfer.accessToken })) : null;
-  request.authorization = null;
+  // AG-WEB-READY-10-P2: the web app's analysis requests are Bearer-only since A4 (C1); the cookie envelope this suite
+  // was written with no longer authenticates (identical failures on the pinned build), so it sends the Bearer token.
+  request.cookie = null;
+  request.authorization = golfer ? `Bearer ${golfer.accessToken}` : null;
 }
 
 async function analyze(golfer: Golfer | null, analysisId: string, extra: Record<string, unknown> = {}) {

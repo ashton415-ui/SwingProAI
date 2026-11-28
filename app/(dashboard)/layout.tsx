@@ -1,4 +1,5 @@
 import { createClient, getServerSession } from "@/utils/supabase/server";
+import { sessionLineageId } from "@/utils/supabase/session-cookie-layout";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { LogOut, CreditCard, Zap } from "lucide-react";
@@ -10,6 +11,9 @@ import {
   SIGN_OUT,
 } from "@/components/navigation/dashboard-navigation";
 import MobileDashboardNavigation from "@/components/navigation/MobileDashboardNavigation";
+import EndSessionForm from "@/components/navigation/EndSessionForm";
+import SessionKeeper from "@/components/navigation/SessionKeeper";
+import RenderedSessionBoundary from "@/components/navigation/RenderedSessionBoundary";
 import { CHECKOUT_AVAILABLE } from "@/lib/billing/checkout-availability";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +22,9 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const session = await getServerSession();
   if (!session) redirect("/login");
   const user = session.user;
+  // The session lineage this page is rendered for (a digest of its Auth session id, never a token): End Session ends
+  // only that sign-in, never a newer one in the same browser (components/navigation/EndSessionForm.tsx).
+  const endSessionLineage = await sessionLineageId(session.access_token);
   const supabase = await createClient();
 
   const { data: profile } = await supabase
@@ -50,6 +57,12 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="flex min-h-screen bg-golf-dark">
+      {/* The browser keeps the session current (the server never refreshes it) */}
+      <SessionKeeper />
+      {/* F1: the whole account-bearing shell (sidebar, phone/tablet navigation and the page) belongs to the account and
+          session lineage this layout was rendered for; when this browser's sign-in is confirmed to no longer be that one,
+          the boundary removes it and shows fixed guidance (components/navigation/RenderedSessionBoundary.tsx). */}
+      <RenderedSessionBoundary ownerId={user.id} lineage={endSessionLineage}>
       {/* Desktop sidebar — visible only at lg (>=1024px) and wider */}
       <aside className="hidden lg:flex w-64 bg-golf-header border-r border-white/5 flex-col fixed h-full overflow-y-auto">
         {/* Logo */}
@@ -102,12 +115,12 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
         {/* Sign out */}
         <div className="p-4 border-t border-white/5">
-          <form action={SIGN_OUT.href} method="POST">
-            <button type="submit"
-              className="flex items-center gap-3 px-3 py-2.5 w-full min-h-11 rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
-              <LogOut size={14} />{SIGN_OUT.label}
-            </button>
-          </form>
+          <EndSessionForm
+            expectedUserId={user.id}
+            expectedSession={endSessionLineage}
+            className="flex items-center gap-3 px-3 py-2.5 w-full min-h-11 rounded-2xl text-gray-600 hover:text-white hover:bg-white/5 transition-colors text-[10px] font-black uppercase tracking-widest">
+            <LogOut size={14} />{SIGN_OUT.label}
+          </EndSessionForm>
           <div className="flex items-center gap-2 px-3 mt-4">
             <Zap size={9} className="text-golf-green" fill="currentColor" />
             <p className="text-[9px] font-bold uppercase tracking-[0.15em] text-gray-700">AI-Integrated Analysis</p>
@@ -122,13 +135,18 @@ export default async function DashboardLayout({ children }: { children: React.Re
         roleLabel={roleBadgeLabel}
         roleBadgeClassName={roleBadgeColor}
         showUpgradeCallout={showUpgradeCallout}
+        userId={user.id}
+        endSessionLineage={endSessionLineage}
       />
 
       <main
         className="flex-1 min-w-0 min-h-screen pt-[calc(3.5rem+env(safe-area-inset-top))] pb-[calc(4rem+env(safe-area-inset-bottom))] md:ml-16 md:pb-[env(safe-area-inset-bottom)] lg:ml-64 lg:pt-0 lg:pb-0"
       >
+        {/* A3: the pages below send their requests only as the account this layout was rendered for (no token); the
+            boundary above provides that account (RenderedSessionProvider) */}
         {children}
       </main>
+      </RenderedSessionBoundary>
     </div>
   );
 }

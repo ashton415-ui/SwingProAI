@@ -49,18 +49,32 @@ describe("analyze page upload controls are keyboard reachable", () => {
 });
 
 describe("report status pill agrees with the failure panel", () => {
-  // Found by local browser acceptance: after a definite provider failure the
-  // panel said "Analysis Failed" while the pill still showed the initial
-  // "pending" from the server render.
-  it("the processing state reports failure to its parent and clears it on Retry", () => {
-    expect(report).toMatch(/setError\(res\.error\);\s*onFailed\?\.\(true\);/);
-    expect(report).toMatch(/setError\(NETWORK_FAILURE_COPY\);\s*onFailed\?\.\(true\);/);
-    expect(report).toMatch(/setError\(null\); onFailed\?\.\(false\);/);
-    expect(report).toContain("onFailed={setFailedNow}");
+  // Found by local browser acceptance (ENT-1D): after a definite provider
+  // failure the panel said "Analysis Failed" while the pill still showed the
+  // initial "pending" from the server render. AG-WEB-READY-04 F1 / F1-A1: the
+  // pill shows what the page knows about the saved status. Only the server's
+  // video-unusable answer makes it "failed"; a readable 500/400 (an attempt
+  // that may have recorded a failure) makes it "unconfirmed"; a 503, an
+  // unreachable server, an unreadable or malformed answer, or one showing the
+  // status may be out of date (404, 409) keeps the status the page last knew,
+  // labelled "Last known status"; and only a valid
+  // completed answer for this analysis replaces it. These are source checks;
+  // lib/web-ready04-report-status.test.tsx renders every case.
+  it("each answer reaches the parent as what it is: a stored failure, an unconfirmed attempt or an ambiguous outcome", () => {
+    expect(report).toMatch(/if \(unusable\) onStoredFailure\?\.\(\);\s*else if \(kind === "attempt"\) onStatusNote\?\.\("unconfirmed"\);\s*else if \(kind === "unavailable" \|\| kind === "unknown" \|\| \(kind === "refused" && \(httpStatus === 404 \|\| httpStatus === 409\)\)\) onStatusNote\?\.\("last_known"\);/);
+    expect(report).toMatch(/setError\(NETWORK_FAILURE_COPY\);\s*onStatusNote\?\.\("last_known"\);/);
+    expect(report).toMatch(/const completed = completedAnalysis\(\(res as \{ data\?: unknown \}\)\.data, analysisId\);/);
+    expect(report).toMatch(/if \(d\.id !== analysisId \|\| d\.status !== "complete"\) return null;/);
+    expect(report).toContain("onComplete(completed);");
+    expect(report).not.toMatch(/onComplete\(res\.data|onFailed|setFailedNow/);
   });
 
-  it("the pill shows failed while the failure is displayed", () => {
-    expect(report).toContain('{isStalled ? "interrupted" : failedNow ? "failed" : analysis.status}');
+  it("the pill shows failed only for a stored failure and labels a status it cannot confirm as last known", () => {
+    // P2: with a durable attempt state the pill names it (Queued, Analyzing, ...); without one, the saved status as before
+    expect(report).toContain('{isStalled ? "interrupted" : storedFailedNow ? "failed" : statusNote === "unconfirmed" ? "unconfirmed" : jobLabel ?? analysis.status}');
+    expect(report).toContain('const LAST_KNOWN_LABEL = "Last known status";');
+    expect(report).toContain('const lastKnown = statusNote === "last_known" && !storedFailedNow && !isStalled;');
+    expect(report).toContain('{lastKnown ? LAST_KNOWN_LABEL : "Status"}');
   });
 });
 
@@ -119,7 +133,7 @@ describe("video file checks and upload recovery copy", () => {
   });
 
   it("refuses a final clip the analysis cannot read, before anything is uploaded", () => {
-    const run = page.slice(page.indexOf("const blob = await getTrimmedBlob();"), page.indexOf(".from(BUCKET).upload("));
+    const run = page.slice(page.indexOf("const blob = intent.blob ?? await getTrimmedBlob();"), page.indexOf(".from(BUCKET).upload("));
     expect(run).toContain("if (blob.size < MIN_VIDEO_BYTES) throw new Error(EMPTY_VIDEO_MESSAGE);");
     expect(run).toContain("if (blob.size > MAX_ANALYSIS_VIDEO_BYTES) throw new Error(CLIP_TOO_LARGE_MESSAGE);");
   });
@@ -153,18 +167,29 @@ describe("a revisited failed analysis shows why, without requesting another anal
   });
 
   it("the report's stored failed view shows the upload-again guidance with no Retry, and keeps Retry otherwise", () => {
-    const unusable = report.slice(report.indexOf("{isFailed && !showProcessing && failedReason === VIDEO_UNUSABLE_STATUS && ("), report.indexOf("{isFailed && !showProcessing && failedReason !== VIDEO_UNUSABLE_STATUS && ("));
+    // AG-WEB-READY-09-P1: any other stored failure is now shown by the report's status panel (its explicit, guarded
+    // "Retry analysis" action), so the two views are read from their own places; the assertions are unchanged.
+    const start = report.indexOf("{isFailed && !showProcessing && failedReason === VIDEO_UNUSABLE_STATUS && (");
+    const unusable = report.slice(start, report.indexOf("{isComplete && !showProcessing && <CoachingReport", start));
+    expect(start).toBeGreaterThan(0);
     expect(unusable).toContain("{VIDEO_UNUSABLE_COPY}");
     expect(unusable).toContain("Upload a new video");
     expect(unusable).not.toContain("Retry");
     expect(unusable).not.toContain("onClick");
-    const other = report.slice(report.indexOf("{isFailed && !showProcessing && failedReason !== VIDEO_UNUSABLE_STATUS && ("));
+    // P2: an analysis with a durable attempt is shown by its attempt (failed attempts keep their own guidance)
+    // A1: an unreadable attempt state is shown as such (the status panel), not as the stored failure's guidance
+    expect(report).toContain("const showProcessing = !isComplete && (statusUnavailable || !(isFailed && failedReason === VIDEO_UNUSABLE_STATUS && !job?.attempt));");
+    const other = report.slice(report.indexOf('if (storedStatus === "failed") {'));
+    expect(report.indexOf('if (storedStatus === "failed") {')).toBeGreaterThan(0);
     expect(other.slice(0, 1400)).toContain("Retry");
   });
 
   it("the swings page names the reason or offers a way forward for every failed row", () => {
-    expect(swingsPage).toContain('{swing.status === "failed" && failedReason === VIDEO_UNUSABLE_STATUS && (');
-    expect(swingsPage).toContain('{swing.status === "failed" && failedReason !== VIDEO_UNUSABLE_STATUS && (');
+    // P2: the failed view follows the durable attempt when one exists (and the stored status otherwise)
+    expect(swingsPage).toContain("{isUnusableView && (");
+    expect(swingsPage).toContain('const isUnusableView = isFailedView && (failedReason === VIDEO_UNUSABLE_STATUS || job?.attempt?.failureKind === "video_unusable");');
+    expect(swingsPage).toContain('{isFailedView && !isUnusableView && !hasRetryableAttempt && (');
+    expect(swingsPage).toContain('This analysis didn&apos;t finish. You can retry it from its report.'); // P2: a failed attempt's way forward
     // Family-neutral, like the stalled banner beside it.
     expect(swingsPage).toContain("This analysis didn&apos;t finish. Recording the swing again starts a new analysis.");
   });

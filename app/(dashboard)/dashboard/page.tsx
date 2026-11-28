@@ -13,6 +13,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import type { SwingAnalysis } from "@/types/database";
 import { getHistoricalEquipmentDisplayName } from "@/lib/equipment/historical-equipment-display-name";
+import { golferStatusLabel, readGolferJobStates } from "@/lib/analysis-attempt-precedence";
 import { Target, TrendingUp, Trophy, Calendar, ChevronRight, Zap, Filter, Activity } from "lucide-react";
 
 /**
@@ -111,6 +112,12 @@ export default async function DashboardPage() {
     );
   }
   const swings = recent.rows;
+  // AG-WEB-READY-10-P2. Golfer-facing attempt states for the listed swings, on the golfer's own session. A1: a swing
+  // whose state could not be read shows "Status unavailable" (a stored completed swing stays Complete), never the
+  // stored "pending" as "Not analyzed yet".
+  const jobStates = await readGolferJobStates(supabase, (swings ?? []).map((s) => s.id));
+  const jobLabel = (swing: SwingAnalysis): string =>
+    golferStatusLabel(swing.status ?? "pending", jobStates.get(String(swing.id))).label;
 
   const totalSwings = swings?.length ?? 0;
 
@@ -187,7 +194,7 @@ export default async function DashboardPage() {
             <Zap size={12} className="text-golf-green" />
             Recent Telemetry Logs
           </h3>
-          <button className="text-[9px] font-bold text-gray-600 hover:text-white transition-colors flex items-center gap-2 uppercase tracking-widest">
+          <button type="button" className="inline-flex items-center justify-center gap-2 min-h-11 min-w-11 px-3 -mr-3 rounded-xl text-[9px] font-bold text-gray-600 hover:text-white transition-colors uppercase tracking-widest">
             <Filter size={12} />
             Filter
           </button>
@@ -199,7 +206,7 @@ export default async function DashboardPage() {
             <p>Telemetry Array Empty</p>
             <Link
               href="/analyze"
-              className="px-5 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all"
+              className="inline-flex items-center justify-center min-h-11 px-5 py-2.5 bg-golf-green text-golf-dark font-black uppercase tracking-widest rounded-xl text-[9px] hover:bg-[#22C55E] transition-all"
             >
               Upload First Swing
             </Link>
@@ -233,7 +240,7 @@ export default async function DashboardPage() {
                     <div className="shrink-0 text-right">
                       <p className="text-[9px] font-black uppercase tracking-widest text-gray-600 mb-1.5">Status</p>
                       <span className="inline-block px-3 py-1 bg-white/5 text-gray-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-white/5">
-                        {swing.status ?? "pending"}
+                        {jobLabel(swing) ?? swing.status ?? "pending"}
                       </span>
                     </div>
                   </div>
@@ -309,7 +316,7 @@ export default async function DashboardPage() {
                     </td>
                     <td className="px-8 py-5">
                       <span className="px-3 py-1 bg-white/5 text-gray-600 rounded-full text-[9px] font-black uppercase tracking-widest border border-white/5">
-                        {swing.status ?? "pending"}
+                        {jobLabel(swing) ?? swing.status ?? "pending"}
                       </span>
                     </td>
                     <td className="px-8 py-5 text-right">
@@ -349,7 +356,7 @@ function ProgressHubHeader() {
         </div>
         <Link
           href="/analyze"
-          className="px-6 py-3 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_20px_rgba(74,222,128,0.15)] text-[10px] uppercase tracking-widest"
+          className="min-h-11 px-6 py-3 bg-golf-green text-golf-dark rounded-2xl font-black flex items-center gap-2 hover:bg-[#22C55E] transition-all shadow-[0_0_20px_rgba(74,222,128,0.15)] text-[10px] uppercase tracking-widest"
         >
           <Target size={14} />
           Analyze Swing

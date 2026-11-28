@@ -1,11 +1,12 @@
 import type { NextRequest } from "next/server";
-import { refreshSession } from "@/utils/supabase/session-refresh";
+import { resumeExpiringSession } from "@/utils/supabase/session-resume";
 
-// Protected pages only. The middleware refreshes an expiring session cookie
-// and forwards it to the same request; it is not an authentication gate.
-// Identity stays with the shared verifier in utils/supabase/server.ts.
+// Protected pages only. The middleware never refreshes or writes a session: a
+// page navigation whose session cookie is due to expire goes by /auth/resume,
+// where the browser's own client refreshes it; it is not an authentication
+// gate. Identity stays with the shared verifier in utils/supabase/server.ts.
 export function middleware(request: NextRequest) {
-  return refreshSession(request);
+  return resumeExpiringSession(request);
 }
 
 export const config = {
